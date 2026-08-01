@@ -7,7 +7,7 @@ declare const CURRENT_VERSION: string;
 
 const PACKAGE_NAME = "pai-acp";
 const REGISTRY_URL = `https://registry.npmjs.org/${PACKAGE_NAME}/latest`;
-const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const CHECK_INTERVAL_MS = 3 * 60 * 1000;
 const THROTTLE_FILE = `${process.env.HOME ?? ""}/.pi/agent/.pai-acp-update-check`;
 
 function parseVersion(v: string): number[] {
