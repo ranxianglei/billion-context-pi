@@ -89,5 +89,14 @@ async function handleStatus(args: StatusArgs, runtime: AcpRuntime, ctx: Extensio
       extra.push(`  ${r.startRef}\u2013${r.endRef}  (${r.count} msgs, ${fmtTokens(r.tokens)}${tools})`);
     }
   }
+  const protectedRanges = nudge?.protectedRanges ?? [];
+  if (protectedRanges.length > 0) {
+    extra.push("");
+    extra.push(`Protected Ranges (${protectedRanges.length}, do not compress):`);
+    for (const r of protectedRanges) {
+      const tools = r.tools.length > 0 ? ` [${r.tools.join(", ")}]` : "";
+      extra.push(`  ${r.startRef}\u2013${r.endRef}  (${r.count} msgs, ${fmtTokens(r.tokens)}${tools})`);
+    }
+  }
   return extra.length > 0 ? `${base}\n${extra.join("\n")}` : base;
 }
