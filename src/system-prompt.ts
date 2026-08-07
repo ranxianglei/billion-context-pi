@@ -49,6 +49,10 @@ WHEN NOT TO COMPRESS
 
 ${HOW_TO_COMPRESS_RULES}
 
+SUMMARY META-MEMORY RULE (adapter addendum — narrow exception to DROP)
+
+- When the range actually compressed into a block contains a decompress tool call, the summary MUST contain the literal \`decompress(<original args>)\` (blockId or message UUID, listed per call). decompress is a memory-meta operation — losing it erases the model's own operation history.
+
 MULTI-TIER COMPRESSION
 
 Summaries accumulate as the session grows. When tier-1 summaries pile up, the system injects a nudge prompting you to DISTILL old blocks into a single tier-2 summary. If tier-2 summaries also accumulate, a further nudge asks you to CONDENSE them into tier-3.
@@ -58,6 +62,10 @@ To compress blocks: use block IDs as boundaries: compress({ content: [{ startId:
 ${TIER2_DISTILL_RULES}
 
 ${TIER3_CONDENSE_RULES}
+
+META-MEMORY EXCEPTION (adapter addendum — overrides DROP for this one item)
+
+[Exception] decompress operations recorded in block summaries ("[auto] decompress ops: ..." lines) MUST be preserved when distilling or condensing — they are the model's operation-history meta-memory and DROP's "process details" does not apply to them.
 
 THE PHILOSOPHY OF DECOMPRESS
 

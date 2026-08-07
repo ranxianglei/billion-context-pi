@@ -74,12 +74,34 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
     state,
     config,
   });
+  const { blocksCreated, tokensCompressed, errors, warnings } = applied.result;
+  const newBlocks = applied.state.blocks.slice(-blocksCreated);
+  const msgById = new Map(coreMessages.map((m) => [m.id, m]));
+  for (const block of newBlocks) {
+    const ops: string[] = [];
+    const seen = new Set<string>();
+    for (const id of block.directMessageIds) {
+      const msg = msgById.get(id);
+      if (msg && msg.toolName === "decompress" && msg.toolCallId && !seen.has(msg.toolCallId)) {
+        seen.add(msg.toolCallId);
+        ops.push(`decompress(${msg.text ?? ""})`);
+      }
+    }
+    for (const bid of block.directBlockIds) {
+      const consumed = applied.state.blocks.find((b) => b.blockId === bid);
+      if (!consumed) continue;
+      for (const line of consumed.summary.split("\n")) {
+        const arg = line.match(/^\[auto\] decompress ops: (.+)$/)?.[1];
+        if (arg) ops.push(arg);
+      }
+    }
+    if (ops.length > 0 && !block.summary.includes("decompress(")) {
+      block.summary += `\n[auto] decompress ops: ${ops.join(", ")}`;
+    }
+  }
   await runtime.save(applied.state, ctx);
-  const { blocksCreated, tokensCompressed, errors } = applied.result;
 
   const afterTokens = Math.max(0, beforeTokens - tokensCompressed);
-
-  const newBlocks = applied.state.blocks.slice(-blocksCreated);
   debug.event("compress-out", {
     sid: ctx.sessionManager.getSessionId(),
     blocksCreated,
@@ -95,6 +117,7 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
   });
 
   const lines = [`▣ ACP | ${formatK(beforeTokens)} → ${formatK(afterTokens)} tokens (~${formatK(tokensCompressed)} reclaimed, ${blocksCreated} block${blocksCreated > 1 ? "s" : ""})`];
+  if (warnings.length > 0) lines.push("⚠️ " + warnings.join("; "));
   if (errors.length > 0) lines.push("Errors: " + errors.join("; "));
   return lines.join("\n");
 }
