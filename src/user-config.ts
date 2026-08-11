@@ -45,12 +45,23 @@ function join(... parts: string[]): string {
   return path.join(...parts);
 }
 
-const KNOWN = new Set(["debug", "autoUpdate", "modelContextLimit", "delegate", "toolBashDefaultTimeout", "toolOutputMaxBytes"]);
+const KNOWN: Record<string, "boolean" | "number"> = {
+  debug: "boolean",
+  autoUpdate: "boolean",
+  modelContextLimit: "number",
+  delegate: "boolean",
+  toolBashDefaultTimeout: "number",
+  toolOutputMaxBytes: "number",
+};
 
 function pickKnown(parsed: Record<string, unknown>): UserAcpConfig {
   const out: UserAcpConfig = {};
   for (const [k, v] of Object.entries(parsed)) {
-    if (KNOWN.has(k)) (out as Record<string, unknown>)[k] = v;
+    // Type-check known keys: {"debug": "false"} is a string and must not
+    // truthily enable debug, and a string modelContextLimit would leak into
+    // the kernel's Config untouched.
+    const t = KNOWN[k];
+    if (t && typeof v === t) (out as Record<string, unknown>)[k] = v;
   }
   return out;
 }

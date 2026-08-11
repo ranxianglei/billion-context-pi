@@ -14,11 +14,13 @@ import { makeSearchTool } from "./search-tool.js";
 import { makeStatusTool } from "./status-tool.js";
 import { makeDelegateTool, makeDelegateWaitTool, makeDelegateCancelTool, runningRunsSnapshot } from "./delegate-tool.js";
 import { makeCommands } from "./commands.js";
+import { autoCompress, totalCompressibleChars } from "./auto-compress.js";
 import { coreOutToAgentMessages } from "./messages.js";
 import { ACP_SYSTEM_PROMPT, ACP_DELEGATE_PROMPT } from "./system-prompt.js";
 import { delegateStatusWidget } from "./fleet-widget.js";
 import { wireToolGuardrails } from "./tool-guardrails.js";
 import { debug, setDebugEnabled, logError, logInfo, logWarn, logThrow, closeLogStream } from "./log.js";
+import { pruneStaleRefs } from "./state.js";
 import { collectCoveredMessageIds, estimateTokens, lastUserMessageId } from "./tokens.js";
 import { checkForUpdate } from "./update.js";
 import { runSetupAndNotify } from "./setup-subagent-tools.js";
@@ -99,6 +101,8 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
 // The core integration: Pi's `context` event fires before every LLM call with the
 // messages about to be sent. We run acp-kernel's processTurn (prune + ref-tag +
 // nudge decision) and return the transformed AgentMessage[].
+const AUTO_COMPRESS_COOLDOWN_MS = 30_000;
+const lastAutoCompressAt = new Map<string, number>();
 function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
   pi.on("context", async (event, ctx) => {
     const sid = ctx.sessionManager.getSessionId();
@@ -131,6 +135,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       });
 
       const turn = runtime.core.processTurn({ messages: coreMessages, state, config, tokenCount });
+      pruneStaleRefs(turn.state, coreMessages.map((m) => m.id));
       await runtime.save(turn.state, ctx);
 
       logInfo("turn", {
@@ -184,18 +189,60 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       const turnKey = lastUserMessageId(entries) ?? sid;
       const alreadyShown = !emergency && runtime.nudgeShownFor(turnKey);
       if (!alreadyShown) {
-        rebuilt.push(nudgeMessage(turn.nudge, turn.state.blocks.filter((b) => b.active)));
-        const rendered = renderNudgeText(turn.nudge);
-        const top = [...turn.nudge.compressibleRanges].sort((a, b) => b.tokens - a.tokens)[0];
-        const example = top ? `\n\nExample: compress({ content: [{ startId: "${top.startRef}", endId: "${top.endRef}", summary: "..." }] })` : "";
-        if (emergency) {
-          logWarn("nudge", { sid: ctx.sessionManager.getSessionId(), event: "emergency-inject", pct: Math.round(turn.nudge.contextUsage * 100), voice: rendered.voice, compressible: turn.nudge.compressibleRanges.length });
+        // Emergency nudges fire on every context event (streaming/tool loop) —
+        // throttle the blocking compression-model call so one reply is not
+        // stalled repeatedly while usage stays above 80%.
+        const lastAuto = lastAutoCompressAt.get(sid) ?? 0;
+        const throttled = Date.now() - lastAuto < AUTO_COMPRESS_COOLDOWN_MS;
+        // With a compression model configured (/acp-config), intercept the nudge:
+        // have that model compress the largest safe range directly instead of
+        // asking the main model to spend its tokens. Falls back to injection.
+        const autoResult = throttled
+          ? { applied: false, fatal: false, error: "throttled" }
+          : await autoCompress(ctx, runtime, { messages: turn.messages, state: turn.state, nudge: turn.nudge }, config);
+        if (autoResult.applied) {
+          lastAutoCompressAt.set(sid, Date.now());
+          runtime.markNudgeShown(turnKey);
+          debug.event("nudge-auto-compressed", { sid: ctx.sessionManager.getSessionId(), turnKey, pct: Math.round(turn.nudge.contextUsage * 100) });
+        } else if (autoResult.fatal) {
+          // Config error (model not found, auth missing) — stop nudge attempts to avoid infinite loop
+          const wasShown = runtime.nudgeShownFor(turnKey);
+          runtime.markNudgeShown(turnKey);
+          if (!wasShown) {
+            logWarn("nudge", { sid: ctx.sessionManager.getSessionId(), event: "auto-compress-fatal", error: autoResult.error, turnKey });
+          }
+          if (!wasShown && debugOn && ctx.hasUI) {
+            ctx.ui.notify(`[ACP auto-compress disabled] ${autoResult.error}\nRun /acp-config to fix compression model configuration.`);
+          }
+          debug.event("nudge-fatal", { sid: ctx.sessionManager.getSessionId(), voice: "fatal", channels: ["context", debugOn ? "terminal" : null].filter(Boolean), turnKey, error: autoResult.error });
+        } else {
+          const minChars = config.compress?.minCompressRange ?? 5000;
+          const compressibleChars = totalCompressibleChars(turn.nudge.compressibleRanges, turn.messages, turn.state);
+          if (compressibleChars < minChars) {
+            // Nothing can pass the kernel's minCompressRange check — injecting
+            // the nudge would just make the model attempt impossible compressions
+            // (and emergency nudges repeat every turn). Skip it.
+            const wasShown = runtime.nudgeShownFor(turnKey);
+            runtime.markNudgeShown(turnKey);
+            if (!wasShown) {
+              logInfo("nudge", { sid, event: "nudge-skipped", reason: turn.nudge.reason, compressibleChars, minChars });
+            }
+            debug.event("nudge-skipped", { sid, turnKey, emergency, compressibleChars, minChars, reason: turn.nudge.reason });
+          } else {
+            rebuilt.push(nudgeMessage(turn.nudge, turn.state.blocks.filter((b) => b.active), minChars));
+            const rendered = renderNudgeText(turn.nudge);
+            const top = [...turn.nudge.compressibleRanges].filter((r) => !r.dangerous).sort((a, b) => b.tokens - a.tokens)[0];
+            const example = top ? `\n\nExample: compress({ content: [{ startId: "${top.startRef}", endId: "${top.endRef}", summary: "..." }] })` : "";
+            if (emergency) {
+              logWarn("nudge", { sid: ctx.sessionManager.getSessionId(), event: "emergency-inject", pct: Math.round(turn.nudge.contextUsage * 100), voice: rendered.voice, compressible: turn.nudge.compressibleRanges.length });
+            }
+            if (debugOn && ctx.hasUI) {
+              ctx.ui.notify(`[ACP nudge → context]${emergency ? " [EMERGENCY]" : ""}\n${rendered.text}${example}`);
+            }
+            if (!emergency) runtime.markNudgeShown(turnKey);
+            debug.event("nudge-injected", { sid: ctx.sessionManager.getSessionId(), voice: rendered.voice, channels: ["context", debugOn ? "terminal" : null].filter(Boolean), emergency, turnKey, text: rendered.text + example });
+          }
         }
-        if (debugOn && ctx.hasUI) {
-          ctx.ui.notify(`[ACP nudge → context]${emergency ? " [EMERGENCY]" : ""}\n${rendered.text}${example}`);
-        }
-        if (!emergency) runtime.markNudgeShown(turnKey);
-        debug.event("nudge-injected", { sid: ctx.sessionManager.getSessionId(), voice: rendered.voice, channels: ["context", debugOn ? "terminal" : null].filter(Boolean), emergency, turnKey, text: rendered.text + example });
       } else {
         debug.event("nudge-suppressed", { sid: ctx.sessionManager.getSessionId(), turnKey, reason: turn.nudge.reason });
       }
@@ -247,7 +294,7 @@ function collectOriginals(entries: Array<{ type: string; id: string; message?: A
   return map;
 }
 
-function nudgeMessage(nudge: NudgeDecision, blocks: CompressionBlock[]): AgentMessage {
+function nudgeMessage(nudge: NudgeDecision, blocks: CompressionBlock[], minCompressChars: number): AgentMessage {
   const rendered = renderNudgeText(nudge);
   const lines = [rendered.text];
 
@@ -265,6 +312,11 @@ function nudgeMessage(nudge: NudgeDecision, blocks: CompressionBlock[]): AgentMe
     const extra = blocks.length > 10 ? ` (+${blocks.length - 10} more)` : "";
     lines.push("");
     lines.push(`Compressed blocks: ${blocks.length} active (${tierStr}) — ${fmt(totalSummary)} summary, ${fmt(totalCompressed)} original compressed. Blocks: ${ids}${extra}.`);
+  }
+
+  if (!(nudge.tier !== null && nudge.tier >= 2)) {
+    lines.push("");
+    lines.push(`Compression requires at least ${minCompressChars} chars of message text per range (kernel-enforced). The ranges above are hints — if one is too small, combine adjacent ranges into a single call: startId of the first, endId of the last.`);
   }
 
   return {

@@ -40,7 +40,10 @@ function writeLine(level: string, scope: string, fields: Record<string, unknown>
   const file = resolveLogFile();
   try {
     if (existsSync(file) && statSync(file).size >= MAX_BYTES) {
-      renameSync(file, file + ".old");
+      const old = file + ".old";
+      // Keep the previous generation instead of silently overwriting it.
+      if (existsSync(old)) renameSync(old, `${old}.${Date.now()}`);
+      renameSync(file, old);
     }
   } catch {
   }
@@ -92,14 +95,5 @@ export const debug = {
   },
   event(scope: string, fields: Record<string, unknown>): void {
     if (debugOn()) writeLine("debug", scope, fields);
-  },
-};
-
-export const logger = {
-  error: logError,
-  warn: logWarn,
-  info: logInfo,
-  debug(scope: string, fields: Record<string, unknown>): void {
-    debug.event(scope, fields);
   },
 };

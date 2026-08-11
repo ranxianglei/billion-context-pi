@@ -60,6 +60,8 @@ assign refs → sync blocks → prune → filter → hide calls → recommend �
 
 Each message gets an invisible `<acp>` ref tag (`m00001`, `m00002`, ...) visible to the model but not the user. The model uses these refs to specify compression ranges.
 
+When a nudge fires and a `compressModel` is configured (see Configuration), the nudge is **intercepted**: the compression model compresses the largest safe range automatically, so the main model keeps its tokens. If nothing can be compressed (total compressible content under the kernel's 5000-char minimum, or the compression model is unavailable), the nudge is injected as text instead — and skipped entirely when the content is too small to ever succeed.
+
 Pi's built-in auto-compaction is cancelled — billion-context is the sole context manager.
 
 ## Plugin compatibility & ordering
@@ -135,7 +137,7 @@ Blocks: 3 active (3.7K summary, 15.2K original compressed)
 
 ## Configuration
 
-billion-context-pi works out of the box with no configuration. Three optional keys can be set in a JSON config file.
+billion-context-pi works out of the box with no configuration. Seven optional keys can be set in a JSON config file.
 
 ### Config file
 
@@ -147,6 +149,7 @@ Create `~/.pi/acp.json` (global) and/or `<project>/.pi/acp.json` (project-local,
   "autoUpdate": true,
   "modelContextLimit": 200000,
   "delegate": true,
+  "compressModel": "provider:model-id",
   "toolBashDefaultTimeout": 60,
   "toolOutputMaxBytes": 200000
 }
@@ -155,13 +158,14 @@ Create `~/.pi/acp.json` (global) and/or `<project>/.pi/acp.json` (project-local,
 | Key | Default | Description |
 |-----|---------|-------------|
 | `debug` | `false` | Enable verbose **debug-level** events in the log. The always-on log (lifecycle events, errors, warnings) is written regardless; `debug` only adds extra diagnostics. Also enabled by env `ACP_DEBUG=1`. |
-| `autoUpdate` | `true` | On Pi startup, check npm for a newer version and auto-install it (throttled to one check per 3 minutes). Disable to avoid all startup network calls. |
+| `autoUpdate` | `true` | On Pi startup, check npm for a newer version and auto-install it (throttled to one check per 6 hours). Disable to avoid all startup network calls. |
 | `modelContextLimit` | *(auto)* | Override the context limit (in tokens). Defaults to the model's `contextWindow`. |
 | `delegate` | `true` | Enable the `acp_delegate` tools (delegate/wait/cancel) and their system-prompt section. Set `false` to skip registering them (e.g. you use a different sub-agent extension, or run headless where async injection adds no value). |
+| `compressModel` | *(off)* | A dedicated model for automatic compression (`provider:model-id`, e.g. `alibaba-coding:qwen3.7-plus`). When set, a nudge is intercepted: this model compresses the largest safe range directly, so the main model never spends tokens on compression. When compression fails or no range can meet the 5000-char minimum, the nudge is injected as usual. Set via `/acp-settings` or by editing the file. |
 | `toolBashDefaultTimeout` | `60` | Seconds injected into the `bash` tool when the model omits `timeout`. Pi has **no** default of its own, so without this a forgotten timeout can hang for thousands of seconds. On timeout the model is guided to re-run with a larger `timeout`. `0` restores Pi's unbounded behavior. |
 | `toolOutputMaxBytes` | `200000` | Hard byte cap on tool result text (~5000 lines at ~40 B/line; applied via the `tool_result` hook). Stops runaway output that Pi's own 50KB/2000-line cap can't catch (e.g. tools Pi doesn't cap). When it fires the model is told how to see the full output — for `bash` the full output is in its temp file (`BashToolDetails.fullOutputPath`); set lower (e.g. `8192`) for a tighter context budget, or `0` to disable. |
 
-> **Only these six keys are read from `acp.json`.** Other tuning knobs (`preserveRecentMessages`, `protectedTools`, nudge thresholds) are code-level and not user-overridable.
+> **Only these seven keys are read from `acp.json`.** Other tuning knobs (`preserveRecentMessages`, `protectedTools`, nudge thresholds) are code-level and not user-overridable.
 
 ### Environment variables
 
@@ -179,7 +183,7 @@ billion-context-pi writes a structured, always-on log to `~/.pi/acp.log` (overri
 - **Always written** (even with `debug: false`): `error`, `warn`, `info` levels — session start, every context turn (token usage / nudge decision), compress/decompress, delegate spawn/done, and **all errors and warnings** (config/state/tool failures, delegate errors, guardrail caps, update failures). Error lines include the message and stack trace.
 - **Written only when `debug: true`**: verbose `debug`-level diagnostics (full field dumps, per-turn internals).
 
-Each line: `<ISO timestamp> [<level>] [<scope>] key=value key=value`. The file rotates to `~/.pi/acp.log.old` at 10 MB.
+Each line: `<ISO timestamp> [<level>] [<scope>] key=value key=value`. The file rotates to `~/.pi/acp.log.old` at 10 MB (a previous `.old` is archived with a timestamp rather than overwritten).
 
 ```sh
 tail -f ~/.pi/acp.log                 # watch the session live

@@ -11,7 +11,9 @@ declare const CURRENT_VERSION: string;
 const PACKAGE_NAME = "billion-context-pi";
 const REGISTRY_URL = `https://registry.npmjs.org/${PACKAGE_NAME}/latest`;
 const SEMVER_RE = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z-.]+)?$/;
-const CHECK_INTERVAL_MS = 3 * 60 * 1000;
+// Spec (AGENTS.md §2.5): npm registry check throttled to 6h. The context event
+// fires on every LLM call, so the throttle is what makes this cheap.
+const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const THROTTLE_FILE = join(homedir(), CONFIG_DIR_NAME, "agent", ".billion-context-pi-update-check");
 
 // Guards against concurrent checks: the context event fires on every LLM call,
@@ -22,14 +24,17 @@ function parseVersion(v: string): number[] {
   return v.replace(/^v/, "").split(".").map((n) => parseInt(n, 10) || 0);
 }
 
-function isNewer(latest: string, current: string): boolean {
+export function isNewer(latest: string, current: string): boolean {
   const l = parseVersion(latest);
   const c = parseVersion(current);
   for (let i = 0; i < 3; i++) {
     if ((l[i] ?? 0) > (c[i] ?? 0)) return true;
     if ((l[i] ?? 0) < (c[i] ?? 0)) return false;
   }
-  return false;
+  // Same x.y.z: a release beats a prerelease; a prerelease is never "newer".
+  const lPre = /^\d+\.\d+\.\d+-/.test(latest.replace(/^v/, ""));
+  const cPre = /^\d+\.\d+\.\d+-/.test(current.replace(/^v/, ""));
+  return !lPre && cPre;
 }
 
 async function readLastCheck(): Promise<number> {

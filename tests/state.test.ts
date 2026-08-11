@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
-import { SessionStateStore } from "../src/state.js";
-import { createInitialState } from "acp-kernel";
+import { SessionStateStore, pruneStaleRefs } from "../src/state.js";
+import { createInitialState, assignRefs, highestUsedIndex } from "acp-kernel";
 
 function tempDir(): Promise<string> {
   return mkdtemp(path.join(tmpdir(), "acp-state-"));
@@ -66,6 +66,37 @@ test("load merges forward-compat: missing fields filled from fresh state", async
   assert.equal(state.nudge.lastPerMessageNudgeTokens, 0, "nudge backfilled");
   assert.ok(state.messageRefs.byRaw, "messageRefs backfilled");
   await rm(dir, { recursive: true, force: true });
+});
+
+test("pruneStaleRefs drops dead mappings but keeps block-referenced refs", () => {
+  const state = createInitialState();
+  state.messageRefs.byRaw = {
+    alive: "m00001",
+    dead: "m00002",
+    inBlock: "m00003",
+  };
+  state.messageRefs.byRef = { m00001: "alive", m00002: "dead", m00003: "inBlock" };
+  state.blocks = [{ blockId: "b0", effectiveMessageIds: ["inBlock"] }] as CompressionState["blocks"];
+  const nextRefBefore = state.messageRefs.nextRef;
+
+  pruneStaleRefs(state, ["alive"]);
+
+  assert.deepEqual(state.messageRefs.byRaw, { alive: "m00001", inBlock: "m00003" });
+  assert.deepEqual(state.messageRefs.byRef, { m00001: "alive", m00003: "inBlock" });
+  assert.equal(state.messageRefs.nextRef, nextRefBefore, "ref numbering stays monotonic");
+});
+
+test("pruneStaleRefs keeps the highest ref so new refs stay monotonic", () => {
+  const state = createInitialState();
+  state.messageRefs.byRaw = { alive: "m00001", staleMid: "m00005", staleHigh: "m00009" };
+  state.messageRefs.byRef = { m00001: "alive", m00005: "staleMid", m00009: "staleHigh" };
+  pruneStaleRefs(state, ["alive"]);
+  assert.deepEqual(state.messageRefs.byRaw, { alive: "m00001", staleHigh: "m00009" });
+  const result = assignRefs([{ id: "fresh", role: "user", contentType: "text" }], {
+    existing: state.messageRefs,
+    nextIndex: highestUsedIndex(state.messageRefs) + 1,
+  });
+  assert.equal(result.map.byRaw.fresh, "m00010", "new ref never reuses a dropped number");
 });
 
 test("invalidate forces a fresh read after save", async () => {

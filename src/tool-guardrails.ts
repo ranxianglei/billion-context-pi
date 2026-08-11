@@ -34,20 +34,31 @@ export function capToolOutput(
 ): ToolResultEvent["content"] | undefined {
   const max = maxBytes ?? DEFAULT_TOOL_OUTPUT_MAX_BYTES;
   if (!Number.isFinite(max) || max <= 0) return undefined;
-  const kept: ContentPart[] = [];
-  const texts: string[] = [];
+  let combined = "";
   for (const c of content) {
-    if (c.type === "text") texts.push((c as { text: string }).text);
-    else kept.push(c);
+    if (c.type === "text") combined += (combined ? "\n" : "") + (c as { text: string }).text;
   }
-  if (texts.length === 0) return undefined;
-  const combined = texts.join("\n");
+  if (combined === "") return undefined;
   const total = Buffer.byteLength(combined, "utf8");
   if (total <= max) return undefined;
   const head = keepHead(combined, max);
   const dropped = total - Buffer.byteLength(head, "utf8");
-  kept.push({ type: "text", text: head + buildCapNotice(dropped, max, fullPath) } as ContentPart);
-  return kept;
+  // Replace the FIRST text block in place with the truncated content and drop
+  // the remaining text blocks — non-text parts keep their original order.
+  const replacement = { type: "text", text: head + buildCapNotice(dropped, max, fullPath) } as ContentPart;
+  const out: ContentPart[] = [];
+  let textPlaced = false;
+  for (const c of content) {
+    if (c.type === "text") {
+      if (!textPlaced) {
+        out.push(replacement);
+        textPlaced = true;
+      }
+    } else {
+      out.push(c);
+    }
+  }
+  return out;
 }
 
 const TIMEOUT_RE = /Command timed out after (\d+) seconds/;

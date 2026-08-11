@@ -121,14 +121,19 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     const prev = locks.get(sid) ?? Promise.resolve();
     let release!: () => void;
     const next = new Promise<void>((resolve) => {
-      release = () => {
-        locks.delete(sid);
-        resolve();
-      };
+      release = resolve;
     });
-    locks.set(sid, prev.then(() => next));
+    const chain = prev.then(() => next);
+    locks.set(sid, chain);
     await prev;
-    return release;
+    return () => {
+      // Only clear the map entry when we are the LATEST chain — otherwise a
+      // queued acquireLock's chain would be dropped and it would run unlocked
+      // concurrently with us (two processTurn/applyCompression + save pairs
+      // racing on the same session).
+      if (locks.get(sid) === chain) locks.delete(sid);
+      release();
+    };
   }
 
   function liveContextLimit(ctx: ExtensionContext): number {

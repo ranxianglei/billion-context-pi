@@ -124,6 +124,17 @@ interface DelegateRun {
 
 const runs = new Map<string, DelegateRun>();
 
+/** Finished runs stay discoverable for acp_delegate_wait / re-injection for a
+ *  while, then drop out so long sessions don't grow the map without bound. */
+const RUN_RETENTION_MS = 30 * 60_000;
+function pruneRuns(now: number = Date.now()): void {
+  for (const [id, r] of runs) {
+    if (r.status !== "running" && r.finishedAt !== undefined && now - r.finishedAt > RUN_RETENTION_MS) {
+      runs.delete(id);
+    }
+  }
+}
+
 /** Snapshot of currently-running delegate runs, for the TUI status widget. */
 export function runningRunsSnapshot(): { runId: string; agent: string; task: string; startedAt: number }[] {
   const out: { runId: string; agent: string; task: string; startedAt: number }[] = [];
@@ -505,7 +516,7 @@ async function runDelegate(
     debug.event("delegate-async-downgraded", { reason: `mode=${ctx.mode}` });
     logInfo("delegate", { event: "async-downgraded", reason: `mode=${ctx.mode}` });
   }
-  const runId = `del_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+  const runId = `del_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
   debug.event("delegate-spawn", { agent: args.agent, runId, cwd, async: isAsync, useJsonStream, cliArgs });
   logInfo("delegate", { event: "spawn", agent: args.agent, runId, cwd, async: isAsync, useJsonStream, mode: ctx.mode, parentDepth });
 
@@ -554,10 +565,19 @@ async function runDelegate(
     await mkdir(OUT_DIR, { recursive: true });
     const replyStream = createWriteStream(replyFile, { flags: "a" });
     const activityStream = useJsonStream ? createWriteStream(activityFile, { flags: "a" }) : null;
+    // Unhandled stream errors (ENOSPC/EACCES/EMFILE) crash the host process.
+    // Listen + log; endStream below also resolves on error so finalize never hangs.
+    for (const s of [replyStream, activityStream].filter((x): x is WriteStream => x !== null)) {
+      s.on("error", (err: Error) => {
+        logError("delegate", { event: "stream-error", runId, file: String(s.path), error: String(err) });
+      });
+    }
     const endStream = (s: WriteStream | null): Promise<void> =>
       new Promise((resolve) => {
         if (!s || s.destroyed || s.closed) return resolve();
-        s.end(() => resolve());
+        const done = (): void => resolve();
+        s.once("error", done);
+        s.end(done);
       });
     let stdoutBuf = "";
     // Streamed reply/activity state lives in the applier so the write logic
@@ -644,19 +664,22 @@ async function runDelegate(
             logInfo("delegate", { event: "done", runId, agent: args.agent, code, status: run.status, injected: false, via: "wait", outLen: output.length, file });
             run.waiter();
             delegateStatusWidget.poke();
+            pruneRuns();
             return;
           }
           if (run.consumed) {
             debug.event("delegate-done", { runId, code, status: run.status, injected: false, via: "consumed", outLen: output.length, file });
             logInfo("delegate", { event: "done", runId, agent: args.agent, code, status: run.status, injected: false, via: "consumed", outLen: output.length, file });
             delegateStatusWidget.poke();
+            pruneRuns();
             return;
           }
-          const injected = injectResult(pi, args.agent, runId, args.task, code, file, run.timedOut);
+          const injected = injectResult(pi, args.agent, runId, args.task, effectiveCode, file, run.timedOut);
           run.injected = injected;
           debug.event("delegate-done", { runId, code, status: run.status, injected, outLen: output.length, file });
           logInfo("delegate", { event: "done", runId, agent: args.agent, code, status: run.status, injected, outLen: output.length, file });
           delegateStatusWidget.poke();
+          pruneRuns();
         } catch (err) {
           run.status = "failed";
           run.finishedAt = Date.now();
@@ -677,8 +700,6 @@ async function runDelegate(
       void cleanupTmp(tmpDir);
       void replyStream.destroy();
       void activityStream?.destroy();
-      void rm(replyFile, { force: true });
-      void rm(activityFile, { force: true });
       // Spawn-level error (e.g. EPIPE on a fast-exiting child, ENOENT).
       // Node does not guarantee a follow-up close, so finalize here too:
       // atomically set status + a synthetic result, and wake a parked waiter.
@@ -689,8 +710,19 @@ async function runDelegate(
         run.result = { code: null, file: "", body: `spawn error: ${String(err)}` };
         debug.event("delegate-spawn-error", { runId, error: String(err) });
         logError("delegate", { event: "spawn-error", runId, agent: args.agent, error: String(err) });
+        // Write the error into the result file so the injected notification
+        // points at something readable, then notify like a normal completion.
+        void (async () => {
+          try {
+            await appendFile(replyFile, `spawn error: ${String(err)}\n`);
+          } catch {
+            // stream may already be destroyed; the header still says failed
+          }
+          injectResult(pi, args.agent, runId, args.task, null, replyFile, "spawn failed");
+        })();
         run.waiter?.();
         delegateStatusWidget.poke();
+        pruneRuns();
       }
     });
     // Detach so the child survives the tool returning. Injection is best-effort:
@@ -786,7 +818,14 @@ function waitForChild(child: ChildProcess, signal: AbortSignal | undefined): Pro
 
     const timer = setTimeout(() => {
       child.kill("SIGTERM");
-      finish({ code: null, stdout: "", stderr: stderrText, timedOut: true });
+      // Keep whatever stdout was already collected — discarding it would
+      // erase minutes of work from the persisted result.
+      finish({
+        code: null,
+        stdout: Buffer.concat(stdoutChunks).toString("utf8").trim(),
+        stderr: stderrText,
+        timedOut: true,
+      });
     }, SYNC_TIMEOUT_MS);
 
     const onAbort = () => {

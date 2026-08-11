@@ -48,10 +48,19 @@ after(async () => {
 
 test("loadUserConfig returns empty object when no config files exist", async () => {
   const cwd = path.join(os.tmpdir(), `acp-test-${Date.now()}`);
+  const tmpHome = path.join(os.tmpdir(), `acp-test-home-${Date.now()}`);
   await fs.mkdir(cwd, { recursive: true });
-  const config = await loadUserConfig(cwd);
-  assert.deepEqual(config, {});
-  await fs.rm(cwd, { recursive: true, force: true });
+  await fs.mkdir(tmpHome, { recursive: true });
+  const savedHome = process.env.HOME;
+  process.env.HOME = tmpHome;
+  try {
+    const config = await loadUserConfig(cwd);
+    assert.deepEqual(config, {});
+  } finally {
+    process.env.HOME = savedHome;
+    await fs.rm(cwd, { recursive: true, force: true });
+    await fs.rm(tmpHome, { recursive: true, force: true });
+  }
 });
 
 test("loadUserConfig reads global config from home directory", async () => {
@@ -122,15 +131,21 @@ test("loadUserConfig ignores unknown keys", async () => {
 
 test("loadUserConfig handles bad JSON gracefully", async () => {
   const tmpDir = path.join(os.tmpdir(), `acp-test-badjson-${Date.now()}`);
+  const tmpHome = path.join(os.tmpdir(), `acp-test-badjson-home-${Date.now()}`);
   await fs.mkdir(tmpDir, { recursive: true });
+  await fs.mkdir(tmpHome, { recursive: true });
   const cfgDir = path.join(tmpDir, CONFIG_DIR_NAME);
   await fs.mkdir(cfgDir, { recursive: true });
   await fs.writeFile(path.join(cfgDir, "acp.json"), "{ bad json }", "utf8");
+  const savedHome = process.env.HOME;
+  process.env.HOME = tmpHome;
   try {
     const config = await loadUserConfig(tmpDir);
     assert.deepEqual(config, {}, "bad JSON returns empty config");
   } finally {
+    process.env.HOME = savedHome;
     await fs.rm(tmpDir, { recursive: true, force: true });
+    await fs.rm(tmpHome, { recursive: true, force: true });
   }
 });
 

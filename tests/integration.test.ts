@@ -47,7 +47,7 @@ test("factory registers the compress tool and 4 flat commands", () => {
   createAcpExtension()(api as any);
 
   assert.ok(api.tools.some((t) => t.name === "compress"), "compress tool registered");
-  assert.deepEqual([...api.commands.keys()].sort(), ["acp", "acp-decompress", "acp-search", "acp-status"]);
+  assert.deepEqual([...api.commands.keys()].sort(), ["acp", "acp-decompress", "acp-search", "acp-settings", "acp-status"]);
   assert.ok(handlers.has("context"), "context event wired");
   assert.ok(handlers.has("session_before_compact"), "compaction-disable wired");
   assert.ok(handlers.has("before_agent_start"), "system-prompt wired");

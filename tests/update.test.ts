@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { checkForUpdate, findNpmRoot } from "../src/update.js";
+import { checkForUpdate, findNpmRoot, isNewer } from "../src/update.js";
 
 // Opt-out must short-circuit BEFORE any network/filesystem touch. We assert this
 // by making global fetch throw if it is ever reached.
@@ -45,4 +45,18 @@ test("findNpmRoot locates the package root when nested under node_modules", () =
 
 test("findNpmRoot terminates when no node_modules ancestor exists (no Windows infinite loop)", { timeout: 2000 }, () => {
   assert.equal(findNpmRoot(homedir()), undefined);
+});
+
+test("isNewer: compares x.y.z numerically", () => {
+  assert.equal(isNewer("1.2.3", "1.2.2"), true);
+  assert.equal(isNewer("1.2.2", "1.2.3"), false);
+  assert.equal(isNewer("2.0.0", "1.9.9"), true);
+  assert.equal(isNewer("1.2.3", "1.2.3"), false);
+});
+
+test("isNewer: prerelease never beats the same release, release beats prerelease", () => {
+  assert.equal(isNewer("1.0.1-rc.1", "1.0.0"), true, "rc still newer than old release");
+  assert.equal(isNewer("1.0.1-rc.1", "1.0.1"), false, "rc must not win over its own release");
+  assert.equal(isNewer("1.0.1", "1.0.1-rc.1"), true, "release beats the rc");
+  assert.equal(isNewer("1.0.0-rc.1", "1.0.0"), false);
 });

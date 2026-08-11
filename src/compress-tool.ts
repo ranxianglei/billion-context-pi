@@ -57,6 +57,17 @@ export function makeCompressTool(runtime: AcpRuntime): ToolDefinition<typeof Com
 async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: ExtensionContext, toolCallId?: string): Promise<string> {
   const ranges = args.content ?? [];
   if (ranges.length === 0) return "No ranges provided.";
+  const sid = ctx.sessionManager.getSessionId();
+  const release = await runtime.acquireLock(sid);
+  try {
+    return await compressLocked(args, runtime, ctx, toolCallId, sid);
+  } finally {
+    release();
+  }
+}
+
+async function compressLocked(args: CompressArgs, runtime: AcpRuntime, ctx: ExtensionContext, toolCallId: string | undefined, sid: string): Promise<string> {
+  const ranges = args.content ?? [];
   const { state, coreMessages } = await runtime.stateFor(ctx);
   const config = runtime.configFor(ctx);
 
@@ -85,7 +96,7 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
 
   const afterTokens = Math.max(0, beforeTokens - tokensCompressed);
 
-  const newBlocks = applied.state.blocks.slice(-blocksCreated);
+  const newBlocks = blocksCreated > 0 ? applied.state.blocks.slice(-blocksCreated) : [];
   debug.event("compress-out", {
     sid: ctx.sessionManager.getSessionId(),
     blocksCreated,

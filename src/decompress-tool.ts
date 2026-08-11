@@ -5,7 +5,8 @@ import { debug, logError, logInfo, logThrow } from "./log.js";
 import { parseBlockIdArg, collectBlockContent } from "acp-kernel";
 import { entriesToCoreMessages } from "./messages.js";
 import { writeFile, mkdir } from "node:fs/promises";
-import { resolve, relative, isAbsolute, join } from "node:path";
+import { existsSync, realpathSync } from "node:fs";
+import { resolve, relative, isAbsolute, join, basename, dirname } from "node:path";
 import { tmpdir, homedir } from "node:os";
 
 /** Directory for auto-generated decompress output files. */
@@ -69,14 +70,33 @@ function resolveToFilePath(targetPath: string): string | { error: string } {
     ? join(homedir(), targetPath.slice(2))
     : targetPath;
   const resolved = resolve(expanded);
-  const isAllowed = ALLOWED_DIRS.some((dir) => {
-    const rel = relative(dir, resolved);
+  // Resolve symlinks in the longest existing ancestor before the containment
+  // check — a symlinked dir inside an allowed root must not escape it.
+  let probe = resolved;
+  const suffix: string[] = [];
+  while (!existsSync(probe) && probe !== dirname(probe)) {
+    suffix.unshift(basename(probe));
+    probe = dirname(probe);
+  }
+  const real = existsSync(probe) ? realpathSync(probe) : probe;
+  const checked = join(real, ...suffix);
+  // Compare against realpath'd roots too: tmpdir() often sits behind a
+  // symlink (/var -> /private/var on macOS) and the string forms diverge.
+  const allowed = ALLOWED_DIRS.map((d) => {
+    try {
+      return realpathSync(d);
+    } catch {
+      return d; // root does not exist yet — keep the literal form
+    }
+  });
+  const isAllowed = allowed.some((dir) => {
+    const rel = relative(dir, checked);
     return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
   });
   if (!isAllowed) {
     return { error: `Error: toFile path must be under ${tmpdir()}, ~/.cache/opencode, or ~/.cache/pi. Got: ${targetPath}` };
   }
-  return resolved;
+  return checked;
 }
 
 /** Generate a unique auto file path for a block. Uses a timestamp so repeated
@@ -154,7 +174,7 @@ async function handleMessageRef(
 
 async function handleDecompress(args: DecompressArgs, runtime: AcpRuntime, ctx: ExtensionContext): Promise<string> {
   const { state, coreMessages } = await runtime.stateFor(ctx);
-  const arg = args.blockId.trim();
+  const arg = (args.blockId ?? "").trim();
 
   // Resolve what `arg` refers to. Check message-ref FIRST (data-driven: a ref
   // exists in some block's effectiveMessageIds). This must precede block-id

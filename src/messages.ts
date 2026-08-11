@@ -61,15 +61,18 @@ function projectMessage(message: AgentMessage, id: string): CoreMessage[] {
         const text = argStr && textParts ? `${textParts}\n${argStr}` : argStr || textParts;
         return [{ id, role: "assistant", contentType: "tool-call", toolName: call.name, toolCallId: call.id, text }];
       }
-      return calls.map((call) => {
+      return calls.map((call, i) => {
         const argStr = stringifyArgs(call.arguments);
+        // First split carries the assistant's explanatory text (like the
+        // single-call branch); the rest carry only their arguments.
+        const text = i === 0 && argStr && textParts ? `${textParts}\n${argStr}` : argStr || textParts;
         return {
           id: `${id}#${call.id}`,
           role: "assistant" as const,
           contentType: "tool-call" as const,
           toolName: call.name,
           toolCallId: call.id,
-          text: argStr || textParts,
+          text,
         };
       });
     }
@@ -139,7 +142,18 @@ export function coreOutToAgentMessages(
   const emittedSplit = new Set<string>();
 
   for (const core of coreOut) {
-    if (core.id.startsWith("acp_summary_")) continue;
+    if (core.id.startsWith("acp_summary_")) {
+      // Kernel replaced compressed messages with a system-role summary. Pi's
+      // convertToLlm drops unknown roles (system is not one of them), so
+      // surface it as a user message — otherwise compression silently deletes
+      // the knowledge from the model's view.
+      out.push({
+        role: "user",
+        content: [{ type: "text", text: core.text ?? "" }],
+        timestamp: Date.now(),
+      } as AgentMessage);
+      continue;
+    }
 
     const hashIdx = core.id.indexOf("#");
     if (hashIdx < 0) {
@@ -178,11 +192,7 @@ function reconstructToolCallMessage(
   const tag = match ? match[0] : null;
 
   if (base.role === "assistant" || !tag) {
-    const rawBlocks2: unknown[] = Array.isArray(base.content)
-      ? base.content
-      : typeof base.content === "string"
-        ? [{ type: "text", text: base.content }]
-        : [];
+    const rawBlocks2 = asBlocks(base.content);
     const filtered2 = rawBlocks2.filter((block) => {
       const b = block as { type?: string; id?: string };
       if (b.type === "toolCall") return survivingCallIds.has(b.id ?? "");
@@ -192,11 +202,7 @@ function reconstructToolCallMessage(
     return { ...(original as object), content: peeled2 } as AgentMessage;
   }
 
-  const rawBlocks: unknown[] = Array.isArray(base.content)
-    ? base.content
-    : typeof base.content === "string"
-      ? [{ type: "text", text: base.content }]
-      : [];
+  const rawBlocks = asBlocks(base.content);
 
   const filtered = rawBlocks.filter((block) => {
     const b = block as { type?: string; id?: string };
@@ -237,11 +243,7 @@ function patchRefTag(original: AgentMessage, core: CoreMessage): AgentMessage {
   if (coreBody && trimEnd(coreBody) !== trimEnd(originalBody)) {
     return rebuildBodyFromCore(original, coreBody, tag);
   }
-  const rawBlocks = Array.isArray(base.content)
-    ? base.content
-    : typeof base.content === "string"
-      ? [{ type: "text" as const, text: base.content }]
-      : [];
+  const rawBlocks = asBlocks(base.content);
   const peeled = peelRefTagBlocks(rawBlocks);
 
   const newBlocks = [...peeled];
@@ -265,6 +267,16 @@ function patchRefTag(original: AgentMessage, core: CoreMessage): AgentMessage {
   } as AgentMessage;
 }
 
+/** Normalize a message's `content` field (block array | string | absent)
+ *  into a block array. Shared by all ref-tag patch paths. */
+function asBlocks(content: unknown): Array<{ type?: string; text?: string; id?: string }> {
+  return Array.isArray(content)
+    ? (content as Array<{ type?: string; text?: string; id?: string }>)
+    : typeof content === "string"
+      ? [{ type: "text", text: content }]
+      : [];
+}
+
 function rebuildBodyFromCore(
   original: AgentMessage,
   coreBody: string,
@@ -284,7 +296,6 @@ function rebuildBodyFromCore(
   }
   return { ...(original as object), content: [{ type: "text" as const, text }] } as AgentMessage;
 }
-
 function peelRefTagBlocks(blocks: unknown[]): unknown[] {
   const out: unknown[] = [];
   for (const block of blocks) {

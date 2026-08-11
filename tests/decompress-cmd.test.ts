@@ -3,6 +3,9 @@ import assert from "node:assert/strict";
 import { rm } from "node:fs/promises";
 import { createAcpExtension } from "../src/index.js";
 
+// Commands assert English output; force en regardless of the shell's LANG.
+process.env.LANG = "en_US.UTF-8";
+
 function captureApi() {
   const handlers = new Map<string, ((event: any, ctx: any) => any)[]>();
   const api = {

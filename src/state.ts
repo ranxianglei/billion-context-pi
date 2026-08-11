@@ -72,3 +72,37 @@ function mergeInitialState(parsed: CompressionState): CompressionState {
     nextRunId: parsed.nextRunId ?? fresh.nextRunId,
   };
 }
+
+/** Drop messageRefs entries whose message is gone (pruned/compacted) AND whose
+ *  ref is not referenced by any block (blocks track their messages via
+ *  effectiveMessageIds). The highest-numbered ref survives even when stale:
+ *  acp-kernel allocates new refs from highestUsedIndex + 1, so dropping it
+ *  would reuse ref numbers and break monotonicity (nudge panel shows
+ *  out-of-order start>end ranges). Keeps stale id→ref mappings bounded in
+ *  long sessions (e.g. omp live-entry id swaps). */
+export function pruneStaleRefs(state: CompressionState, aliveIds: Iterable<string>): void {
+  const alive = new Set(aliveIds);
+  const used = new Set<string>();
+  for (const b of state.blocks) {
+    for (const id of b.effectiveMessageIds ?? []) {
+      const ref = state.messageRefs.byRaw[id];
+      if (ref) used.add(ref);
+    }
+  }
+  let highestRef: string | null = null;
+  let highestNum = -1;
+  for (const ref of Object.values(state.messageRefs.byRaw)) {
+    const n = Number(ref.slice(1));
+    if (Number.isInteger(n) && n > highestNum) {
+      highestNum = n;
+      highestRef = ref;
+    }
+  }
+  for (const [id, ref] of Object.entries(state.messageRefs.byRaw)) {
+    if (ref === highestRef) continue;
+    if (!alive.has(id) && !used.has(ref)) {
+      delete state.messageRefs.byRaw[id];
+      delete state.messageRefs.byRef[ref];
+    }
+  }
+}

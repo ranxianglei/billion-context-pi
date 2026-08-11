@@ -43,7 +43,8 @@ async function handleSearch(args: SearchArgs, runtime: AcpRuntime, ctx: Extensio
     const docs = buildSearchDocs(ctx, state);
     const msgCount = docs.filter((d) => d.kind === "message").length;
     const blockCount = docs.filter((d) => d.kind === "block").length;
-    const results = searchBlocks(docs, args.query, { limit: args.limit });
+    const limit = args.limit == null ? 10 : Math.max(1, Math.floor(args.limit));
+    const results = searchBlocks(docs, args.query, { limit });
 
     if (results.length === 0) {
         const blocks = state.blocks.length;
