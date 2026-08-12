@@ -15,6 +15,10 @@ export interface UserAcpConfig {
   delegate?: boolean;
   toolBashDefaultTimeout?: number;
   toolOutputMaxBytes?: number;
+/** 上下文水位触发压缩提示的百分比（0-100，默认 25，0=禁用）——见 AdapterConfig.usageTriggerPercent */
+  usageTriggerPercent?: number;
+  /** 界面语言（slash 命令输出 / nudge 附加文本）："zh" | "en"，缺省按 LANG 检测 */
+  language?: "zh" | "en";
 }
 
 /** Read global + project acp.json, project overrides global. Returns {} on any
@@ -45,13 +49,15 @@ function join(... parts: string[]): string {
   return path.join(...parts);
 }
 
-const KNOWN: Record<string, "boolean" | "number"> = {
+const KNOWN: Record<string, "boolean" | "number" | "string"> = {
   debug: "boolean",
   autoUpdate: "boolean",
   modelContextLimit: "number",
   delegate: "boolean",
   toolBashDefaultTimeout: "number",
   toolOutputMaxBytes: "number",
+  usageTriggerPercent: "number",
+  language: "string",
 };
 
 function pickKnown(parsed: Record<string, unknown>): UserAcpConfig {

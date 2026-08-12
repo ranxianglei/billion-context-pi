@@ -40,11 +40,11 @@ const zh = {
   "settings.delegate": "委派子任务",
   "settings.delegate.desc": "对独立的审查/调查工作使用子代理。",
   "settings.modelContextLimit": "模型上下文限制（tokens）",
-  "settings.modelContextLimit.desc": "估算上下文压力时的上限。留空 = 自动。",
+"settings.modelContextLimit.desc": "估算上下文压力时的上限（tokens）。留空 = 自动（按当前模型窗口）。填小值更早触发压缩提示：如 150000 = 15 万 tokens；64000 = 6.4 万（更激进）。",
   "settings.toolBashDefaultTimeout": "Bash 默认超时（秒）",
-  "settings.toolBashDefaultTimeout.desc": "bash 工具调用默认超时。留空 = 默认。",
+  "settings.toolBashDefaultTimeout.desc": "bash 工具调用默认超时（秒）。留空 = 默认。如 60 = 1 分钟；0 = 禁用超时（无限等待，不推荐）。",
   "settings.toolOutputMaxBytes": "工具输出最大字节",
-  "settings.toolOutputMaxBytes.desc": "截断前的工具输出大小上限。留空 = 默认。",
+  "settings.toolOutputMaxBytes.desc": "截断前的工具输出大小上限（字节）。留空 = 默认。如 8192 = 8KB（更省上下文）；0 = 禁用截断。",
   "settings.on": "开",
   "settings.off": "关",
   "settings.mainModel": "主模型",
@@ -52,8 +52,12 @@ const zh = {
   "settings.default": "默认",
   "settings.invalidNumber": "无效数字: {value}",
   "settings.saved": "{id} = {value}",
-  "settings.saveFailed": "保存失败: {error}",
+"settings.saveFailed": "保存失败: {error}",
   "settings.hint": "回车/空格修改 • 输入搜索 • esc 关闭",
+  "settings.language": "语言",
+  "settings.language.desc": "界面语言（slash 命令输出 / 压缩提示）。zh 或 en，缺省按系统 LANG 检测。",
+  "nudge.compressedBlocks": "压缩块: {count} 个活跃 ({tiers}) — 摘要 {summary}，原始 {original} 已压缩。块: {ids}{more}。",
+  "nudge.minChars": "压缩要求每个范围至少 {min} 字符消息文本（kernel 强制）。以上范围是提示 —— 若太小，把相邻范围合并为一次调用: 第一个的 startId，最后一个的 endId。",
 } as const;
 
 const en: Record<keyof typeof zh, string> = {
@@ -89,11 +93,11 @@ const en: Record<keyof typeof zh, string> = {
   "settings.delegate": "Delegate sub-tasks",
   "settings.delegate.desc": "Use sub-agents for independent review/investigation work.",
   "settings.modelContextLimit": "Model context limit (tokens)",
-  "settings.modelContextLimit.desc": "Cap used when estimating context pressure. Empty = auto.",
+"settings.modelContextLimit.desc": "Cap used when estimating context pressure (tokens). Empty = auto (current model window). A smaller value triggers compression nudges sooner: e.g. 150000 = 150k tokens; 64000 = 64k (more aggressive).",
   "settings.toolBashDefaultTimeout": "Bash default timeout (s)",
-  "settings.toolBashDefaultTimeout.desc": "Default timeout for bash tool calls. Empty = default.",
+  "settings.toolBashDefaultTimeout.desc": "Default timeout for bash tool calls (seconds). Empty = default. E.g. 60 = 1 minute; 0 = disable timeout (unbounded wait, not recommended).",
   "settings.toolOutputMaxBytes": "Tool output max bytes",
-  "settings.toolOutputMaxBytes.desc": "Cap on tool output size before truncation. Empty = default.",
+  "settings.toolOutputMaxBytes.desc": "Cap on tool output size before truncation (bytes). Empty = default. E.g. 8192 = 8KB (tighter context); 0 = disable truncation.",
   "settings.on": "on",
   "settings.off": "off",
   "settings.mainModel": "main model",
@@ -102,7 +106,11 @@ const en: Record<keyof typeof zh, string> = {
   "settings.invalidNumber": "Invalid number: {value}",
   "settings.saved": "{id} = {value}",
   "settings.saveFailed": "Failed to save: {error}",
-  "settings.hint": "enter/space change • type to search • esc close",
+"settings.hint": "enter/space change • type to search • esc close",
+  "settings.language": "Language",
+  "settings.language.desc": "UI language (slash command output / compression nudges). zh or en; defaults to system LANG detection.",
+  "nudge.compressedBlocks": "Compressed blocks: {count} active ({tiers}) — {summary} summary, {original} original compressed. Blocks: {ids}{more}.",
+  "nudge.minChars": "Compression requires at least {min} chars of message text per range (kernel-enforced). The ranges above are hints — if one is too small, combine adjacent ranges into a single call: startId of the first, endId of the last.",
 };
 
 let cached: Locale | null = null;
@@ -111,6 +119,11 @@ let cached: Locale | null = null;
 export function locale(): Locale {
   if (!cached) cached = detectLocale();
   return cached;
+}
+
+/** Override locale from user config (acp.json "language"); null resets to LANG detection. */
+export function setLocale(lang: string | undefined): void {
+  cached = lang === "zh" || lang === "en" ? lang : null;
 }
 
 /** Translate a key, substituting {name} placeholders. Falls back to English. */

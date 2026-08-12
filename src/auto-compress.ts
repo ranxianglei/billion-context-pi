@@ -165,6 +165,58 @@ export const SYSTEM_PROMPT =
  * recoverable (parse failure, empty slice). Fatal failures should stop further
  * nudge attempts to avoid infinite loops.
  */
+/**
+ * Generate a summary for an arbitrary message range using the compression
+ * model. Shared by autoCompress (nudge interception) and the /compact
+ * handler (session_before_compact). Returns null when no model is usable,
+ * the slice is empty, or the response is unparseable.
+ */
+export async function summarizeRange(
+  ctx: ExtensionContext,
+  messages: CoreMessage[],
+  state: CompressionState,
+  startRef: string,
+  endRef: string,
+  config: Config,
+): Promise<{ summary: string; model: string } | null> {
+  const configured = readCompressModel();
+  const resolved = resolveCompressModel(ctx.modelRegistry, ctx.model, configured);
+  if (!resolved) return null;
+  const { model, label } = resolved;
+  const slice = sliceRange(messages, state, startRef, endRef);
+  if (slice.length === 0) return null;
+  const tokens = Math.ceil(slice.reduce((n, m) => n + (m.text?.length ?? 0), 0) / 4);
+
+  const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+  if (!auth.ok || !auth.apiKey) {
+    logWarn("summarize-range", { event: "auth-missing", model: label, error: auth.ok ? null : auth.error });
+    return null;
+  }
+
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), TIMEOUT_MS);
+  try {
+    const userText = `${SYSTEM_PROMPT}\n\nMessage range [${startRef}..${endRef}] (${tokens} tokens, ${slice.length} messages). Compress it:\n\n${formatSlice(slice, state)}`;
+    const response = await complete(
+      model,
+      { messages: [{ role: "user", content: [{ type: "text", text: userText }], timestamp: Date.now() }] },
+      { apiKey: auth.apiKey, headers: auth.headers, env: auth.env, maxTokens: MAX_OUTPUT_TOKENS, signal: ac.signal },
+    );
+    const summary = parseSummary(
+      response.content.filter((c): c is { type: "text"; text: string } => c.type === "text").map((c) => c.text).join("\n"),
+    );
+    if (!summary) {
+      logWarn("summarize-range", { event: "unparseable-summary", model: label, span: `${startRef}..${endRef}` });
+      return null;
+    }
+    return { summary, model: label };
+  } catch (e) {
+    logWarn("summarize-range", { event: "failed", model: label, error: String(e) });
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 export async function autoCompress(
   ctx: ExtensionContext,
   runtime: AcpRuntime,

@@ -25,7 +25,15 @@ export interface AdapterConfig {
   delegate?: boolean;
   /** Default timeout in seconds injected into the bash tool when the model
    *  omits `timeout`. Pi has NO built-in default, so without this a command
-   *  that the model forgets to time out can hang for thousands of seconds.
+import { defaultConfig, type Config } from "acp-kernel";
+
+// 扩展 acp-kernel 的 Config 类型：usageTriggerPercent 是 billion-context-pi 的
+// 自定义水位字段（resolveConfig 透传 AdapterConfig.usageTriggerPercent）
+declare module "acp-kernel" {
+  interface Config {
+    usageTriggerPercent?: number;
+  }
+}
    *  Default: 60 (catches hangs quickly). On timeout the model is guided to
    *  re-run with a larger `timeout`. Set to 0 to disable (restore Pi's
    *  unbounded behavior). */
@@ -39,6 +47,11 @@ export interface AdapterConfig {
    *  head-truncated with a notice telling the model how to see the full output
    *  (bash: read BashToolDetails.fullOutputPath). */
   toolOutputMaxBytes?: number;
+  /** 上下文水位触发压缩提示的百分比（0-100）。kernel 默认 growth 驱动，
+   *  此配置让 usage 达到该水位即提示压缩。默认 25。设为 0 禁用。 */
+usageTriggerPercent?: number;
+  /** 界面语言（slash 命令输出 / nudge 附加文本）："zh" | "en"，缺省按 LANG 检测 */
+  language?: "zh" | "en";
   coreOverrides?: Partial<Config>;
 }
 
@@ -61,5 +74,9 @@ export function resolveConfig(adapter: AdapterConfig, liveContextLimit: number):
     protectedTools: adapter.protectedTools ?? [],
     preserveRecentMessages: adapter.preserveRecentMessages ?? 5,
     ...adapter.coreOverrides,
+...(adapter.usageTriggerPercent !== undefined
+      ? { usageTriggerPercent: adapter.usageTriggerPercent }
+      : {}),
+    ...(adapter.language !== undefined ? { language: adapter.language } : {}),
   });
 }

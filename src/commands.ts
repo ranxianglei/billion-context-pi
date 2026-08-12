@@ -7,7 +7,7 @@ import { getSystemPromptText } from "./compat.js";
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { t } from "./i18n.js";
+import { t, setLocale } from "./i18n.js";
 
 declare const CURRENT_VERSION: string;
 
@@ -223,7 +223,14 @@ async function settingsCommand(ctx: ExtensionCommandContext): Promise<void> {
       id: "toolOutputMaxBytes",
       label: t("settings.toolOutputMaxBytes"),
       description: t("settings.toolOutputMaxBytes.desc"),
-      currentValue: fmt(config.toolOutputMaxBytes, t("settings.default")),
+currentValue: fmt(config.toolOutputMaxBytes, t("settings.default")),
+    },
+    {
+      id: "language",
+      label: t("settings.language"),
+      description: t("settings.language.desc"),
+      currentValue: fmt(config.language, t("settings.auto")),
+      values: ["zh", "en"],
     },
   ];
 
@@ -251,9 +258,14 @@ async function settingsCommand(ctx: ExtensionCommandContext): Promise<void> {
             return;
           }
           patch[id] = n;
+} else if (id === "language") {
+          patch.language = newValue === "zh" || newValue === "en" ? newValue : undefined;
         }
-        void saveConfig(patch)
-          .then(() => ctx.ui.notify(t("settings.saved", { id, value: newValue }), "info"))
+void saveConfig(patch)
+          .then(() => {
+            if (id === "language") setLocale(patch.language as string | undefined); // 立即生效，无需重启
+            ctx.ui.notify(t("settings.saved", { id, value: newValue }), "info");
+          })
           .catch((err: unknown) => ctx.ui.notify(t("settings.saveFailed", { error: err instanceof Error ? err.message : String(err) }), "error"));
       },
       () => done(undefined),

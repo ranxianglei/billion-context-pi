@@ -14,10 +14,11 @@ import { makeSearchTool } from "./search-tool.js";
 import { makeStatusTool } from "./status-tool.js";
 import { makeDelegateTool, makeDelegateWaitTool, makeDelegateCancelTool, runningRunsSnapshot } from "./delegate-tool.js";
 import { makeCommands } from "./commands.js";
-import { autoCompress, totalCompressibleChars } from "./auto-compress.js";
+import { autoCompress, summarizeRange, selectRangeSpan, totalCompressibleChars } from "./auto-compress.js";
 import { coreOutToAgentMessages } from "./messages.js";
 import { ACP_SYSTEM_PROMPT, ACP_DELEGATE_PROMPT } from "./system-prompt.js";
 import { delegateStatusWidget } from "./fleet-widget.js";
+import { setLocale, t } from "./i18n.js";
 import { wireToolGuardrails } from "./tool-guardrails.js";
 import { debug, setDebugEnabled, logError, logInfo, logWarn, logThrow, closeLogStream } from "./log.js";
 import { pruneStaleRefs } from "./state.js";
@@ -34,7 +35,7 @@ declare const CURRENT_VERSION: string;
 export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactory {
   return (pi: ExtensionAPI) => {
     const runtime = createRuntime(adapter);
-    wireCompactionDisable(pi);
+    wireCompactionDisable(pi, runtime);
     wireSessionLifecycle(pi, runtime);
     wireContextTransform(pi, runtime);
     wireSystemPrompt(pi, runtime);
@@ -43,18 +44,94 @@ export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactor
     pi.registerTool(makeDecompressTool(runtime));
     pi.registerTool(makeSearchTool(runtime));
     pi.registerTool(makeStatusTool(runtime));
-    for (const { name, options } of makeCommands(runtime)) {
-      pi.registerCommand(name, options);
-    }
+registerCommands(pi, runtime);
   };
 }
 
 export default createAcpExtension();
 
-// ACP owns compression; cancel Pi's built-in auto-compaction entirely (mirrors
-// opencode-acp requiring opencode's compaction.auto = false).
-function wireCompactionDisable(pi: ExtensionAPI): void {
-  pi.on("session_before_compact", () => ({ cancel: true }));
+/** Register slash commands. Map.set 同名覆盖 → setLocale 后重新注册可更新 description。 */
+function registerCommands(pi: ExtensionAPI, runtime: AcpRuntime): void {
+  for (const { name, options } of makeCommands(runtime)) {
+    pi.registerCommand(name, options);
+  }
+}
+
+// Intercept Pi's compaction (manual /compact or automatic threshold) and run
+// ACP's own compression instead: pick the largest compressible range, have the
+// compression model summarize it, applyCompression to create an ACP block, and
+// hand Pi the resulting summary for its compaction entry. This makes /compact
+// behave like ACP's compress tool. If anything fails (no model, no ranges,
+// kernel rejection), return undefined so Pi falls back to its default
+// compaction — never return { cancel: true }, which makes Pi throw
+// "Compaction cancelled" for manual compaction.
+function wireCompactionDisable(pi: ExtensionAPI, runtime: AcpRuntime): void {
+  pi.on("session_before_compact", async (event, ctx) => {
+    const sid = ctx.sessionManager.getSessionId();
+    const release = await runtime.acquireLock(sid);
+    try {
+      const { state, coreMessages } = await runtime.stateFor(ctx);
+      const config = runtime.configFor(ctx);
+      const coveredIds = collectCoveredMessageIds(state);
+      const tokenCount = estimateTokens(coreMessages, coveredIds);
+
+      const turn = runtime.core.processTurn({ messages: coreMessages, state, config, tokenCount });
+      await runtime.save(turn.state, ctx);
+
+      const ranges = (turn.nudge?.compressibleRanges ?? []).filter((r) => !r.dangerous);
+      if (ranges.length === 0) return undefined;
+
+      const span = selectRangeSpan(ranges, turn.messages, turn.state, config.compress?.minCompressRange ?? 5000);
+      if (!span) return undefined;
+
+      ctx.ui?.notify?.(`ACP 正在压缩上下文 (${span.tokens} tokens)...`, "info");
+      const result = await summarizeRange(ctx, turn.messages, turn.state, span.startRef, span.endRef, config);
+      if (!result) {
+        ctx.ui?.notify?.("ACP 压缩失败，回退 Pi 默认压缩", "warning");
+        return undefined;
+      }
+      const { summary, model } = result;
+
+      const applied = runtime.core.applyCompression({
+        ranges: [{ startRef: span.startRef, endRef: span.endRef, summary }],
+        messages: turn.messages,
+        state: turn.state,
+        config,
+      });
+      const errors = applied.result.errors ?? [];
+      if (errors.length > 0) {
+        logWarn("compact", { sid, event: "rejected", span: `${span.startRef}..${span.endRef}`, model, errors });
+        return undefined;
+      }
+      await runtime.save(applied.state, ctx);
+
+      logInfo("compact", {
+        sid,
+        event: "acp-compaction",
+        span: `${span.startRef}..${span.endRef}`,
+        tokens: span.tokens,
+        model,
+        blocksCreated: applied.result.blocksCreated,
+        reason: event.reason,
+      });
+      debug.event("compact-acp", { sid, span: `${span.startRef}..${span.endRef}`, tokens: span.tokens, model, reason: event.reason });
+
+      ctx.ui?.notify?.(`ACP 压缩完成: ${span.tokens} tokens → ${model}`, "info");
+
+      return {
+        compaction: {
+          summary,
+          firstKeptEntryId: event.preparation.firstKeptEntryId,
+          tokensBefore: event.preparation.tokensBefore,
+        },
+      };
+    } catch (e) {
+      logThrow("compact", e, { sid });
+      return undefined;
+    } finally {
+      release();
+    }
+  });
 }
 
 // (acp_delegate injection is best-effort: sendUserMessage is fire-and-forget
@@ -69,8 +146,10 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
     logInfo("session", { event: "start", sid, cwd: ctx.cwd, debug: runtime.adapter.debug ?? null, version: typeof CURRENT_VERSION !== "undefined" ? CURRENT_VERSION : null });
     try {
       const user = await loadUserConfig(ctx.cwd);
-      runtime.setAdapter(applyUserConfig(runtime.adapter, user));
+runtime.setAdapter(applyUserConfig(runtime.adapter, user));
       if (runtime.adapter.debug !== undefined) setDebugEnabled(runtime.adapter.debug);
+setLocale(runtime.adapter.language); // acp.json "language" 覆盖 LANG 检测
+registerCommands(pi, runtime); // 重新注册命令（同名覆盖）→ description 用配置语言
     } catch (e) {
       logThrow("config", e, { sid, phase: "session_start" });
     }
@@ -171,7 +250,18 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
     const rebuilt = coreOutToAgentMessages(turn.messages, originalById);
     const debugOn = debug.enabled;
 
-    if (turn.nudge?.shouldInject) {
+    // usageTrigger channel: config-driven threshold (acp.json "usageTriggerPercent",
+    // default 25, 0=disabled). Kernel's growth model may not fire yet, but usage
+    // crossing the threshold with compressible content is enough to nudge.
+const triggerPct = (config as unknown as { usageTriggerPercent?: number }).usageTriggerPercent ?? 25;
+    const nudgeUsage = turn.nudge?.contextUsage ?? 0;
+    const usageTriggered =
+      triggerPct > 0 &&
+      !turn.nudge?.shouldInject &&
+      nudgeUsage >= triggerPct / 100 &&
+      (turn.nudge?.compressibleRanges?.length ?? 0) > 0;
+    if (usageTriggered) debug.event("usage-triggered", { pct: Math.round(nudgeUsage * 100), threshold: triggerPct });
+    if (turn.nudge && (turn.nudge.shouldInject || usageTriggered)) {
       // Two independent channels for the nudge:
       //  1. CONTEXT injection (always on): the nudge is appended to the
       //     messages returned to the LLM so the model sees it and compresses.
@@ -309,14 +399,14 @@ function nudgeMessage(nudge: NudgeDecision, blocks: CompressionBlock[], minCompr
     }
     const tierStr = Object.keys(tierCounts).map(Number).sort().map((t) => `T${t}:${tierCounts[t]}`).join(" ");
     const ids = blocks.slice(0, 10).map((b) => b.blockId).join(", ");
-    const extra = blocks.length > 10 ? ` (+${blocks.length - 10} more)` : "";
+const extra = blocks.length > 10 ? ` (+${blocks.length - 10} more)` : "";
     lines.push("");
-    lines.push(`Compressed blocks: ${blocks.length} active (${tierStr}) — ${fmt(totalSummary)} summary, ${fmt(totalCompressed)} original compressed. Blocks: ${ids}${extra}.`);
+    lines.push(t("nudge.compressedBlocks", { count: blocks.length, tiers: tierStr, summary: fmt(totalSummary), original: fmt(totalCompressed), ids, more: extra }));
   }
 
   if (!(nudge.tier !== null && nudge.tier >= 2)) {
     lines.push("");
-    lines.push(`Compression requires at least ${minCompressChars} chars of message text per range (kernel-enforced). The ranges above are hints — if one is too small, combine adjacent ranges into a single call: startId of the first, endId of the last.`);
+    lines.push(t("nudge.minChars", { min: minCompressChars }));
   }
 
   return {

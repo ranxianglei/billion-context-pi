@@ -49,15 +49,37 @@ test("factory registers the compress tool and 4 flat commands", () => {
   assert.ok(api.tools.some((t) => t.name === "compress"), "compress tool registered");
   assert.deepEqual([...api.commands.keys()].sort(), ["acp", "acp-decompress", "acp-search", "acp-settings", "acp-status"]);
   assert.ok(handlers.has("context"), "context event wired");
-  assert.ok(handlers.has("session_before_compact"), "compaction-disable wired");
   assert.ok(handlers.has("before_agent_start"), "system-prompt wired");
 });
 
-test("session_before_compact cancels Pi's auto-compaction", () => {
+test("session_before_compact intercepts Pi's compaction with ACP compression", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension()(api as any);
-  const result = handlers.get("session_before_compact")![0]!({}, {});
-  assert.deepEqual(result, { cancel: true });
+  // /compact must run ACP's compression (create blocks), never return
+  // { cancel: true } (which makes Pi throw "Compaction cancelled").
+  assert.ok(handlers.has("session_before_compact"), "handler registered — /compact intercepted");
+  const result = await handlers.get("session_before_compact")![0]!(
+    {
+      type: "session_before_compact",
+      preparation: {
+        firstKeptEntryId: "e1",
+        messagesToSummarize: [],
+        turnPrefixMessages: [],
+        isSplitTurn: false,
+        tokensBefore: 1000,
+        fileOps: { readFiles: [], modifiedFiles: [] },
+        settings: { enabled: true, reserveTokens: 0, keepRecentTokens: 0 },
+      },
+      branchEntries: [],
+      reason: "manual",
+      willRetry: false,
+      signal: new AbortController().signal,
+    },
+    fakeCtx([], "/tmp/nonexistent-pai-acp-it.session.json"),
+  );
+  // No session file → no ACP state → falls back to Pi's default compaction
+  // (undefined), never { cancel: true }.
+  assert.ok(result === undefined || (result as { compaction?: unknown })?.compaction !== undefined, "never returns { cancel: true }");
 });
 
 test("before_agent_start appends the ACP system prompt", () => {
