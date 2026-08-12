@@ -58,6 +58,9 @@ const zh = {
   "settings.language.desc": "界面语言（slash 命令输出 / 压缩提示）。zh 或 en，缺省按系统 LANG 检测。",
   "nudge.compressedBlocks": "压缩块: {count} 个活跃 ({tiers}) — 摘要 {summary}，原始 {original} 已压缩。块: {ids}{more}。",
   "nudge.minChars": "压缩要求每个范围至少 {min} 字符消息文本（kernel 强制）。以上范围是提示 —— 若太小，把相邻范围合并为一次调用: 第一个的 startId，最后一个的 endId。",
+  "compact.compressing": "ACP 正在压缩上下文 ({tokens} tokens)...",
+  "compact.failed": "ACP 压缩失败，回退 Pi 默认压缩",
+  "compact.done": "ACP 压缩完成: {tokens} tokens → {model}",
 } as const;
 
 const en: Record<keyof typeof zh, string> = {
@@ -111,6 +114,9 @@ const en: Record<keyof typeof zh, string> = {
   "settings.language.desc": "UI language (slash command output / compression nudges). zh or en; defaults to system LANG detection.",
   "nudge.compressedBlocks": "Compressed blocks: {count} active ({tiers}) — {summary} summary, {original} original compressed. Blocks: {ids}{more}.",
   "nudge.minChars": "Compression requires at least {min} chars of message text per range (kernel-enforced). The ranges above are hints — if one is too small, combine adjacent ranges into a single call: startId of the first, endId of the last.",
+  "compact.compressing": "ACP compressing context ({tokens} tokens)...",
+  "compact.failed": "ACP compression failed, falling back to Pi default",
+  "compact.done": "ACP compression done: {tokens} tokens → {model}",
 };
 
 let cached: Locale | null = null;

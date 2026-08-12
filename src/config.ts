@@ -1,5 +1,11 @@
 import { defaultConfig, type Config } from "acp-kernel";
 
+declare module "acp-kernel" {
+  interface Config {
+    usageTriggerPercent?: number;
+  }
+}
+
 /**
  * Adapter configuration. Maps onto acp-kernel's `Config` plus Pi-specific knobs
  * (live model context window, protected tools, state persistence).
@@ -25,15 +31,7 @@ export interface AdapterConfig {
   delegate?: boolean;
   /** Default timeout in seconds injected into the bash tool when the model
    *  omits `timeout`. Pi has NO built-in default, so without this a command
-import { defaultConfig, type Config } from "acp-kernel";
-
-// 扩展 acp-kernel 的 Config 类型：usageTriggerPercent 是 billion-context-pi 的
-// 自定义水位字段（resolveConfig 透传 AdapterConfig.usageTriggerPercent）
-declare module "acp-kernel" {
-  interface Config {
-    usageTriggerPercent?: number;
-  }
-}
+   *  that the model forgets to time out can hang for thousands of seconds.
    *  Default: 60 (catches hangs quickly). On timeout the model is guided to
    *  re-run with a larger `timeout`. Set to 0 to disable (restore Pi's
    *  unbounded behavior). */

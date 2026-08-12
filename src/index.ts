@@ -84,10 +84,10 @@ function wireCompactionDisable(pi: ExtensionAPI, runtime: AcpRuntime): void {
       const span = selectRangeSpan(ranges, turn.messages, turn.state, config.compress?.minCompressRange ?? 5000);
       if (!span) return undefined;
 
-      ctx.ui?.notify?.(`ACP 正在压缩上下文 (${span.tokens} tokens)...`, "info");
+      ctx.ui?.notify?.(t("compact.compressing", { tokens: span.tokens }), "info");
       const result = await summarizeRange(ctx, turn.messages, turn.state, span.startRef, span.endRef, config);
       if (!result) {
-        ctx.ui?.notify?.("ACP 压缩失败，回退 Pi 默认压缩", "warning");
+        ctx.ui?.notify?.(t("compact.failed"), "warning");
         return undefined;
       }
       const { summary, model } = result;
@@ -116,7 +116,7 @@ function wireCompactionDisable(pi: ExtensionAPI, runtime: AcpRuntime): void {
       });
       debug.event("compact-acp", { sid, span: `${span.startRef}..${span.endRef}`, tokens: span.tokens, model, reason: event.reason });
 
-      ctx.ui?.notify?.(`ACP 压缩完成: ${span.tokens} tokens → ${model}`, "info");
+      ctx.ui?.notify?.(t("compact.done", { tokens: span.tokens, model }), "info");
 
       return {
         compaction: {
@@ -253,7 +253,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
     // usageTrigger channel: config-driven threshold (acp.json "usageTriggerPercent",
     // default 25, 0=disabled). Kernel's growth model may not fire yet, but usage
     // crossing the threshold with compressible content is enough to nudge.
-const triggerPct = (config as unknown as { usageTriggerPercent?: number }).usageTriggerPercent ?? 25;
+const triggerPct = config.usageTriggerPercent ?? 25;
     const nudgeUsage = turn.nudge?.contextUsage ?? 0;
     const usageTriggered =
       triggerPct > 0 &&
