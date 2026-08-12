@@ -13,7 +13,9 @@ type AnyMessage = {
   summary?: string;
 };
 
-const REF_TAG = new RegExp("^(?:\x3cacp\\s[^>]*\x3em\\d{5}\x3c/acp\x3e|\\[m\\d{1,5}\\])\\s?\\n?");
+const REF_TAG_SOURCE = "(?:\x3cacp\\s[^>]*\x3em\\d{5}\x3c/acp\x3e|\\[m\\d{1,5}\\])";
+const REF_TAG = new RegExp(`^${REF_TAG_SOURCE}\\s?\\n?`);
+const TRAILING_REF_TAG = new RegExp(`\\n*${REF_TAG_SOURCE}\\s*$`);
 
 export function entriesToCoreMessages(entries: SessionEntry[]): CoreMessage[] {
   const out: CoreMessage[] = [];
@@ -103,17 +105,83 @@ function stringifyArgs(args: unknown): string {
   return safeStringify(args);
 }
 
-function extractText(content: unknown): string {
-  if (typeof content === "string") return content.replace(REF_TAG, "");
+export function extractText(content: unknown): string {
+  if (typeof content === "string") return stripRefTag(content);
   if (!Array.isArray(content)) return "";
   const parts: string[] = [];
   for (const block of content) {
     const b = block as { type?: string; text?: string };
-    if (b.type === "text" && typeof b.text === "string") {
-      parts.push(b.text.replace(REF_TAG, ""));
-    }
+    if (b.type === "text" && typeof b.text === "string") parts.push(stripRefTag(b.text));
   }
   return parts.join("\n");
+}
+
+function stripRefTag(text: string): string {
+  return text.replace(REF_TAG, "").replace(TRAILING_REF_TAG, "");
+}
+export function messageIdentity(message: unknown): string {
+  return JSON.stringify(normalizeIdentityValue(message, true));
+}
+
+export function messageRef(message: unknown): string | undefined {
+  if (message === null || typeof message !== "object" || !("content" in message)) return undefined;
+  const content = message.content;
+  const texts = typeof content === "string"
+    ? [content]
+    : Array.isArray(content)
+      ? content.flatMap((block) => {
+          const value = block as { type?: string; text?: string };
+          return value.type === "text" && typeof value.text === "string" ? [value.text] : [];
+        })
+      : [];
+  for (const text of texts) {
+    const tag = text.match(REF_TAG)?.[0] ?? text.match(TRAILING_REF_TAG)?.[0];
+    const ref = tag?.match(/m\d{1,5}/)?.[0];
+    if (ref) return ref;
+  }
+  return undefined;
+}
+
+function normalizeIdentityValue(value: unknown, message = false): unknown {
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => {
+      if (!item || typeof item !== "object") return [normalizeIdentityValue(item)];
+      const block = item as { type?: unknown; text?: unknown };
+      if (block.type === "text" && typeof block.text === "string") {
+        const stripped = stripRefTag(block.text);
+        if (block.text !== stripped && stripped === "") return [];
+      }
+      return [normalizeIdentityValue(item)];
+    });
+  }
+  if (value === null || typeof value !== "object") return value;
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(value).sort()) {
+    if (message && key === "timestamp") continue;
+    const item = (value as Record<string, unknown>)[key];
+    if (message && key === "content" && typeof item === "string") {
+      out[key] = [{ text: stripRefTag(item), type: "text" }];
+    } else if (key === "text" && typeof item === "string" && (value as { type?: unknown }).type === "text") {
+      out[key] = stripRefTag(item);
+    } else {
+      out[key] = normalizeIdentityValue(item);
+    }
+  }
+  return out;
+}
+
+const TRUNCATION_MARKER = "[truncated for context space]";
+
+export function matchesStoredText(stored: string, visible: string): boolean {
+  const marker = `...${TRUNCATION_MARKER} — original ~`;
+  const markerStart = visible.indexOf(marker);
+  if (markerStart < 2 || visible.slice(markerStart - 2, markerStart) !== "\n\n") return false;
+  const suffixMarker = " tokens]...\n\n";
+  const suffixStart = visible.indexOf(suffixMarker, markerStart + marker.length);
+  if (suffixStart < 0 || !/^\d+$/.test(visible.slice(markerStart + marker.length, suffixStart))) return false;
+  const prefix = visible.slice(0, markerStart - 2);
+  const suffix = visible.slice(suffixStart + suffixMarker.length);
+  return prefix.length > 0 && suffix.length > 0 && stored.startsWith(prefix) && stored.endsWith(suffix);
 }
 
 function allToolCalls(content: unknown): { name: string; id: string; arguments?: unknown }[] {
@@ -250,9 +318,9 @@ function patchRefTag(original: AgentMessage, core: CoreMessage): AgentMessage {
   let injected = false;
   for (let i = newBlocks.length - 1; i >= 0; i--) {
     const b = newBlocks[i] as { type?: string; text?: string };
-    if (b?.type === "text" && typeof b.text === "string") {
+    if (b?.type === "text" && typeof b.text === "string" && b.text.length > 0) {
       const baseText = b.text.replace(/\n*$/, "");
-      newBlocks[i] = { ...b, text: baseText.length > 0 ? `${baseText}\n\n${tag}` : tag };
+      newBlocks[i] = { ...b, text: `${baseText}\n\n${tag}` };
       injected = true;
       break;
     }
@@ -301,8 +369,8 @@ function peelRefTagBlocks(blocks: unknown[]): unknown[] {
   for (const block of blocks) {
     const b = block as { type?: string; text?: string };
     if (b?.type === "text" && typeof b.text === "string") {
-      const stripped = b.text.replace(REF_TAG, "");
-      if (stripped.length > 0) out.push({ ...b, text: stripped });
+      const stripped = stripRefTag(b.text);
+      if (stripped.length > 0 || b.text.length === 0) out.push({ ...b, text: stripped });
     } else {
       out.push(block);
     }

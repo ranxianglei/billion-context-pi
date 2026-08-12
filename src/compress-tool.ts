@@ -68,10 +68,19 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
 
 async function compressLocked(args: CompressArgs, runtime: AcpRuntime, ctx: ExtensionContext, toolCallId: string | undefined, sid: string): Promise<string> {
   const ranges = args.content ?? [];
-  const { state, coreMessages } = await runtime.stateFor(ctx);
+  const { state: initialState, coreMessages } = await runtime.stateFor(ctx);
   const config = runtime.configFor(ctx);
-
-  const beforeTokens = estimateTokens(coreMessages, collectCoveredMessageIds(state));
+  const estimatedTokens = estimateTokens(coreMessages, collectCoveredMessageIds(initialState));
+  const realUsage = ctx.getContextUsage?.();
+  const turn = runtime.core.processTurn({
+    messages: coreMessages,
+    state: initialState,
+    config,
+    tokenCount: realUsage?.tokens && realUsage.tokens > 0 ? realUsage.tokens : estimatedTokens,
+  });
+  const state = turn.state;
+  const messages = turn.messages;
+  const beforeTokens = estimateTokens(messages, collectCoveredMessageIds(state));
   const summaryMaxChars = args.summaryMaxChars;
   const topLevelTopic = args.topic;
 
@@ -81,13 +90,13 @@ async function compressLocked(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
     spans: ranges.map((r) => ({ span: `${r.startId}..${r.endId}`, summaryLen: r.summary.length, summary: r.summary, topic: r.topic ?? topLevelTopic ?? null })),
     blocksBefore: state.blocks.length,
     activeBefore: state.blocks.filter((b) => b.active).length,
-    beforeMsgCount: coreMessages.length,
+    beforeMsgCount: messages.length,
     beforeTokens,
   });
 
   const applied = runtime.core.applyCompression({
     ranges: ranges.map((r) => ({ startRef: r.startId, endRef: r.endId, summary: r.summary, topic: r.topic ?? topLevelTopic, summaryMaxChars, compressCallId: toolCallId })),
-    messages: coreMessages,
+    messages,
     state,
     config,
   });

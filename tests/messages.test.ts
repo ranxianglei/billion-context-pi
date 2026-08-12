@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { entriesToCoreMessages, coreOutToAgentMessages } from "../src/messages.js";
+import { entriesToCoreMessages, coreOutToAgentMessages, matchesStoredText, messageIdentity } from "../src/messages.js";
 import type { CoreMessage } from "acp-kernel";
 import type { SessionEntry, SessionMessageEntry } from "@earendil-works/pi-coding-agent";
 
@@ -354,6 +354,12 @@ test("coreOutToAgentMessages honors kernel-truncated body for string-content too
   assert.ok(msg.content.includes("m00004"), "ref tag preserved");
 });
 
+test("truncation matching requires the OMP marker", () => {
+  assert.equal(matchesStoredText("a\nb", "a\nb"), false);
+  assert.equal(matchesStoredText("a\nb", "a\nb\nc"), false);
+  assert.equal(matchesStoredText("a\nb", "a\n\nb"), false);
+});
+
 test("coreOutToAgentMessages returns original unchanged when no ref tag is present", () => {
   const original = msgEntry("a", user("hello")).message;
   const originalById = new Map([["a", original]]);
@@ -424,4 +430,14 @@ test("coreOutToAgentMessages drops pruned tool-call blocks when only some surviv
   const toolCalls = content.filter((b) => b.type === "toolCall");
   assert.equal(toolCalls.length, 2, "only 2 surviving tool-call blocks");
   assert.deepEqual(toolCalls.map((b) => b.id), ["call_a", "call_c"]);
+});
+
+test("message identity ignores tag-only text blocks but preserves original empty blocks", () => {
+  const image = { type: "image", data: "same", mimeType: "image/png" };
+  const tag = acpRef("m00042");
+  const taggedImage = { role: "user", content: [image, { type: "text", text: tag }], timestamp: 1 };
+  const imageOnly = { role: "user", content: [image], timestamp: 2 };
+  const emptyText = { role: "user", content: [image, { type: "text", text: "" }], timestamp: 3 };
+  assert.equal(messageIdentity(taggedImage), messageIdentity(imageOnly));
+  assert.notEqual(messageIdentity(emptyText), messageIdentity(imageOnly));
 });

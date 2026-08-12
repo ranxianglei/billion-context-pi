@@ -7,13 +7,10 @@ import {
   type Config,
 } from "acp-kernel";
 import { resolveConfig, type AdapterConfig } from "./config.js";
-import { entriesToCoreMessages } from "./messages.js";
-import { SessionStateStore } from "./state.js";
+import { entriesToCoreMessages, extractText, matchesStoredText, messageIdentity, messageRef } from "./messages.js";
+import { SessionStateStore, type LiveRefOrigin } from "./state.js";
 import { logInfo, logWarn } from "./log.js";
 
-// pi exposes `sessionManager.buildContextEntries()`; omp (oh-my-pi) only has
-// `getBranch()`. Both return chronological SessionEntry[]; feature-detect so the
-// adapter runs under either host (omp's runner silently swallows the TypeError).
 type SessionEntrySource = {
   buildContextEntries?: () => SessionEntry[];
   getBranch?: () => SessionEntry[];
@@ -28,9 +25,6 @@ export function readContextEntries(sm: ExtensionContext["sessionManager"]): Sess
   return [];
 }
 
-// True only on pi: `--mode json` event streaming (used by async delegates) is a
-// pi feature. omp (oh-my-pi) has no json mode, so delegates must fall back to
-// `-p` there — same detection as readContextEntries above.
 export function isPiHost(sm: ExtensionContext["sessionManager"]): boolean {
   const source = sm as unknown as SessionEntrySource;
   return typeof source.buildContextEntries === "function";
@@ -41,13 +35,8 @@ export interface AcpRuntime {
   store: SessionStateStore;
   adapter: AdapterConfig;
   setAdapter(adapter: AdapterConfig): void;
-  /** Record that a nudge was already shown for the turn keyed by last user msg
-   *  id, so a tier/growth nudge prints at most once per turn instead of on
-   *  every context event (pi fires multiple per assistant reply). */
   markNudgeShown(turnKey: string): void;
   nudgeShownFor(turnKey: string): boolean;
-  /** Clear per-turn nudge tracking. Called on session_start so the Set does not
-   *  grow unbounded across sessions in a long-lived Pi process. */
   clearNudgeTracking(): void;
   liveContextLimit(ctx: ExtensionContext): number;
   configFor(ctx: ExtensionContext): Config;
@@ -56,57 +45,122 @@ export interface AcpRuntime {
   acquireLock(sid: string): Promise<() => void>;
 }
 
-// omp fires the context event before the current user message is persisted to
-// the session branch (its agent-loop emits message_end only after
-// prepareProviderCall → transformContext), so getBranch() lags one message
-// behind. Merge event.messages — the exact messages about to be sent,
-// including the not-yet-persisted tail — with the persisted branch records:
-// matching messages keep their stable entry id (so kernel refs survive once
-// the message is persisted on the next turn), unmatched tail messages get
-// `live-N` ids until they are persisted.
-function mergeLiveEntries(entries: SessionEntry[], live: AgentMessage[]): SessionEntry[] {
+function mergeLiveEntries(entries: SessionEntry[], live: AgentMessage[], state: CompressionState, origins: LiveRefOrigin[]): SessionEntry[] {
   const persisted = entries.filter((e): e is SessionMessageEntry => e.type === "message");
+  const matched = matchPersistedSuffix(persisted, live);
+  const prior = matchOrigins(origins, live);
   const out: SessionEntry[] = [];
-  let p = 0;
-  let unmatched = 0;
+  const nextOrigins: LiveRefOrigin[] = [];
+  const usedIds = new Set<string>();
   for (let i = 0; i < live.length; i++) {
     const msg = live[i]!;
-    let matched: SessionMessageEntry | undefined;
-    let j = p;
-    while (j < persisted.length && persisted[j]!.message.role !== msg.role) j++;
-    if (j < persisted.length && sameMessage(persisted[j]!.message, msg)) {
-      matched = persisted[j]!;
-      p = j + 1;
+    const entry = matched[i];
+    const origin = prior[i];
+    if (entry) {
+      if (origin) migrateLiveRefs(state, origin.rawId, entry.id);
+      else migrateTaggedRef(state, msg, entry.id);
+      out.push(entry);
+      continue;
     }
-    if (matched) {
-      out.push(matched);
-    } else {
-      unmatched++;
-      out.push({
-        type: "message",
-        id: `live-${i}`,
-        parentId: null,
-        timestamp: String(msg.timestamp ?? Date.now()),
-        message: msg,
-      });
-    }
+    const id = origin?.rawId ?? nextLiveId(state, usedIds, i);
+    usedIds.add(id);
+    out.push({ type: "message", id, parentId: null, timestamp: String(msg.timestamp ?? Date.now()), message: msg });
+    nextOrigins.push({ rawId: id, identity: messageIdentity(msg) });
   }
+  origins.splice(0, origins.length, ...nextOrigins);
+  const unmatched = live.length - matched.length;
   if (unmatched > 0) logInfo("runtime", { event: "merge-live-entries", live: live.length, unmatched });
   return out;
 }
 
+function matchOrigins(origins: LiveRefOrigin[], live: AgentMessage[]): Array<LiveRefOrigin | undefined> {
+  for (let start = 0; start < origins.length; start++) {
+    const count = origins.length - start;
+    if (count > live.length) continue;
+    if (origins.slice(start).every((origin, index) => origin.identity === messageIdentity(live[index]!))) {
+      return [...origins.slice(start), ...Array<undefined>(live.length - count)];
+    }
+  }
+  return Array<undefined>(live.length);
+}
+
+function nextLiveId(state: CompressionState, used: Set<string>, index: number): string {
+  let id = `live-${index}`;
+  let suffix = index;
+  while (used.has(id) || state.messageRefs.byRaw[id] !== undefined) id = `live-${++suffix}`;
+  return id;
+}
+
+function migrateTaggedRef(state: CompressionState, message: AgentMessage, stableId: string): void {
+  const ref = messageRef(message);
+  const rawId = ref ? state.messageRefs.byRef[ref] : undefined;
+  if (rawId?.startsWith("live-")) migrateLiveRefs(state, rawId, stableId);
+}
+
+function migrateLiveRefs(state: CompressionState, liveId: string, stableId: string): void {
+  const rootId = liveId.split("#", 1)[0]!;
+  if (!rootId.startsWith("live-")) return;
+  for (const [rawId, ref] of Object.entries(state.messageRefs.byRaw)) {
+    if (rawId !== rootId && !rawId.startsWith(`${rootId}#`)) continue;
+    const stableRawId = `${stableId}${rawId.slice(rootId.length)}`;
+    if (state.messageRefs.byRaw[stableRawId] === undefined) {
+      state.messageRefs.byRaw[stableRawId] = ref;
+      state.messageRefs.byRef[ref] = stableRawId;
+    } else if (state.messageRefs.byRef[ref] === rawId) {
+      delete state.messageRefs.byRef[ref];
+    }
+    delete state.messageRefs.byRaw[rawId];
+  }
+}
+
+function matchPersistedSuffix(persisted: SessionMessageEntry[], live: AgentMessage[]): SessionMessageEntry[] {
+  for (let start = 0; start < persisted.length; start++) {
+    const count = persisted.length - start;
+    if (count > live.length) continue;
+    const suffix = persisted.slice(start);
+    if (suffix.every((entry, index) => sameMessage(entry.message, live[index]!))) return suffix;
+  }
+  return [];
+}
+
 function sameMessage(a: AgentMessage, b: AgentMessage): boolean {
-  const ra = (a as { role?: string }).role;
-  const rb = (b as { role?: string }).role;
-  if (ra !== rb) return false;
-  const ca = (a as { content?: unknown }).content;
-  const cb = (b as { content?: unknown }).content;
-  if (ca === undefined || cb === undefined) return false;
   try {
-    return JSON.stringify(ca) === JSON.stringify(cb);
+    if (messageIdentity(a) === messageIdentity(b)) return true;
+    const ra = (a as { role?: string }).role;
+    const rb = (b as { role?: string }).role;
+    if (ra !== rb || ra !== "toolResult") return false;
+    const ca = (a as { content?: unknown }).content;
+    const cb = (b as { content?: unknown }).content;
+    return sameNonTextBlocks(ca, cb) && matchesStoredText(extractText(ca), extractText(cb));
   } catch (e) {
     logWarn("runtime", { event: "message-compare-failed", error: e instanceof Error ? e.message : String(e) });
     return a === b;
+  }
+}
+
+function sameNonTextBlocks(a: unknown, b: unknown): boolean {
+  const nonText = (blocks: unknown[]): unknown[] => blocks.filter((block) => (block as { type?: string }).type !== "text");
+  try {
+    const na = Array.isArray(a) ? nonText(a) : [];
+    const nb = Array.isArray(b) ? nonText(b) : [];
+    return JSON.stringify(na) === JSON.stringify(nb);
+  } catch {
+    return false;
+  }
+}
+
+function pruneOrphanRefs(state: CompressionState, messages: ReturnType<typeof entriesToCoreMessages>): void {
+  const retainedRawIds = new Set(messages.map((message) => message.id));
+  for (const block of state.blocks) {
+    for (const rawId of [...block.directMessageIds, ...block.effectiveMessageIds]) retainedRawIds.add(rawId);
+  }
+  for (const [rawId, ref] of Object.entries(state.messageRefs.byRaw)) {
+    if (retainedRawIds.has(rawId)) continue;
+    delete state.messageRefs.byRaw[rawId];
+    if (state.messageRefs.byRef[ref] === rawId) delete state.messageRefs.byRef[ref];
+  }
+  for (const [ref, rawId] of Object.entries(state.messageRefs.byRef)) {
+    if (!retainedRawIds.has(rawId)) delete state.messageRefs.byRef[ref];
   }
 }
 
@@ -137,8 +191,6 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   }
 
   function liveContextLimit(ctx: ExtensionContext): number {
-    // Prefer pi's reported context window (matches what the footer shows) over
-    // ctx.model.contextWindow, which can be stale or unset for some providers.
     const usage = ctx.getContextUsage?.();
     if (usage?.contextWindow && usage.contextWindow > 0) return usage.contextWindow;
     const m = ctx.model as { contextWindow?: number } | undefined;
@@ -151,7 +203,9 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
 
   async function stateFor(ctx: ExtensionContext, liveMessages?: AgentMessage[]) {
     const sm = ctx.sessionManager;
-    const state = await store.load(sm.getSessionFile() ?? undefined, sm.getSessionId());
+    const sessionFile = sm.getSessionFile() ?? undefined;
+    const sessionId = sm.getSessionId();
+    const state = await store.load(sessionFile, sessionId);
     const entries = readContextEntries(sm);
     // omp fires the context event BEFORE the current user message is persisted
     // to the session branch (its agent-loop emits message_end only after
@@ -161,8 +215,16 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     // buildContextEntries() is always current. Merge event.messages (the exact
     // messages about to be sent, including the not-yet-persisted tail) with the
     // persisted branch records on the omp path only.
-    const merged = isPiHost(sm) || !liveMessages || liveMessages.length === 0 ? entries : mergeLiveEntries(entries, liveMessages);
-    return { state, coreMessages: entriesToCoreMessages(merged), entries: merged };
+    if (!isPiHost(sm) && liveMessages && liveMessages.length > 0) {
+      const origins = store.getLiveRefOrigins(sessionFile, sessionId);
+      const merged = mergeLiveEntries(entries, liveMessages, state, origins);
+      store.setLiveRefOrigins(sessionFile, sessionId, origins);
+      const coreMessages = entriesToCoreMessages(merged);
+      return { state, coreMessages, entries: merged };
+    }
+    const coreMessages = entriesToCoreMessages(entries);
+    if (liveMessages === undefined) pruneOrphanRefs(state, coreMessages);
+    return { state, coreMessages, entries };
   }
 
   async function save(state: CompressionState, ctx: ExtensionContext) {
