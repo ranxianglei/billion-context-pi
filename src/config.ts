@@ -45,9 +45,13 @@ export interface AdapterConfig {
    *  head-truncated with a notice telling the model how to see the full output
    *  (bash: read BashToolDetails.fullOutputPath). */
   toolOutputMaxBytes?: number;
+  /** 工具输出清洗（去重 + 去噪），仅作用于 bash 工具结果。默认 true。
+   *  规则保守：只折叠无缩进、非代码锚的重复行（日志/警告模板），
+   *  代码类输出（缩进行、`{};` 锚行）完全豁免。设为 false 关闭。 */
+  toolOutputClean?: boolean;
   /** 上下文水位触发压缩提示的百分比（0-100）。kernel 默认 growth 驱动，
    *  此配置让 usage 达到该水位即提示压缩。默认 25。设为 0 禁用。 */
-usageTriggerPercent?: number;
+  usageTriggerPercent?: number;
   /** 界面语言（slash 命令输出 / nudge 附加文本）："zh" | "en"，缺省按 LANG 检测 */
   language?: "zh" | "en";
   coreOverrides?: Partial<Config>;
@@ -55,6 +59,7 @@ usageTriggerPercent?: number;
 
 export const DEFAULT_TOOL_BASH_TIMEOUT = 60;
 export const DEFAULT_TOOL_OUTPUT_MAX_BYTES = 200_000;
+export const DEFAULT_TOOL_OUTPUT_CLEAN = true;
 
 export function resolveConfig(adapter: AdapterConfig, liveContextLimit: number): Config {
   const envLimit = process.env.ACP_MODEL_CONTEXT_LIMIT;
