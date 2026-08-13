@@ -49,9 +49,9 @@ test("resolveConfig ignores a non-positive ACP_MODEL_CONTEXT_LIMIT and falls thr
 
 test("resolveConfig defaults to kernel 0.0.21 thresholds when no compress overrides set", () => {
   const cfg = resolveConfig(EMPTY, 1_000_000);
-  assert.equal(cfg.nudge.maxContextLimitPct, 0.55);
-  assert.equal(cfg.nudge.emergencyThresholdPct, 0.8);
-  assert.equal(cfg.truncate.threshold, 1);
+  assert.equal(cfg.nudge.maxContextLimitPct, 0.75);
+  assert.equal(cfg.nudge.emergencyThresholdPct, 0.95);
+  assert.equal(cfg.truncate.threshold, 0.95);
 });
 
 test("resolveConfig maps compress.maxContextLimit (number) to nudge.maxContextLimitPct", () => {

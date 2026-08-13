@@ -9,11 +9,14 @@ import { saveConfig } from "../src/commands.js";
 async function withTempHome(fn: () => Promise<void>): Promise<void> {
   const tmpHome = path.join(os.tmpdir(), `acp-commands-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   const savedHome = process.env.HOME;
+  const savedProfile = process.env.USERPROFILE;
   process.env.HOME = tmpHome;
+  process.env.USERPROFILE = tmpHome; // Windows: os.homedir() reads USERPROFILE, not HOME
   try {
     await fn();
   } finally {
     process.env.HOME = savedHome;
+    process.env.USERPROFILE = savedProfile;
     await fs.rm(tmpHome, { recursive: true, force: true });
   }
 }
