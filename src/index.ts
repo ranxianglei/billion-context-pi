@@ -148,10 +148,11 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
     logInfo("session", { event: "start", sid, cwd: ctx.cwd, debug: runtime.adapter.debug ?? null, version: typeof CURRENT_VERSION !== "undefined" ? CURRENT_VERSION : null });
     try {
       const user = await loadUserConfig(ctx.cwd);
-runtime.setAdapter(applyUserConfig(runtime.adapter, user));
+      runtime.setAdapter(applyUserConfig(runtime.adapter, user));
+      setDelegateDisplayUsage(resolveDelegate(runtime.adapter).displayUsage);
       if (runtime.adapter.debug !== undefined) setDebugEnabled(runtime.adapter.debug);
-setLocale(runtime.adapter.language); // acp.json "language" 覆盖 LANG 检测
-registerCommands(pi, runtime); // 重新注册命令（同名覆盖）→ description 用配置语言
+      setLocale(runtime.adapter.language); // acp.json "language" 覆盖 LANG 检测
+      registerCommands(pi, runtime); // 重新注册命令（同名覆盖）→ description 用配置语言
     } catch (e) {
       logThrow("config", e, { sid, phase: "session_start" });
     }

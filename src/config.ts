@@ -37,6 +37,8 @@ export interface CompressConfig {
   nudgeGrowthTokens?: number;
 }
 
+/** Delegate sub-agent configuration. */
+
 /**
  * Adapter configuration. Maps onto acp-kernel's `Config` plus Pi-specific knobs
  * (live model context window, protected tools, state persistence).
@@ -96,6 +98,9 @@ export interface AdapterConfig {
 export const DEFAULT_TOOL_BASH_TIMEOUT = 60;
 export const DEFAULT_TOOL_OUTPUT_MAX_BYTES = 200_000;
 export const DEFAULT_TOOL_OUTPUT_CLEAN = true;
+
+/** Resolve delegate config from the adapter, handling the boolean shorthand
+ *  and the legacy flat `displayUsage` alias. */
 
 /** Resolve delegate config from the adapter, handling the boolean shorthand
  *  and the legacy flat `displayUsage` alias. */

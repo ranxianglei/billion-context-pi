@@ -517,6 +517,7 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
   }
   lines.push("");
   lines.push(t("tag-visibility"));
+  lines.push("Tag visibility: tags injected to LLM only (deep copy), not persisted in session, not shown in terminal.");
 
   return lines.join("\n");
 }
