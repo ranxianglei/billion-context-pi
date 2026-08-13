@@ -234,6 +234,19 @@ currentValue: fmt(config.toolOutputMaxBytes, t("settings.default")),
       currentValue: fmt(config.language, t("settings.auto")),
       values: ["zh", "en"],
     },
+    {
+      id: "usageTriggerPercent",
+      label: t("settings.usageTriggerPercent"),
+      description: t("settings.usageTriggerPercent.desc"),
+      currentValue: fmt(config.usageTriggerPercent, "25"),
+    },
+    {
+      id: "toolOutputClean",
+      label: t("settings.toolOutputClean"),
+      description: t("settings.toolOutputClean.desc"),
+      currentValue: config.toolOutputClean === false ? t("settings.off") : t("settings.on"),
+      values: [t("settings.on"), t("settings.off")],
+    },
   ];
 
   const numericIds = ["modelContextLimit", "toolBashDefaultTimeout", "toolOutputMaxBytes"];
@@ -251,8 +264,15 @@ currentValue: fmt(config.toolOutputMaxBytes, t("settings.default")),
         const patch: Record<string, unknown> = {};
         if (id === "compressModel") {
           patch.compressModel = newValue;
-        } else if (id === "autoUpdate" || id === "debug" || id === "delegate") {
+        } else if (id === "autoUpdate" || id === "debug" || id === "delegate" || id === "toolOutputClean") {
           patch[id] = newValue === "on";
+        } else if (id === "usageTriggerPercent") {
+          const n = Number(newValue);
+          if (!Number.isFinite(n) || n < 0 || n > 100) {
+            ctx.ui.notify(t("settings.invalidNumber", { value: newValue }), "error");
+            return;
+          }
+          patch[id] = n;
         } else if (numericIds.includes(id)) {
           const n = Number(newValue);
           if (!Number.isFinite(n) || n <= 0) {
