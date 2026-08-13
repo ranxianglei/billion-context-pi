@@ -127,3 +127,105 @@ test("activityLines formats retry events", () => {
     ["[retry] attempt 3 failed\n"],
   );
 });
+
+test("parses message_end with usage data (returns UsageUpdateEvent)", () => {
+  const ev = parseEventLine('{"type":"message_end","message":{"role":"assistant","usage":{"input":150,"output":80,"cacheRead":0,"cacheWrite":0,"totalTokens":230,"cost":{"input":0.0015,"output":0.0008,"cacheRead":0,"cacheWrite":0,"total":0.0023}}}}') as { kind: "usage-update"; usage: Record<string, unknown> };
+  assert.equal(ev.kind, "usage-update");
+  assert.equal(ev.usage.input, 150);
+  assert.equal(ev.usage.output, 80);
+  assert.equal(ev.usage.cacheRead, 0);
+  assert.equal(ev.usage.cacheWrite, 0);
+  assert.equal(ev.usage.totalTokens, 230);
+  assert.deepEqual(ev.usage.cost, { input: 0.0015, output: 0.0008, cacheRead: 0, cacheWrite: 0, total: 0.0023 });
+});
+
+test("message_end with optional fields returns UsageUpdateEvent with undefined", () => {
+  const ev = parseEventLine('{"type":"message_end","message":{"role":"assistant","usage":{"input":150,"output":80,"cacheRead":0,"cacheWrite":0,"totalTokens":230,"cost":{"input":0.0015,"output":0.0008,"cacheRead":0,"cacheWrite":0,"total":0.0023}}}}') as { kind: "usage-update"; usage: Record<string, unknown> };
+  assert.equal(ev.usage.cacheWrite1h, undefined);
+  assert.equal(ev.usage.reasoning, undefined);
+});
+
+test("message_end with no usage object returns null", () => {
+  const ev = parseEventLine('{"type":"message_end","role":"assistant","message":{}}');
+  assert.equal(ev, null);
+});
+
+test("message_end with no cost object defaults cost to zeros", () => {
+  const ev = parseEventLine('{"type":"message_end","message":{"role":"assistant","usage":{"input":150,"output":80,"cacheRead":0,"cacheWrite":0,"totalTokens":230}}}') as { kind: "usage-update"; usage: Record<string, unknown> };
+  assert.deepEqual(ev.usage.cost, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 });
+});
+
+test("message_end with non-finite number returns null when all fields invalid", () => {
+  const ev = parseEventLine('{"type":"message_end","message":{"role":"assistant","usage":{"input":"NaN","output":"NaN","cacheRead":"NaN","cacheWrite":"NaN","totalTokens":230,"cost":{"input":0.0015,"output":0.0008,"cacheRead":0,"cacheWrite":0,"total":0.0023}}}}');
+  assert.equal(ev, null);
+});
+
+test("handleMessageEnd skips non-assistant message_end", () => {
+  const ev = parseEventLine('{"type":"message_end","message":{"role":"user","usage":{"input":150,"output":80,"cacheRead":0,"cacheWrite":0,"totalTokens":230,"cost":{"input":0.0015,"output":0.0008,"cacheRead":0,"cacheWrite":0,"total":0.0023}}}}');
+  assert.equal(ev, null);
+});
+
+test("activityLines ignores usage-update events", () => {
+  const ev = { kind: "usage-update" as const, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
+  assert.deepEqual(activityLines(ev, { showThinking: false }), []);
+});
+
+test("accumulateUsage sums all fields including nested cost", async () => {
+  const { accumulateUsage } = await import("../src/delegate-tool.js");
+  const a = { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, totalTokens: 150, cost: { input: 0.001, output: 0.0005, cacheRead: 0, cacheWrite: 0, total: 0.0015 } };
+  const b = { input: 200, output: 100, cacheRead: 0, cacheWrite: 0, totalTokens: 300, cost: { input: 0.002, output: 0.001, cacheRead: 0, cacheWrite: 0, total: 0.003 } };
+  const result = accumulateUsage(a, b);
+  assert.equal(result.input, 300);
+  assert.equal(result.output, 150);
+  assert.equal(result.cacheRead, 0);
+  assert.equal(result.cacheWrite, 0);
+  assert.equal(result.cacheWrite1h, 0);
+  assert.equal(result.reasoning, 0);
+  assert.equal(result.totalTokens, 450);
+  assert.ok(Math.abs(result.cost.input - 0.003) < 1e-10);
+  assert.ok(Math.abs(result.cost.output - 0.0015) < 1e-10);
+  assert.equal(result.cost.cacheRead, 0);
+  assert.equal(result.cost.cacheWrite, 0);
+  assert.ok(Math.abs(result.cost.total - 0.0045) < 1e-10);
+});
+
+test("accumulateUsage returns b when a is undefined", async () => {
+  const { accumulateUsage } = await import("../src/delegate-tool.js");
+  const b = { input: 200, output: 100, cacheRead: 0, cacheWrite: 0, totalTokens: 300, cost: { input: 0.002, output: 0.001, cacheRead: 0, cacheWrite: 0, total: 0.003 } };
+  const result = accumulateUsage(undefined, b);
+  assert.deepEqual(result, b);
+});
+
+test("parses agent_settled event", () => {
+  const ev = parseEventLine('{"type":"agent_settled"}');
+  assert.deepEqual(ev, { kind: "agent-settled" });
+});
+
+test("activityLines ignores agent-settled events", () => {
+  const ev = { kind: "agent-settled" as const };
+  assert.deepEqual(activityLines(ev, { showThinking: false }), []);
+  assert.deepEqual(activityLines(ev, { showThinking: true }), []);
+});
+
+test("parseEventLine tolerates trailing CR (CRLF line endings)", () => {
+  assert.deepEqual(parseEventLine('{"type":"agent_settled"}\r'), { kind: "agent-settled" });
+  assert.deepEqual(
+    parseEventLine('{"type":"message_update","assistantMessageEvent":{"type":"thinking_end","contentIndex":0}}\r'),
+    { kind: "thinking-end" },
+  );
+  assert.deepEqual(
+    parseEventLine('{"type":"message_end","message":{"role":"assistant","usage":{"input":150,"output":80,"cacheRead":0,"cacheWrite":0,"totalTokens":230}}}\r'),
+    { kind: "usage-update", usage: { input: 150, output: 80, cacheRead: 0, cacheWrite: 0, cacheWrite1h: undefined, reasoning: undefined, totalTokens: 230, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } },
+  );
+});
+
+test("message_end with partial usage fills missing numeric fields with 0", () => {
+  const ev = parseEventLine('{"type":"message_end","message":{"role":"assistant","usage":{"input":150,"totalTokens":150}}}') as { kind: "usage-update"; usage: Record<string, unknown> };
+  assert.equal(ev.kind, "usage-update");
+  assert.equal(ev.usage.input, 150);
+  assert.equal(ev.usage.output, 0);
+  assert.equal(ev.usage.cacheRead, 0);
+  assert.equal(ev.usage.cacheWrite, 0);
+  assert.equal(ev.usage.totalTokens, 150);
+  assert.deepEqual(ev.usage.cost, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 });
+});

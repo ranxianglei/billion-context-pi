@@ -2,7 +2,7 @@ import { promises as fs } from "node:fs";
 import * as path from "node:path";
 import { homedir } from "node:os";
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
-import type { AdapterConfig } from "./config.js";
+import type { AdapterConfig, CompressConfig, DelegateConfig } from "./config.js";
 import { debug, logWarn } from "./log.js";
 
 /** User-facing config keys (subset of AdapterConfig). Loaded from
@@ -12,13 +12,13 @@ export interface UserAcpConfig {
   debug?: boolean;
   autoUpdate?: boolean;
   modelContextLimit?: number;
-  delegate?: boolean;
   toolBashDefaultTimeout?: number;
   toolOutputMaxBytes?: number;
-/** 上下文水位触发压缩提示的百分比（0-100，默认 25，0=禁用）——见 AdapterConfig.usageTriggerPercent */
   usageTriggerPercent?: number;
-  /** 界面语言（slash 命令输出 / nudge 附加文本）："zh" | "en"，缺省按 LANG 检测 */
   language?: "zh" | "en";
+  delegate?: boolean | DelegateConfig;
+  compress?: CompressConfig;
+  displayUsage?: "merged" | "separate";
 }
 
 /** Read global + project acp.json, project overrides global. Returns {} on any
@@ -49,25 +49,17 @@ function join(... parts: string[]): string {
   return path.join(...parts);
 }
 
-const KNOWN: Record<string, "boolean" | "number" | "string"> = {
-  debug: "boolean",
-  autoUpdate: "boolean",
-  modelContextLimit: "number",
-  delegate: "boolean",
-  toolBashDefaultTimeout: "number",
-  toolOutputMaxBytes: "number",
-  usageTriggerPercent: "number",
-  language: "string",
-};
+const KNOWN = new Set([
+  "debug", "autoUpdate", "modelContextLimit",
+  "toolBashDefaultTimeout", "toolOutputMaxBytes",
+  "delegate", "compress", "displayUsage",
+  "usageTriggerPercent", "language",
+]);
 
 function pickKnown(parsed: Record<string, unknown>): UserAcpConfig {
   const out: UserAcpConfig = {};
   for (const [k, v] of Object.entries(parsed)) {
-    // Type-check known keys: {"debug": "false"} is a string and must not
-    // truthily enable debug, and a string modelContextLimit would leak into
-    // the kernel's Config untouched.
-    const t = KNOWN[k];
-    if (t && typeof v === t) (out as Record<string, unknown>)[k] = v;
+    if (KNOWN.has(k)) (out as Record<string, unknown>)[k] = v;
   }
   return out;
 }
@@ -78,8 +70,6 @@ export function applyUserConfig(adapter: AdapterConfig, user: UserAcpConfig): Ad
   return {
     ...adapter,
     ...user,
-    // coreOverrides / protectedTools / preserveRecentMessages are not overridable
-    // from acp.json (keep them from the factory config).
     coreOverrides: adapter.coreOverrides,
     protectedTools: adapter.protectedTools,
     preserveRecentMessages: adapter.preserveRecentMessages,

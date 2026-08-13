@@ -1,4 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { initFooterStatus, updateFooterStatus, disposeFooterStatus } from "./footer-status.js";
 
 const DELEGATE_WIDGET_KEY = "billion-context-pi-delegates";
 const REFRESH_MS = 500;
@@ -69,6 +70,9 @@ function refresh(): void {
       lastRenderKey = "";
       clearWidget();
     }
+    // Final accumulated usage must still be shown after the last delegate
+    // finishes, so refresh the footer before stopping the timer.
+    updateFooterStatus();
     stopTimer();
     return;
   }
@@ -89,6 +93,9 @@ function refresh(): void {
     ui = undefined;
     stopTimer();
   }
+  // Delegates still running: keep the footer usage line fresh too (deduped
+  // inside updateFooterStatus, so this is O(1) per 500ms tick).
+  updateFooterStatus();
 }
 
 export const delegateStatusWidget = {
@@ -99,6 +106,7 @@ export const delegateStatusWidget = {
     // hasUI === false. Guard on the mode directly (types.d.ts: "Use \"tui\" to
     // guard terminal-only UI").
     if (ctx.mode !== "tui") return;
+    initFooterStatus(ctx);
     ui = ctx.ui;
     runsSnapshot = snapshot;
     if (!timer) {
@@ -110,6 +118,7 @@ export const delegateStatusWidget = {
   dispose(): void {
     stopTimer();
     clearWidget();
+    disposeFooterStatus();
     ui = undefined;
     lastRenderKey = "";
   },

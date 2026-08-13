@@ -49,9 +49,14 @@ For each scenario in `scenarios/*.json`:
 ```bash
 npm ci
 npm run build
-./scripts/e2e/run-e2e.sh                 # all scenarios
-./scripts/e2e/run-e2e.sh 03-nudge        # filter by filename substring
+npm run e2e                          # all scenarios (cross-platform)
+npm run e2e -- 03-nudge              # filter by filename substring
 ```
+
+The runner is `scripts/e2e/run-e2e.mjs` (Node; works on Linux, macOS, and
+Windows). It isolates each scenario under a temp Pi home by setting both `HOME`
+and `USERPROFILE`, since Node's `os.homedir()` reads `HOME` on POSIX but
+`USERPROFILE` on Windows. A legacy `run-e2e.sh` (bash) is kept for reference.
 
 Prerequisites: `node` ≥ 20 and the `pi` binary from the dev dependency
 (`./node_modules/.bin/pi`, pinned to a known version in `package.json`).

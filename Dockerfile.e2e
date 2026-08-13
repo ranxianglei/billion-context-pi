@@ -27,4 +27,4 @@ COPY scripts ./scripts
 RUN npm run build
 
 # Default entrypoint: run every scenario. Pass a substring arg to filter.
-ENTRYPOINT ["./scripts/e2e/run-e2e.sh"]
+ENTRYPOINT ["node", "./scripts/e2e/run-e2e.mjs"]

@@ -59,8 +59,6 @@ assign refs → sync blocks → prune → filter → hide calls → recommend �
 
 每条消息获得一个不可见的 `<acp>` 引用标签(`m00001`、`m00002`、...),对模型可见但用户不可见。模型用这些引用来指定压缩范围。
 
-当 nudge 触发且配置了 `compressModel`(见「配置」)时,nudge 会被**拦截**:由压缩模型自动压缩最大的安全范围,主模型不消耗 token。若没有可压缩内容(可压缩总量低于 kernel 的 5000 字符下限)或压缩模型不可用,则按常规注入 nudge 文本;内容过小注定失败时直接跳过 nudge。
-
 Pi 内置的自动压缩会被取消 —— billion-context 是唯一的上下文管理者。
 
 ## 插件兼容性与排序
@@ -136,7 +134,7 @@ Blocks: 3 active (3.7K summary, 15.2K original compressed)
 
 ## 配置
 
-billion-context-pi 开箱即用,无需任何配置。可以在 JSON 配置文件中设置七个可选 key。
+billion-context-pi 开箱即用,无需任何配置。可以在 JSON 配置文件中设置三个可选 key。
 
 ### 配置文件
 
@@ -148,23 +146,27 @@ billion-context-pi 开箱即用,无需任何配置。可以在 JSON 配置文件
   "autoUpdate": true,
   "modelContextLimit": 200000,
   "delegate": true,
-  "compressModel": "provider:model-id",
   "toolBashDefaultTimeout": 60,
-  "toolOutputMaxBytes": 200000
+  "toolOutputMaxBytes": 200000,
+  "maxContextLimit": "75%",
+  "emergencyThresholdPercent": "95%",
+  "nudgeGrowthTokens": 50000
 }
 ```
 
 | Key | 默认值 | 说明 |
 |-----|--------|------|
 | `debug` | `false` | 启用诊断日志(`error`/`warn`/`info` 始终写入 `~/.pi/acp.log`,此开关仅额外打开详细 `debug` 事件)。也可用环境变量 `ACP_DEBUG=1` 启用。 |
-| `autoUpdate` | `true` | Pi 启动时检查 npm 是否有更新版本并自动安装(限频:每 6 小时最多一次检查)。禁用以避免所有启动时的网络请求。 |
+| `autoUpdate` | `true` | Pi 启动时检查 npm 是否有更新版本并自动安装(限频:每 3 分钟最多一次检查)。禁用以避免所有启动时的网络请求。 |
 | `modelContextLimit` | *(自动)* | 覆盖上下文上限(token 数)。默认为模型的 `contextWindow`。 |
 | `delegate` | `true` | 启用 `acp_delegate` 工具(delegate/wait/cancel)及其系统提示词段落。设为 `false` 则不注册这些工具(例如你用了别的子代理扩展,或跑 headless 场景异步注入没有意义)。 |
-| `compressModel` | *(关闭)* | 用于自动压缩的专用模型(`provider:model-id`,如 `alibaba-coding:qwen3.7-plus`)。设置后,nudge 会被拦截:由该模型直接压缩最大的安全范围,主模型不消耗 token 做压缩。压缩失败或没有范围能达到 5000 字符下限时,仍按常规注入 nudge;内容过小必然失败时则直接跳过 nudge。可通过 `/acp-settings` 或直接编辑文件设置。 |
 | `toolBashDefaultTimeout` | `60` | 当模型未指定 `timeout` 时注入 `bash` 工具的超时秒数。Pi **本身没有默认超时**,不加这个,一次遗漏的超时可能挂起几千秒。超时后会提示模型用更大的 `timeout` 重跑。设为 `0` 恢复 Pi 的无界行为。 |
 | `toolOutputMaxBytes` | `200000` | 工具结果文本硬上限(字节,约 5000 行 @ ~40 字节/行,通过 `tool_result` hook 应用)。用于兜住 Pi 自身 50KB/2000 行截断管不到的输出(例如 Pi 未加限制的工具)。触发截断时会告诉模型如何查看完整输出——对 `bash`,完整输出在其临时文件(`BashToolDetails.fullOutputPath`)中;设更小(如 `8192`)可更省上下文,设 `0` 关闭。 |
+| `maxContextLimit` | `"75%"` | 上下文使用率达到此值时触发**强制压缩** nudge(绕过增长门控 + 频率限制)。支持比例(`0.75`)或百分比字符串(`"75%"`)。调小 → 更早/更激进压缩。映射到内核 `nudge.maxContextLimitPct`。 |
+| `emergencyThresholdPercent` | `"95%"` | 上下文使用率达到此值时触发**紧急截断**,硬截断大块工具输出以保住会话。支持比例(`0.95`)或百分比字符串(`"95%"`)。必须 ≥ `maxContextLimit`。映射到内核 `nudge.emergencyThresholdPct` + `truncate.threshold`。 |
+| `nudgeGrowthTokens` | `50000` | 软压缩 nudge 的增长步长(token)。大约每积累这么多可压缩 token 就触发一次 nudge。调小 → 压得更频繁;调大 → 压得更少。映射到内核 `nudge.growthFloor` + `nudge.growthCap`。 |
 
-> **只有这七个 key 会被 `acp.json` 读取。** 其他调优参数(`preserveRecentMessages`、`protectedTools`、nudge 阈值)是代码级的,不向用户开放。
+> **只有这九个 key 会被 `acp.json` 读取。** 其他调优参数(`preserveRecentMessages`、`protectedTools`)是代码级的,不向用户开放。三个 nudge 阈值(`maxContextLimit`、`emergencyThresholdPercent`、`nudgeGrowthTokens`)构成三级触发:增长驱动的软 nudge → `maxContextLimit` 强制 nudge → `emergencyThresholdPercent` 紧急截断。
 
 ### 环境变量
 

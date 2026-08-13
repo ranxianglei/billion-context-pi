@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildChildArgs, delegateSpawnOptions, injectedWaitMessage } from "../src/delegate-tool.js";
+import { buildChildArgs, delegateSpawnOptions, injectedWaitMessage, buildWaitResult, buildCancelResult, getDelegateUsage, resetDelegateUsage, injectResult } from "../src/delegate-tool.js";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 /** Minimal ctx mock - buildChildArgs reads ctx.model and sessionManager. */
@@ -214,4 +214,121 @@ test("buildChildArgs keeps -p for sync delegates even on pi", async () => {
   assert.equal(isAsync, false);
   assert.equal(useJsonStream, false);
   assert.equal(cliArgs[0], "-p");
+});
+
+test("buildWaitResult returns usage in merged mode", () => {
+  resetDelegateUsage();
+  const run = { runId: "del_x", agent: "reviewer", task: "test", usage: { input: 150, output: 80, cacheRead: 0, cacheWrite: 0, totalTokens: 230, cost: { input: 0.0015, output: 0.0008, cacheRead: 0, cacheWrite: 0, total: 0.0023 } } };
+  const result = buildWaitResult(run as any, "content", "merged");
+  assert.ok(result.usage, "usage is present in merged mode");
+  assert.equal(result.usage!.input, 150);
+  assert.equal(run.usageReported, true, "sets usageReported");
+});
+
+test("buildWaitResult accumulates usage in separate mode (default)", () => {
+  resetDelegateUsage();
+  const run = { runId: "del_x", agent: "reviewer", task: "test", usage: { input: 150, output: 80, cacheRead: 0, cacheWrite: 0, totalTokens: 230, cost: { input: 0.0015, output: 0.0008, cacheRead: 0, cacheWrite: 0, total: 0.0023 } } };
+  const result = buildWaitResult(run as any, "content");
+  assert.equal(result.usage, undefined, "usage not returned in separate mode");
+  assert.equal(run.usageReported, true, "sets usageReported");
+  const total = getDelegateUsage();
+  assert.ok(total, "delegate usage accumulated");
+  assert.equal(total!.input, 150);
+  assert.equal(total!.output, 80);
+});
+
+test("buildWaitResult returns plain result when usage already reported", () => {
+  resetDelegateUsage();
+  const run = { runId: "del_x", agent: "reviewer", task: "test", usage: { input: 150, output: 80, cacheRead: 0, cacheWrite: 0, totalTokens: 230, cost: { input: 0.0015, output: 0.0008, cacheRead: 0, cacheWrite: 0, total: 0.0023 } }, usageReported: true };
+  const result = buildWaitResult(run as any, "content");
+  assert.equal(result.usage, undefined, "usage omitted on second call");
+  assert.equal(getDelegateUsage(), undefined, "no accumulation when already reported");
+});
+
+test("buildWaitResult returns plain result when no usage", () => {
+  resetDelegateUsage();
+  const run = { runId: "del_x", agent: "reviewer", task: "test" };
+  const result = buildWaitResult(run as any, "content");
+  assert.equal(result.usage, undefined, "usage omitted when absent");
+  assert.equal(getDelegateUsage(), undefined, "no accumulation when no usage");
+});
+
+test("buildCancelResult returns usage in merged mode", () => {
+  resetDelegateUsage();
+  const run = { runId: "del_x", agent: "reviewer", task: "test", usage: { input: 150, output: 80, cacheRead: 0, cacheWrite: 0, totalTokens: 230, cost: { input: 0.0015, output: 0.0008, cacheRead: 0, cacheWrite: 0, total: 0.0023 } } };
+  const result = buildCancelResult(run as any, "content", "merged");
+  assert.ok(result.usage, "usage is present in merged mode");
+  assert.equal(result.usage!.input, 150);
+  assert.equal(run.usageReported, true, "sets usageReported");
+});
+
+test("buildCancelResult accumulates usage in separate mode", () => {
+  resetDelegateUsage();
+  const run = { runId: "del_x", agent: "reviewer", task: "test", usage: { input: 150, output: 80, cacheRead: 0, cacheWrite: 0, totalTokens: 230, cost: { input: 0.0015, output: 0.0008, cacheRead: 0, cacheWrite: 0, total: 0.0023 } } };
+  const result = buildCancelResult(run as any, "content");
+  assert.equal(result.usage, undefined, "usage not returned in separate mode");
+  assert.equal(run.usageReported, true, "sets usageReported");
+  const total = getDelegateUsage();
+  assert.ok(total, "delegate usage accumulated");
+  assert.equal(total!.input, 150);
+});
+
+test("buildCancelResult returns plain result when no usage", () => {
+  resetDelegateUsage();
+  const run = { runId: "del_x", agent: "reviewer", task: "test" };
+  const result = buildCancelResult(run as any, "content");
+  assert.equal(result.usage, undefined, "usage omitted when absent");
+  assert.equal(getDelegateUsage(), undefined, "no accumulation when no usage");
+});
+
+// ─── injectResult usage accumulation ───────────────────────────────────────
+
+const USAGE_FIXTURE = { input: 150, output: 80, cacheRead: 0, cacheWrite: 0, totalTokens: 230, cost: { input: 0.0015, output: 0.0008, cacheRead: 0, cacheWrite: 0, total: 0.0023 } };
+
+test("injectResult accumulates usage in separate mode when unreported", () => {
+  resetDelegateUsage();
+  const pi = { sendUserMessage: () => {} };
+  const ok = injectResult(pi as any, "reviewer", "del_x", "test", 0, "/tmp/del_x.out", undefined, USAGE_FIXTURE, "separate", false);
+  assert.equal(ok, true, "injection succeeds");
+  const total = getDelegateUsage();
+  assert.ok(total, "usage accumulated into session total");
+  assert.equal(total!.input, 150);
+  assert.equal(total!.output, 80);
+});
+
+test("injectResult does not double-accumulate when usage already reported", () => {
+  resetDelegateUsage();
+  const pi = { sendUserMessage: () => {} };
+  const ok = injectResult(pi as any, "reviewer", "del_x", "test", 0, "/tmp/del_x.out", undefined, USAGE_FIXTURE, "separate", true);
+  assert.equal(ok, true, "injection succeeds");
+  assert.equal(getDelegateUsage(), undefined, "no accumulation when already reported");
+});
+
+test("injectResult merged mode injects without accumulating", () => {
+  resetDelegateUsage();
+  const pi = { sendUserMessage: () => {} };
+  const ok = injectResult(pi as any, "reviewer", "del_x", "test", 0, "/tmp/del_x.out", undefined, USAGE_FIXTURE, "merged", false);
+  assert.equal(ok, true, "injection succeeds");
+  assert.equal(getDelegateUsage(), undefined, "merged mode never accumulates");
+});
+
+test("injectResult without usage leaves cumulative total undefined", () => {
+  resetDelegateUsage();
+  const pi = { sendUserMessage: () => {} };
+  const ok = injectResult(pi as any, "reviewer", "del_x", "test", 0, "/tmp/del_x.out", undefined, undefined, "separate", false);
+  assert.equal(ok, true, "injection succeeds");
+  assert.equal(getDelegateUsage(), undefined, "no usage, no accumulation");
+});
+
+test("injectResult returns false when sendUserMessage unavailable", () => {
+  const ok = injectResult({} as any, "reviewer", "del_x", "test", 0, "/tmp/del_x.out");
+  assert.equal(ok, false, "no sendUserMessage means no injection");
+});
+
+test("buildWaitResult merged mode does not accumulate delegateUsageTotal", () => {
+  resetDelegateUsage();
+  const run = { runId: "del_x", agent: "reviewer", task: "test", usage: USAGE_FIXTURE };
+  const result = buildWaitResult(run as any, "content", "merged");
+  assert.ok(result.usage, "usage present in merged mode");
+  assert.equal(getDelegateUsage(), undefined, "merged mode never accumulates");
 });

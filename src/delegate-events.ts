@@ -3,6 +3,79 @@
 // instead of the final reply text. These pure functions map raw lines to
 // structured events and format them for the activity file.
 
+export interface Usage {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  cacheWrite1h?: number;
+  reasoning?: number;
+  totalTokens: number;
+  cost: {
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+    total: number;
+  };
+}
+
+export interface UsageUpdateEvent {
+  kind: "usage-update";
+  usage: Usage;
+}
+
+export interface AgentSettledEvent {
+  kind: "agent-settled";
+}
+
+function safeNumber(v: unknown): number | undefined {
+  return typeof v === "number" && Number.isFinite(v) ? v : undefined;
+}
+
+export function handleMessageEnd(
+  event: Record<string, unknown>
+): UsageUpdateEvent | null {
+  const msg = event.message as Record<string, unknown> | undefined;
+  if (!msg || msg.role !== "assistant") return null;
+  const u = (msg as Record<string, unknown>).usage;
+  if (!u || typeof u !== "object") return null;
+  const raw = u as Record<string, unknown>;
+  const input = safeNumber(raw.input);
+  const output = safeNumber(raw.output);
+  const cacheRead = safeNumber(raw.cacheRead);
+  const cacheWrite = safeNumber(raw.cacheWrite);
+  if (input === undefined && output === undefined && cacheRead === undefined && cacheWrite === undefined) return null;
+  const cost = raw.cost;
+  let parsedCost: Usage["cost"];
+  if (cost && typeof cost === "object") {
+    const c = cost as Record<string, unknown>;
+    parsedCost = {
+      input: typeof c.input === "number" ? c.input : 0,
+      output: typeof c.output === "number" ? c.output : 0,
+      cacheRead: typeof c.cacheRead === "number" ? c.cacheRead : 0,
+      cacheWrite: typeof c.cacheWrite === "number" ? c.cacheWrite : 0,
+      total: typeof c.total === "number" ? c.total : 0,
+    };
+  } else {
+    parsedCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
+  }
+  return {
+    kind: "usage-update",
+    usage: {
+      input: input ?? 0,
+      output: output ?? 0,
+      cacheRead: cacheRead ?? 0,
+      cacheWrite: cacheWrite ?? 0,
+      cacheWrite1h: safeNumber(raw.cacheWrite1h),
+      reasoning: safeNumber(raw.reasoning),
+      totalTokens: typeof raw.totalTokens === "number" ? raw.totalTokens : 0,
+      cost: parsedCost,
+    },
+  };
+}
+
+
 export interface ToolStartEvent {
   kind: "tool-start";
   toolName: string;
@@ -45,7 +118,9 @@ export type ParsedEvent =
   | ThinkingDeltaEvent
   | ThinkingEndEvent
   | RetryStartEvent
-  | RetryEndEvent;
+  | RetryEndEvent
+  | UsageUpdateEvent
+  | AgentSettledEvent;
 
 export interface ThinkingEndEvent {
   kind: "thinking-end";
@@ -58,6 +133,7 @@ export interface ThinkingEndEvent {
  */
 export class ThinkingCollector {
   private buf = "";
+  private usage: Usage | undefined;
 
   constructor(private readonly showThinking: boolean) {}
 
@@ -65,12 +141,24 @@ export class ThinkingCollector {
     this.buf += delta;
   }
 
-  /** Return the segment line to write ("" when empty or disabled), resetting. */
+  process(ev: ParsedEvent): void {
+    if (ev.kind === "thinking-delta") {
+      this.push(ev.delta);
+    }
+    if (ev.kind === "usage-update") {
+      this.usage = ev.usage;
+    }
+  }
+
   flush(): string {
     const text = this.buf.trim();
     this.buf = "";
     if (!this.showThinking || !text) return "";
     return `[thinking] ${text}\n`;
+  }
+
+  getUsage(): Usage | undefined {
+    return this.usage;
   }
 }
 
@@ -150,6 +238,12 @@ export function parseEventLine(line: string): ParsedEvent | null {
       success: Boolean(e.success),
       attempt: Number(e.attempt ?? 0),
     };
+  }
+  if (e.type === "message_end") {
+    return handleMessageEnd(e);
+  }
+  if (e.type === "agent_settled") {
+    return { kind: "agent-settled" };
   }
   return null;
 }

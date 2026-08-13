@@ -8,6 +8,8 @@ import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { t, setLocale } from "./i18n.js";
+import { getDelegateUsage } from "./delegate-tool.js";
+import { formatCompactTokens } from "./footer-status.js";
 
 declare const CURRENT_VERSION: string;
 
@@ -374,9 +376,7 @@ export async function saveConfig(patch: Record<string, unknown>): Promise<void> 
 }
 
 function fmtTokens(n: number): string {
-  if (n >= 1000000) return `${(n / 1000000).toFixed(1)}M`;
-  if (n >= 1000) return `${(n / 1000).toFixed(1)}K`;
-  return String(n);
+  return formatCompactTokens(n);
 }
 
 function bar(value: number, total: number, width: number = 20): string {
@@ -477,6 +477,15 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
     lines.push(t("blocks.none"));
   }
 
+  lines.push("");
+  const delegateUsage = getDelegateUsage();
+  if (delegateUsage && delegateUsage.totalTokens > 0) {
+    lines.push("");
+    const cost = delegateUsage.cost.total;
+    const costStr = cost > 0 ? ` (${cost.toFixed(4)})` : "";
+    lines.push("── Session delegate usage (excluded from main totals) ──");
+    lines.push(`Tokens: ${delegateUsage.input.toLocaleString()} in, ${delegateUsage.output.toLocaleString()} out (${delegateUsage.totalTokens.toLocaleString()} total)${costStr}`);
+  }
   lines.push("");
   lines.push(t("tag-visibility"));
 

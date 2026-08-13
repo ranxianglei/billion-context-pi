@@ -11,6 +11,7 @@ interface Harness {
   reasons: string[];
   eofGraceCount: number;
   settled: () => boolean;
+  settle: () => void;
   watchdog: ReturnType<typeof attachWatchdogs>;
 }
 
@@ -50,6 +51,9 @@ function setup(overrides?: { idleMs?: number; timeoutMs?: number; killGraceMs?: 
       return eofGraceCount;
     },
     settled: () => settledFlag,
+    settle: () => {
+      settledFlag = true;
+    },
     watchdog,
   };
 }
@@ -111,4 +115,59 @@ test("settled runs never get killed or grace-finalized", async () => {
   await sleep(60);
   assert.equal(h.kills.length, 0, "settled run not killed");
   assert.equal(h.eofGraceCount, 0, "settled run not grace-finalized");
+});
+
+test("settledGrace kills with SIGTERM when the process does not exit in time", async () => {
+  const h = setup({ killGraceMs: 200 });
+  h.watchdog.settledGrace(30, 200, "agent settled but process did not exit");
+  await sleep(60);
+  assert.deepEqual(h.kills, ["SIGTERM"], "SIGTERM fired once");
+  assert.equal(h.reasons.length, 1, "onKill called once");
+  assert.equal(h.reasons[0], "agent settled but process did not exit", "reason forwarded");
+  h.watchdog.dispose();
+});
+
+test("settledGrace escalates to SIGKILL when the child ignores SIGTERM", async () => {
+  const h = setup({ killGraceMs: 30 });
+  h.watchdog.settledGrace(20, 30, "agent settled but process did not exit");
+  await sleep(100);
+  assert.deepEqual(h.kills, ["SIGTERM", "SIGKILL"], "SIGTERM then SIGKILL");
+  h.watchdog.dispose();
+});
+
+test("settledGrace does nothing when the run is already settled", async () => {
+  const h = setup({ initiallySettled: true, killGraceMs: 200 });
+  h.watchdog.settledGrace(20, 200, "agent settled but process did not exit");
+  await sleep(60);
+  assert.equal(h.kills.length, 0, "settled run not killed");
+  h.watchdog.dispose();
+});
+
+test("settledGrace is idempotent (only one timer is armed)", async () => {
+  const h = setup({ killGraceMs: 200 });
+  h.watchdog.settledGrace(30, 200, "first");
+  h.watchdog.settledGrace(30, 200, "second");
+  await sleep(60);
+  assert.deepEqual(h.kills, ["SIGTERM"], "single SIGTERM despite double call");
+  assert.equal(h.reasons.length, 1, "single onKill");
+  assert.equal(h.reasons[0], "first", "first reason wins");
+  h.watchdog.dispose();
+});
+
+test("dispose clears a pending settledGrace timer", async () => {
+  const h = setup({ killGraceMs: 200 });
+  h.watchdog.settledGrace(30, 200, "agent settled but process did not exit");
+  h.watchdog.dispose();
+  await sleep(80);
+  assert.equal(h.kills.length, 0, "no kill after dispose");
+});
+
+test("settle before the grace fires stops the kill (normal exit path)", async () => {
+  const h = setup({ killGraceMs: 200 });
+  h.watchdog.settledGrace(200, 200, "agent settled but process did not exit");
+  await sleep(30);
+  h.settle();
+  await sleep(220);
+  assert.equal(h.kills.length, 0, "no kill once settled before grace");
+  h.watchdog.dispose();
 });

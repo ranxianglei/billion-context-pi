@@ -4,6 +4,8 @@ import type { AcpRuntime } from "./runtime.js";
 import { buildStatusReport, defaultCountTokens, formatRanges } from "acp-kernel";
 import { estimateTokens, collectCoveredMessageIds } from "./tokens.js";
 import { logThrow } from "./log.js";
+import { getDelegateUsage } from "./delegate-tool.js";
+import { resolveDelegate } from "./config.js";
 
 const StatusParams = Type.Object({
   scope: Type.Optional(Type.Union([Type.Literal("compressed"), Type.Literal("uncompressed")], { description: '"compressed" = drill into blocks; "uncompressed" = show visible messages/ranges. Default: overview.' })),
@@ -91,6 +93,20 @@ async function handleStatus(args: StatusArgs, runtime: AcpRuntime, ctx: Extensio
     // and /acp all render compressible+protected ranges identically
     // (merged oldest-first, with mixed-range breakdowns).
     extra.push(formatRanges(ranges, protectedRanges));
+  }
+  const delegateUsage = getDelegateUsage();
+  if (delegateUsage && delegateUsage.totalTokens > 0) {
+    extra.push("");
+    const cost = delegateUsage.cost.total;
+    const costStr = cost > 0 ? ` ($${cost.toFixed(4)})` : "";
+    extra.push("── Session delegate usage (excluded from main totals) ──");
+    extra.push(`Tokens: ${delegateUsage.input.toLocaleString()} in, ${delegateUsage.output.toLocaleString()} out (${delegateUsage.totalTokens.toLocaleString()} total)${costStr}`);
+  } else if (resolveDelegate(runtime.adapter).displayUsage === "merged") {
+    extra.push("");
+    extra.push("merged mode: delegate usage is included in main session totals.");
+  } else {
+    extra.push("");
+    extra.push("Delegate usage: none this session.");
   }
   return extra.length > 0 ? `${base}\n${extra.join("\n")}` : base;
 }

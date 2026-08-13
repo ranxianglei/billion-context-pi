@@ -6,13 +6,13 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import type { CoreMessage, NudgeDecision, CompressionBlock } from "acp-kernel";
 import { renderNudgeText } from "acp-kernel";
-import type { AdapterConfig } from "./config.js";
+import { type AdapterConfig, resolveDelegate } from "./config.js";
 import { createRuntime, type AcpRuntime } from "./runtime.js";
 import { makeCompressTool } from "./compress-tool.js";
 import { makeDecompressTool } from "./decompress-tool.js";
 import { makeSearchTool } from "./search-tool.js";
 import { makeStatusTool } from "./status-tool.js";
-import { makeDelegateTool, makeDelegateWaitTool, makeDelegateCancelTool, runningRunsSnapshot } from "./delegate-tool.js";
+import { makeDelegateTool, makeDelegateWaitTool, makeDelegateCancelTool, runningRunsSnapshot, resetDelegateUsage, setDelegateDisplayUsage } from "./delegate-tool.js";
 import { makeCommands } from "./commands.js";
 import { autoCompress, summarizeRange, selectRangeSpan, totalCompressibleChars } from "./auto-compress.js";
 import { coreOutToAgentMessages } from "./messages.js";
@@ -142,6 +142,8 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
   pi.on("session_start", async (_event, ctx) => {
     runtime.store.invalidate();
     runtime.clearNudgeTracking();
+    resetDelegateUsage();
+    setDelegateDisplayUsage("separate");
     const sid = ctx.sessionManager.getSessionId();
     logInfo("session", { event: "start", sid, cwd: ctx.cwd, debug: runtime.adapter.debug ?? null, version: typeof CURRENT_VERSION !== "undefined" ? CURRENT_VERSION : null });
     try {
@@ -153,7 +155,7 @@ registerCommands(pi, runtime); // 重新注册命令（同名覆盖）→ descri
     } catch (e) {
       logThrow("config", e, { sid, phase: "session_start" });
     }
-    if (runtime.adapter.delegate !== false) {
+    if (resolveDelegate(runtime.adapter).enabled) {
       pi.registerTool(makeDelegateTool(pi));
       pi.registerTool(makeDelegateWaitTool(pi));
       pi.registerTool(makeDelegateCancelTool(pi));
