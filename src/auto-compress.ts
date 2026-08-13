@@ -6,6 +6,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Config, CoreMessage, CompressionState, NudgeDecision, CompressibleRange } from "acp-kernel";
 import type { AcpRuntime } from "./runtime.js";
 import { debug, logInfo, logWarn } from "./log.js";
+import { t } from "./i18n.js";
 
 const TIMEOUT_MS = 60_000;
 const MAX_OUTPUT_TOKENS = 3000;
@@ -246,6 +247,8 @@ export async function autoCompress(
   if (!span) return { applied: false, fatal: false };
   const slice = sliceRange(turn.messages, turn.state, span.startRef, span.endRef);
   if (slice.length === 0) return { applied: false, fatal: false };
+
+  ctx.ui?.notify?.(t("compact.compressing", { tokens: span.tokens }), "info");
 
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), TIMEOUT_MS);
