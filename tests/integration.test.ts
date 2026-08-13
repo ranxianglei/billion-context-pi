@@ -260,6 +260,24 @@ test("omp rejects a non-contiguous persisted subsequence", async () => {
   assert.equal(saved.messageRefs.byRaw["live-0"], firstRef);
 });
 
+test("omp rejects ambiguous equal-length persisted runs", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(api);
+  const stateFile = "/tmp/nonexistent-pai-acp-ambiguous-run.session.json";
+  await rm(`${stateFile}.acp.json`, { force: true });
+  const persisted = [userMsg("e1", "same"), userMsg("gap", "different"), userMsg("e2", "same")];
+  const ctx = fakeCtx(persisted, stateFile);
+  const result = await handlers.get("context")![0]!({
+    type: "context",
+    messages: [{ role: "user", content: "same", timestamp: 1 }],
+  }, ctx);
+  const liveRef = result.messages[0].content.find((block: { type: string; text: string }) => block.type === "text").text.match(/m\d{5}/)![0];
+  const saved = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
+  assert.equal(saved.messageRefs.byRaw.e1, undefined);
+  assert.equal(saved.messageRefs.byRaw.e2, undefined);
+  assert.equal(saved.messageRefs.byRaw["live-0"], liveRef);
+});
+
 test("omp migrates a live ref after the provider context evicts its prefix", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api);
@@ -605,6 +623,110 @@ test("empty live context preserves refs created for an unpersisted message", asy
   const state = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
   assert.equal(state.messageRefs.byRaw["live-0"], "m00001");
 });
+test("omp keeps compression blocks active when provider context has an extra prefix", async (t) => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
+  const dir = await mkdtemp(join(tmpdir(), "pai-acp-omp-provider-prefix-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const stateFile = join(dir, "session.json");
+  const texts = [
+    "This first message is large enough to compress. ".repeat(130),
+    "This second message is also part of the compressed range. ".repeat(130),
+    ...["three", "four", "five", "six", "seven"].map((n) => `filler ${n} `.repeat(400)),
+  ];
+  const persisted = texts.map((text, index) => userMsg(`e${index + 1}`, text));
+  const ctx = {
+    ...fakeCtx(persisted, stateFile),
+    sessionManager: {
+      getBranch: () => persisted,
+      getSessionId: () => "test-session",
+      getSessionFile: () => stateFile,
+    },
+  };
+  const initial = await handlers.get("context")![0]!(
+    { type: "context", messages: texts.map((text) => ({ role: "user", content: [{ type: "text", text }], timestamp: Date.now() })) },
+    ctx,
+  );
+  const first = initial.messages[0] as { content: Array<{ type?: string; text?: string }> };
+  const targetRef = first.content.find((block) => block.type === "text")!.text!.match(/m\d{5}/)![0];
+  const compressTool = api.tools.find((tool: { name: string }) => tool.name === "compress")!;
+  const compressed = await compressTool.execute(
+    "tc-omp-provider-prefix",
+    { content: [{ startId: targetRef, endId: "m00002", summary: "The first two messages were compressed into a durable ACP summary." }] },
+    undefined,
+    undefined,
+    ctx,
+  );
+  assert.match(compressed.content[0].text, /1 block/);
+
+  const next = await handlers.get("context")![0]!(
+    {
+      type: "context",
+      messages: [
+        { role: "user", content: [{ type: "text", text: "provider-only context prefix" }], timestamp: Date.now() },
+        ...texts.map((text) => ({ role: "user", content: [{ type: "text", text }], timestamp: Date.now() })),
+      ],
+    },
+    ctx,
+  );
+  const saved = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
+  assert.equal(saved.blocks[0].active, true, "the compressed block must remain active after the prefix");
+  assert.ok(next.messages.length < texts.length + 1, "covered messages must be replaced in provider context");
+});
+
+test("omp keeps compression active when persisted and provider tails diverge", async (t) => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
+  const dir = await mkdtemp(join(tmpdir(), "pai-acp-omp-branch-divergence-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const stateFile = join(dir, "session.json");
+  const commonTexts = [
+    "This first common message is large enough to compress. ".repeat(130),
+    "This second common message is also part of the compressed range. ".repeat(130),
+    ...["three", "four", "five", "six", "seven"].map((n) => `common filler ${n} `.repeat(400)),
+  ];
+  let persisted = commonTexts.map((text, index) => userMsg(`e${index + 1}`, text));
+  const ctx = {
+    ...fakeCtx(persisted, stateFile),
+    sessionManager: {
+      getBranch: () => persisted,
+      getSessionId: () => "test-session",
+      getSessionFile: () => stateFile,
+    },
+  };
+  const liveCommon = commonTexts.map((text) => ({ role: "user", content: [{ type: "text", text }], timestamp: Date.now() }));
+  const initial = await handlers.get("context")![0]!({ type: "context", messages: liveCommon }, ctx);
+  const first = initial.messages[0] as { content: Array<{ type?: string; text?: string }> };
+  const targetRef = first.content.find((block) => block.type === "text")!.text!.match(/m\d{5}/)![0];
+  const compressTool = api.tools.find((tool: { name: string }) => tool.name === "compress")!;
+  const compressed = await compressTool.execute(
+    "tc-omp-branch-divergence",
+    { content: [{ startId: targetRef, endId: "m00002", summary: "The first two common messages were compressed into a durable ACP summary." }] },
+    undefined,
+    undefined,
+    ctx,
+  );
+  assert.match(compressed.content[0].text, /1 block/);
+
+  const activeUserText = "current user on the active branch";
+  persisted = [...persisted, userMsg("e-active-user", activeUserText)];
+  const divergent = await handlers.get("context")![0]!(
+    {
+      type: "context",
+      messages: [
+        { role: "user", content: [{ type: "text", text: "projected provider-only prefix" }], timestamp: Date.now() },
+        ...liveCommon,
+        { role: "assistant", content: [{ type: "text", text: "abandoned branch assistant tail" }], timestamp: Date.now() },
+        { role: "user", content: [{ type: "text", text: activeUserText }], timestamp: Date.now() },
+      ],
+    },
+    ctx,
+  );
+  const saved = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
+  assert.equal(saved.blocks[0].active, true, "the compressed block must remain active across divergent branch tails");
+  assert.ok(divergent.messages.length < commonTexts.length + 3, "covered common messages must stay pruned");
+});
+
 
 test("delegate:false omits the ACP_DELEGATE NOTIFICATIONS section from the system prompt", () => {
   const { api, handlers } = captureApi();

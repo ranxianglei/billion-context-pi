@@ -2,7 +2,7 @@ import { Type, type Static } from "typebox";
 import type { AgentToolResult, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { AcpRuntime } from "./runtime.js";
 import { debug, logError, logInfo, logThrow } from "./log.js";
-import { parseBlockIdArg, collectBlockContent } from "acp-kernel";
+import { parseBlockIdArg, collectBlockContent, type CompressionBlock } from "acp-kernel";
 import { entriesToCoreMessages } from "./messages.js";
 import { writeFile, mkdir } from "node:fs/promises";
 import { existsSync, realpathSync } from "node:fs";
@@ -128,6 +128,33 @@ function findMessageContent(ref: string, ctx: ExtensionContext): { text: string;
   return null;
 }
 
+/** Recover a block's message refs from the FULL session tree (getEntry), not
+ *  just the active branch, so block decompress still works after a tree
+ *  navigation (workspace-history /undo /redo, Pi /tree). Block refs are
+ *  CoreMessage ids — multi tool-call assistants are `${entryId}#${callId}`
+ *  (messages.ts projectMessage) — while getEntry() keys are SessionEntry ids
+ *  (no suffix), so both sides normalize to the base id before comparing.
+ *  Re-projecting a fetched entry re-splits multi tool-call assistants back
+ *  into `${entryId}#${callId}` CoreMessages, which match
+ *  block.effectiveMessageIds verbatim in collectBlockContent's targetIds set. */
+function resolveBlockMessages(
+  block: CompressionBlock,
+  coreMessages: ReturnType<typeof entriesToCoreMessages>,
+  ctx: ExtensionContext,
+): ReturnType<typeof entriesToCoreMessages> {
+  const neededBaseIds = new Set(block.effectiveMessageIds.map((id) => id.split("#")[0]!));
+  const presentBaseIds = new Set(coreMessages.map((m) => m.id.split("#")[0]!));
+  const missingBaseIds = [...neededBaseIds].filter((id) => !presentBaseIds.has(id));
+  if (missingBaseIds.length === 0) return coreMessages;
+
+  const extra: ReturnType<typeof entriesToCoreMessages> = [];
+  for (const baseId of missingBaseIds) {
+    const entry = ctx.sessionManager.getEntry(baseId);
+    if (entry) extra.push(...entriesToCoreMessages([entry]));
+  }
+  return [...coreMessages, ...extra];
+}
+
 /** Decompress a single message by its ref. Unlike block decompression (which
  *  defaults to file — blocks can be huge), a single message is usually small,
  *  so it defaults to inline. Oversized messages still go to a file. */
@@ -195,7 +222,11 @@ async function handleDecompress(args: DecompressArgs, runtime: AcpRuntime, ctx: 
   }
 
   const full = args.full ?? false;
-  const { text, count } = collectBlockContent(state, block, coreMessages, { full });
+  // Resolve the block's message refs against the FULL session tree (falling
+  // back to getEntry for refs missing from the active branch), so decompress
+  // still restores original text after a tree navigation (undo/redo//tree).
+  const resolved = resolveBlockMessages(block, coreMessages, ctx);
+  const { text, count } = collectBlockContent(state, block, resolved, { full });
 
   if (count === 0) return `Block ${blockId} has no restorable message content.`;
 

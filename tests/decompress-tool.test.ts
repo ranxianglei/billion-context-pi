@@ -43,6 +43,17 @@ function fakeCtx(entries: any[], stateFile: string) {
   };
 }
 
+/** fake ctx whose sessionManager keeps a FULL tree (getEntry) distinct from the
+ *  ACTIVE branch (getBranch), simulating a tree navigation (undo): the leaf
+ *  moved so the block's messages left the active branch, but they are still in
+ *  the session log (full tree) — exactly the scenario resolveBlockMessages
+ *  fixes. */
+function fakeCtxFullTree(allEntries: any[], activeEntries: any[], stateFile: string) {
+  const ctx = fakeCtx(activeEntries, stateFile) as any;
+  ctx.sessionManager.getEntry = (id: string) => allEntries.find((e: any) => e.id === id);
+  return ctx;
+}
+
 // Shared setup: assign refs + compress m00001 into block b1, return the tool
 // handles + ctx so each test can drive the decompress tool.
 async function setupWithCompressedBlock() {
@@ -131,4 +142,155 @@ test("decompress keeps the block active after a file-mode call", async () => {
   const res2 = await decompressTool.execute("tc7", { blockId: "b1" }, undefined, undefined, ctx);
   const text2 = (res2.content[0] as any).text as string;
   assert.doesNotMatch(text2, /not found/i, "block still present after first decompress");
+});
+
+test("decompress restores a block's original text via getEntry fallback after tree navigation (undo)", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+  const stateFile = "/tmp/pai-acp-decompress-fallback-undo.session.json";
+  await cleanState(stateFile);
+  const longText = "This is a detailed message that needs to be compressed. ".repeat(130);
+  const filler = (n: string) => `filler ${n} `.repeat(400);
+  const allEntries = [
+    userMsg("e1", longText),
+    userMsg("e2", filler("two")), userMsg("e3", filler("three")),
+    userMsg("e4", filler("four")), userMsg("e5", filler("five")),
+    userMsg("e6", filler("six")), userMsg("e7", filler("seven")),
+  ];
+
+  // Compress phase: everything is on the active branch (e1 → block b1).
+  const compressCtx = fakeCtxFullTree(allEntries, allEntries, stateFile);
+  await handlers.get("context")![0]!({ type: "context", messages: [] }, compressCtx);
+  const compressTool = api.tools.find((t: any) => t.name === "compress")!;
+  await compressTool.execute(
+    "tc1",
+    { content: [{ startId: "m00001", endId: "m00001", summary: "Detailed initial context message for the decompress-tool tests." }] },
+    undefined, undefined, compressCtx,
+  );
+
+  // Undo phase: the leaf moved; e1 left the active branch but is still in the
+  // full tree (getEntry finds it) — like after /undo, /redo, or /tree.
+  const activeAfterUndo = allEntries.filter((e) => e.id !== "e1");
+  const undoCtx = fakeCtxFullTree(allEntries, activeAfterUndo, stateFile);
+  const decompressTool = api.tools.find((t: any) => t.name === "decompress")!;
+  const res = await decompressTool.execute("tc2", { blockId: "b1", inline: true }, undefined, undefined, undoCtx);
+  const text = (res.content[0] as any).text as string;
+
+  assert.match(text, /inline:/, "result signals inline mode");
+  assert.ok(text.includes("This is a detailed message that needs to be compressed."),
+    "fallback restored the original text from the full session tree");
+});
+
+test("decompress keeps the degraded message when the ref is gone from both branch and full tree", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+  const stateFile = "/tmp/pai-acp-decompress-fallback-gone.session.json";
+  await cleanState(stateFile);
+  const longText = "This is a detailed message that needs to be compressed. ".repeat(130);
+  const filler = (n: string) => `filler ${n} `.repeat(400);
+  const allEntries = [
+    userMsg("e1", longText),
+    userMsg("e2", filler("two")), userMsg("e3", filler("three")),
+    userMsg("e4", filler("four")), userMsg("e5", filler("five")),
+    userMsg("e6", filler("six")), userMsg("e7", filler("seven")),
+  ];
+
+  const compressCtx = fakeCtxFullTree(allEntries, allEntries, stateFile);
+  await handlers.get("context")![0]!({ type: "context", messages: [] }, compressCtx);
+  const compressTool = api.tools.find((t: any) => t.name === "compress")!;
+  await compressTool.execute("tc1", { content: [{ startId: "m00001", endId: "m00001", summary: "Detailed initial context message that needs restoration after navigation." }] }, undefined, undefined, compressCtx);
+
+  // e1 vanished from the full tree entirely: getEntry → undefined AND the
+  // active branch is empty — nothing to fall back to.
+  const goneCtx = fakeCtxFullTree(allEntries.filter((e) => e.id !== "e1"), [], stateFile);
+  const decompressTool = api.tools.find((t: any) => t.name === "decompress")!;
+  const res = await decompressTool.execute("tc2", { blockId: "b1", inline: true }, undefined, undefined, goneCtx);
+  const text = (res.content[0] as any).text as string;
+
+  assert.match(text, /no restorable message content/, "degraded message preserved when nothing can be restored");
+});
+
+test("decompress restores multi tool-call assistant messages (refs carry # suffix) after undo", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+  const stateFile = "/tmp/pai-acp-decompress-fallback-tools.session.json";
+  await cleanState(stateFile);
+  const filler = (n: string) => `filler ${n} `.repeat(400);
+
+  const toolCallsEntry = {
+    type: "message", id: "e1", parentId: null, timestamp: "",
+    message: {
+      role: "assistant",
+      content: [
+        { type: "toolCall", name: "read", id: "call-1", arguments: { path: "a.txt", payload: "p".repeat(3000) } },
+        { type: "toolCall", name: "bash", id: "call-2", arguments: { command: "ls", payload: "q".repeat(3000) } },
+      ],
+      timestamp: Date.now(),
+    },
+  };
+  const allEntries = [
+    toolCallsEntry,
+    userMsg("e2", filler("two")), userMsg("e3", filler("three")),
+    userMsg("e4", filler("four")), userMsg("e5", filler("five")),
+    userMsg("e6", filler("six")), userMsg("e7", filler("seven")),
+  ];
+
+  const compressCtx = fakeCtxFullTree(allEntries, allEntries, stateFile);
+  await handlers.get("context")![0]!({ type: "context", messages: [] }, compressCtx);
+  const compressTool = api.tools.find((t: any) => t.name === "compress")!;
+  // The multi tool-call assistant projects to two CoreMessages (e1#call-1,
+  // e1#call-2), each with its own ref (m00001, m00002).
+  await compressTool.execute(
+    "tc1",
+    { content: [{ startId: "m00001", endId: "m00002", summary: "Tool call summary covering the multi tool-call assistant message content for the test." }] },
+    undefined, undefined, compressCtx,
+  );
+
+  const activeAfterUndo = allEntries.filter((e) => e.id !== "e1");
+  const undoCtx = fakeCtxFullTree(allEntries, activeAfterUndo, stateFile);
+  const decompressTool = api.tools.find((t: any) => t.name === "decompress")!;
+  const res = await decompressTool.execute("tc2", { blockId: "b1", inline: true }, undefined, undefined, undoCtx);
+  const text = (res.content[0] as any).text as string;
+
+  assert.ok(text.includes("read") && text.includes("bash"),
+    "both multi tool-call CoreMessages restored via base-id normalization");
+});
+
+test("decompress survives repeated compress → navigate → decompress cycles (state not lost)", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+  const stateFile = "/tmp/pai-acp-decompress-fallback-cycles.session.json";
+  await cleanState(stateFile);
+  const longText = "This is a detailed message that needs to be compressed. ".repeat(130);
+  const filler = (n: string) => `filler ${n} `.repeat(600);
+  const allEntries = [
+    userMsg("e1", longText),
+    userMsg("e2", filler("two")), userMsg("e3", filler("three")),
+    userMsg("e4", filler("four")), userMsg("e5", filler("five")),
+    userMsg("e6", filler("six")), userMsg("e7", filler("seven")),
+  ];
+
+  const compressTool = api.tools.find((t: any) => t.name === "compress")!;
+  const decompressTool = api.tools.find((t: any) => t.name === "decompress")!;
+
+  // Cycle 1: compress e1 → navigate away → decompress (fallback restores).
+  const compressCtx = fakeCtxFullTree(allEntries, allEntries, stateFile);
+  await handlers.get("context")![0]!({ type: "context", messages: [] }, compressCtx);
+  await compressTool.execute("tc1", { content: [{ startId: "m00001", endId: "m00001", summary: "First compression cycle summary for the repeated round-trip navigation test." }] }, undefined, undefined, compressCtx);
+
+  let active = allEntries.filter((e) => e.id !== "e1");
+  let res = await decompressTool.execute("tc2", { blockId: "b1", inline: true }, undefined, undefined, fakeCtxFullTree(allEntries, active, stateFile));
+  assert.ok(((res.content[0] as any).text as string).includes("This is a detailed message"),
+    "cycle 1: fallback restored the original text after undo");
+
+  // Cycle 2: navigate BACK (redo) so everything is active again, compress a
+  // NEW block over e2, navigate away, decompress the new block.
+  const redoCtx = fakeCtxFullTree(allEntries, allEntries, stateFile);
+  await handlers.get("context")![0]!({ type: "context", messages: [] }, redoCtx);
+  await compressTool.execute("tc3", { content: [{ startId: "m00002", endId: "m00002", summary: "Second compression cycle summary covering the filler two message for the test." }] }, undefined, undefined, redoCtx);
+
+  active = allEntries.filter((e) => e.id !== "e2");
+  res = await decompressTool.execute("tc4", { blockId: "b2", inline: true }, undefined, undefined, fakeCtxFullTree(allEntries, active, stateFile));
+  assert.ok(((res.content[0] as any).text as string).includes("filler two"),
+    "cycle 2: newly compressed block also restores after navigate-away");
 });
