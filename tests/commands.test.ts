@@ -50,3 +50,36 @@ test("saveConfig refuses to clobber corrupt existing config", async () => {
     assert.equal(await fs.readFile(file, "utf-8"), "{not json");
   });
 });
+
+import { applySetting } from "../src/commands.js";
+
+test("applySetting: usageTriggerPercent accepts 0-100, rejects out of range", () => {
+  assert.deepEqual(applySetting("usageTriggerPercent", "50"), { ok: true, patch: { usageTriggerPercent: 50 } });
+  assert.deepEqual(applySetting("usageTriggerPercent", "0"), { ok: true, patch: { usageTriggerPercent: 0 } });
+  assert.deepEqual(applySetting("usageTriggerPercent", "100"), { ok: true, patch: { usageTriggerPercent: 100 } });
+  assert.deepEqual(applySetting("usageTriggerPercent", "-1"), { ok: false });
+  assert.deepEqual(applySetting("usageTriggerPercent", "101"), { ok: false });
+  assert.deepEqual(applySetting("usageTriggerPercent", "abc"), { ok: false });
+});
+
+test("applySetting: toolOutputClean maps on/off to boolean", () => {
+  assert.deepEqual(applySetting("toolOutputClean", "on"), { ok: true, patch: { toolOutputClean: true } });
+  assert.deepEqual(applySetting("toolOutputClean", "off"), { ok: true, patch: { toolOutputClean: false } });
+});
+
+test("applySetting: numeric settings reject non-positive", () => {
+  assert.deepEqual(applySetting("modelContextLimit", "128000"), { ok: true, patch: { modelContextLimit: 128000 } });
+  assert.deepEqual(applySetting("modelContextLimit", "0"), { ok: false });
+  assert.deepEqual(applySetting("toolOutputMaxBytes", "abc"), { ok: false });
+});
+
+test("applySetting: language accepts zh/en, clears otherwise", () => {
+  assert.deepEqual(applySetting("language", "zh"), { ok: true, patch: { language: "zh" } });
+  assert.deepEqual(applySetting("language", "en"), { ok: true, patch: { language: "en" } });
+  assert.deepEqual(applySetting("language", "fr"), { ok: true, patch: { language: undefined } });
+});
+
+test("applySetting: unknown id rejected, compressModel passthrough", () => {
+  assert.deepEqual(applySetting("nope", "x"), { ok: false });
+  assert.deepEqual(applySetting("compressModel", "qwen:qwen3-coder"), { ok: true, patch: { compressModel: "qwen:qwen3-coder" } });
+});

@@ -177,9 +177,34 @@ class FilterSelectList implements Component {
   }
 }
 
+export function applySetting(
+  id: string,
+  newValue: string,
+): { ok: true; patch: Record<string, unknown> } | { ok: false } {
+  const patch: Record<string, unknown> = {};
+  if (id === "compressModel") {
+    patch.compressModel = newValue;
+  } else if (id === "autoUpdate" || id === "debug" || id === "delegate" || id === "toolOutputClean") {
+    patch[id] = newValue === "on";
+  } else if (id === "usageTriggerPercent") {
+    const n = Number(newValue);
+    if (!Number.isFinite(n) || n < 0 || n > 100) return { ok: false };
+    patch[id] = n;
+  } else if (id === "modelContextLimit" || id === "toolBashDefaultTimeout" || id === "toolOutputMaxBytes") {
+    const n = Number(newValue);
+    if (!Number.isFinite(n) || n <= 0) return { ok: false };
+    patch[id] = n;
+  } else if (id === "language") {
+    patch.language = newValue === "zh" || newValue === "en" ? newValue : undefined;
+  } else {
+    return { ok: false };
+  }
+  return { ok: true, patch };
+}
+
 async function settingsCommand(ctx: ExtensionCommandContext): Promise<void> {
   const config = await readAcpConfigs(ctx.cwd);
-  const fmt = (v: unknown, d: string): string => (v === undefined || v === "" ? d : String(v));
+  const fmt = (v: unknown, d: string): string => (v === undefined || v === null || v === "" ? d : String(v));
 
   const items: SettingItem[] = [
     {
@@ -261,29 +286,13 @@ currentValue: fmt(config.toolOutputMaxBytes, t("settings.default")),
       Math.min(items.length + 2, 15),
       getSettingsListTheme(),
       (id, newValue) => {
-        const patch: Record<string, unknown> = {};
-        if (id === "compressModel") {
-          patch.compressModel = newValue;
-        } else if (id === "autoUpdate" || id === "debug" || id === "delegate" || id === "toolOutputClean") {
-          patch[id] = newValue === "on";
-        } else if (id === "usageTriggerPercent") {
-          const n = Number(newValue);
-          if (!Number.isFinite(n) || n < 0 || n > 100) {
-            ctx.ui.notify(t("settings.invalidNumber", { value: newValue }), "error");
-            return;
-          }
-          patch[id] = n;
-        } else if (numericIds.includes(id)) {
-          const n = Number(newValue);
-          if (!Number.isFinite(n) || n <= 0) {
-            ctx.ui.notify(t("settings.invalidNumber", { value: newValue }), "error");
-            return;
-          }
-          patch[id] = n;
-} else if (id === "language") {
-          patch.language = newValue === "zh" || newValue === "en" ? newValue : undefined;
+        const result = applySetting(id, newValue);
+        if (!result.ok) {
+          ctx.ui.notify(t("settings.invalidNumber", { value: newValue }), "error");
+          return;
         }
-void saveConfig(patch)
+        const patch = result.patch;
+        void saveConfig(patch)
           .then(() => {
             if (id === "language") setLocale(patch.language as string | undefined); // 立即生效，无需重启
             ctx.ui.notify(t("settings.saved", { id, value: newValue }), "info");
