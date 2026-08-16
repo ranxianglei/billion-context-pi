@@ -6,6 +6,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import type { AcpRuntime } from "./runtime.js";
 import { debug, logError, logInfo, logThrow } from "./log.js";
+import { tryForwardTool } from "./cooperative.js";
 import { estimateTokens, collectCoveredMessageIds } from "./tokens.js";
 import { defaultCountTokens } from "acp-kernel";
 import { getSystemPromptText } from "./compat.js";
@@ -44,6 +45,10 @@ export function makeCompressTool(runtime: AcpRuntime): ToolDefinition<typeof Com
     ],
     parameters: CompressParams,
     async execute(toolCallId, params, _signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {
+      const forwarded = await tryForwardTool("compress", params, ctx);
+      if (forwarded !== undefined) {
+        return { details: undefined, content: [{ type: "text", text: forwarded }] };
+      }
       let result: string;
       try {
         result = await handleCompress(params as CompressArgs, runtime, ctx, toolCallId);

@@ -6,6 +6,7 @@ import { estimateTokens, collectCoveredMessageIds } from "./tokens.js";
 import { getSystemPromptText } from "./compat.js";
 import { viableRanges } from "billion-context-kit";
 import { logThrow } from "./log.js";
+import { tryForwardTool } from "./cooperative.js";
 import { getDelegateUsage } from "./delegate-tool.js";
 import { resolveDelegate } from "./config.js";
 
@@ -33,6 +34,10 @@ export function makeStatusTool(runtime: AcpRuntime): ToolDefinition<typeof Statu
     ],
     parameters: StatusParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {
+      const forwarded = await tryForwardTool("acp_status", params, ctx);
+      if (forwarded !== undefined) {
+        return { details: undefined, content: [{ type: "text", text: forwarded }] };
+      }
       let result: string;
       try {
         result = await handleStatus(params as StatusArgs, runtime, ctx);

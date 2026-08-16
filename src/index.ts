@@ -26,6 +26,7 @@ import { runSetupAndNotify } from "./setup-subagent-tools.js";
 import { loadUserConfig, applyUserConfig } from "./user-config.js";
 import { defaultCountTokens } from "acp-kernel";
 import { formatSystemPromptForEvent, getSystemPromptText } from "./compat.js";
+import { PLUGIN_AGENT_NAME, proxyBaseForContext, tryForwardTool } from "./cooperative.js";
 
 type AgentMessage = SessionMessageEntry["message"];
 
@@ -35,6 +36,7 @@ export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactor
   return (pi: ExtensionAPI) => {
     const runtime = createRuntime(adapter);
     wireCompactionDisable(pi);
+    wireProviderHeaders(pi);
     wireSessionLifecycle(pi, runtime);
     wireContextTransform(pi, runtime);
     wireSystemPrompt(pi, runtime);
@@ -55,6 +57,24 @@ export default createAcpExtension();
 // opencode-acp requiring opencode's compaction.auto = false).
 function wireCompactionDisable(pi: ExtensionAPI): void {
   pi.on("session_before_compact", () => ({ cancel: true }));
+}
+
+// Cooperative proxy mode: announce this session to the billion-context proxy
+// so it keys state by pi's real session id and switches the session to
+// plugin mode (no wire tool injection — tools are native here). Also reports
+// the model's context window from inside pi (pinned/overridden values the
+// proxy's registry can't know, e.g. private relays in MITM mode). No-op
+// unless proxied (`/bili/` baseUrl or BILLION_CONTEXT_PROXY from `bili pi`).
+function wireProviderHeaders(pi: ExtensionAPI): void {
+  pi.on("before_provider_headers", (event, ctx) => {
+    if (proxyBaseForContext(ctx) === undefined) return;
+    event.headers["x-bili-plugin"] = PLUGIN_AGENT_NAME;
+    event.headers["x-bili-plugin-conversation"] = ctx.sessionManager.getSessionId();
+    const window = ctx.model?.contextWindow;
+    if (typeof window === "number" && Number.isFinite(window) && window > 0) {
+      event.headers["x-bili-plugin-context-window"] = String(Math.floor(window));
+    }
+  });
 }
 
 // (acp_delegate injection is best-effort: sendUserMessage is fire-and-forget
@@ -112,6 +132,12 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
 // nudge decision) and return the transformed AgentMessage[].
 function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
   pi.on("context", async (event, ctx) => {
+    // Cooperative proxy mode: the proxy runs processTurn (ref tags, folding,
+    // nudges) at the wire level against its own session state. Doing it here
+    // too would double-transform — return pi's messages untouched.
+    if (proxyBaseForContext(ctx) !== undefined) {
+      return { messages: event.messages };
+    }
     const sid = ctx.sessionManager.getSessionId();
     const release = await runtime.acquireLock(sid);
     try {
@@ -243,8 +269,15 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
 }
 
 function wireSystemPrompt(pi: ExtensionAPI, runtime: AcpRuntime): void {
-  pi.on("before_agent_start", (event) => {
+  pi.on("before_agent_start", (event, ctx) => {
     const delegate = runtime.adapter.delegate !== false;
+    // Cooperative proxy mode: the ACP context prompt is injected by the proxy
+    // at the wire level — only the delegate prompt (a pi-side feature) stays
+    // local. Returning undefined leaves the system prompt untouched.
+    if (proxyBaseForContext(ctx) !== undefined) {
+      if (!delegate) return undefined;
+      return { systemPrompt: formatSystemPromptForEvent(event.systemPrompt, ACP_DELEGATE_PROMPT) };
+    }
     const acp = buildAcpSystemPrompt(runtime.prompts);
     const prompt = delegate ? `${acp}\n${ACP_DELEGATE_PROMPT}` : acp;
     return { systemPrompt: formatSystemPromptForEvent(event.systemPrompt, prompt) };

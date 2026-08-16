@@ -2,6 +2,7 @@ import { Type, type Static } from "typebox";
 import type { AgentToolResult, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { AcpRuntime } from "./runtime.js";
 import { debug, logError, logInfo, logThrow } from "./log.js";
+import { tryForwardTool } from "./cooperative.js";
 import { parseBlockIdArg, collectBlockContent, type CompressionBlock } from "acp-kernel";
 import { entriesToCoreMessages } from "./messages.js";
 import { writeFile, mkdir } from "node:fs/promises";
@@ -45,6 +46,10 @@ export function makeDecompressTool(runtime: AcpRuntime): ToolDefinition<typeof D
     ],
     parameters: DecompressParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {
+      const forwarded = await tryForwardTool("decompress", params, ctx);
+      if (forwarded !== undefined) {
+        return { details: undefined, content: [{ type: "text", text: forwarded }] };
+      }
       let result: string;
       try {
         result = await handleDecompress(params as DecompressArgs, runtime, ctx);

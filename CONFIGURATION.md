@@ -124,6 +124,7 @@ All keys below are currently **ACTIVE**.
 | `ACP_MODEL_CONTEXT_LIMIT` | Override the context limit (takes highest precedence). |
 | `ACP_DEBUG` | Set to `1` / `true` to enable debug logging. |
 | `ACP_LOG_FILE` | Override the log file path (default `~/.pi/acp.log`). |
+| `ACP_COOPERATIVE_PROXY` | Set to `0` to disable cooperative proxy mode (auto-detected from a `/bili/` model baseUrl or the launcher's `BILLION_CONTEXT_PROXY` env). |
 
 > **Only the documented keys are read from `acp.json`.** Other tuning knobs (`preserveRecentMessages`, `protectedTools`) are code-level and not user-overridable. The three compression thresholds form a three-tier escalation: growth-driven soft nudges → forced nudges at `compress.maxContextLimit` → emergency truncation at `compress.emergencyThresholdPercent`.
 
@@ -326,3 +327,10 @@ Environment variables take precedence over the JSON config files. They are usefu
 - **Default:** `~/.pi/acp.log`
 - **Status:** 🟢 ACTIVE
 - **Description:** Override the path to the log file. By default, structured logs are written to `~/.pi/acp.log` (the file rotates to `~/.pi/acp.log.old` at 10 MB). Point this at a different location to keep per-project or per-run logs separate.
+
+### `ACP_COOPERATIVE_PROXY`
+
+- **Type:** string flag
+- **Default:** *(unset — cooperative mode auto-detects from the model baseUrl or launcher env)*
+- **Status:** 🟢 ACTIVE
+- **Description:** Set to `0` to **disable** cooperative proxy mode. Cooperative mode engages when the model's `baseUrl` routes through a billion-context proxy (the `/bili/` zero-config prefix) **or** when the billion-context launcher started pi (`BILLION_CONTEXT_PROXY` is exported next to `HTTPS_PROXY` in MITM mode). The proxy then owns compression (state, folding, ref tags, philosophy prompt, nudges — injected at the wire level), while this extension registers the 4 tools natively and forwards their execution to the proxy's `POST /__bili/plugin/tool` endpoint. Session identity is pi's real session id (sent as `x-bili-plugin-conversation`), which also fixes multi-session collisions; the model's context window is reported via `x-bili-plugin-context-window` and becomes the authoritative nudge denominator on the proxy side. Setting `ACP_COOPERATIVE_PROXY=0` forces the standalone in-process behavior even behind a proxy (then make sure the proxy's own tool injection handles compression — double compression is otherwise possible). Protocol spec: [PLUGIN.md](https://github.com/ranxianglei/billion-context/blob/master/PLUGIN.md).

@@ -62,6 +62,19 @@ Each message gets an invisible `<acp>` ref tag (`m00001`, `m00002`, ...) visible
 
 Pi's built-in auto-compaction is cancelled — billion-context is the sole context manager.
 
+## Cooperative proxy mode (内外呼应)
+
+When pi's model `baseUrl` routes through a [billion-context](https://github.com/ranxianglei/billion-context) proxy (the `/bili/` zero-config prefix), the extension automatically switches to **cooperative mode**: the proxy owns compression end-to-end (session state, history folding, ref tags, philosophy prompt, nudges — all injected at the wire level), while the extension becomes the "inside" half of [the plugin protocol](https://github.com/ranxianglei/billion-context/blob/master/PLUGIN.md):
+
+- the 4 tools (`compress` / `decompress` / `search_context` / `acp_status`) stay natively registered in pi — native tool UX, permissions and audit — and their execution is forwarded to the proxy (`POST /__bili/plugin/tool`), which runs them under its session lock;
+- every model request carries `x-bili-plugin: pi` + `x-bili-plugin-conversation: <pi session id>`, so the proxy keys state by pi's **real** session identity (no more content-fingerprint collisions) and suppresses its own wire-level tool injection (no double compression);
+- the model's context window is reported from inside pi (`x-bili-plugin-context-window`) — pinned/overridden values the proxy's registry can't know become the authoritative nudge denominator;
+- the extension's in-process pipeline (processTurn, nudges, philosophy prompt) is skipped for that session — the proxy does all of it.
+
+Detection works in both proxy modes: the `/bili/` prefix in the model baseUrl, **and MITM transparent mode** — `bili pi` (the billion-context launcher) exports `BILLION_CONTEXT_PROXY` next to `HTTPS_PROXY`, and the extension trusts it directly, so `bili pi` now gives you the native-tool cooperative experience too.
+
+Without a proxy (or with `ACP_COOPERATIVE_PROXY=0`) behavior is byte-identical to the standalone extension.
+
 ## Plugin compatibility & ordering
 
 billion-context takes over context management by intercepting Pi's `context` event. **Pi has no plugin priority mechanism** — when multiple extensions register handlers for the same event, they run in a fixed sequence (load order), with no `priority`/`weight` field and no way for the user to control the order. The `context` event specifically is a *pipeline*: every handler receives the previous handler's output, there is no short-circuit, and the **last** handler has the final say over what reaches the model.

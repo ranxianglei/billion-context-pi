@@ -103,6 +103,11 @@ test("e2e compress config: without a config file the kernel defaults apply", asy
 // Behavioral: feed the real configFor() output into runtime.core.processTurn()
 // (src/index.ts:142) and assert shouldInject flips with the limit. The nudge
 // needs recommendedRanges > 0, not just a high usage ratio — hence the bulk text.
+// Bulk size matters: the kernel only counts merged ranges with tokens*4 >=
+// minCompressRange (5000 chars, the #148 viable-ranges rule), so each message
+// must be large enough for its merged range to clear the gate — with 2000-char
+// messages every range stays under the minimum and the nudge is correctly
+// suppressed ("no tier has effective compressible content").
 function compressibleMessages(): CoreMessage[] {
     const msgs: CoreMessage[] = [];
     for (let i = 0; i < 12; i++) {
@@ -110,7 +115,7 @@ function compressibleMessages(): CoreMessage[] {
             id: `h_${i}`,
             role: i % 2 === 0 ? "user" : "assistant",
             contentType: "text",
-            text: `historical detail ${i}. ${"x".repeat(2000)}`,
+            text: `historical detail ${i}. ${"x".repeat(3000)}`,
         });
     }
     return msgs;
