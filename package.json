@@ -60,7 +60,7 @@
 	"devDependencies": {
 		"@earendil-works/pi-coding-agent": "0.83.0",
 		"@types/node": "^26.1.2",
-		"acp-kernel": "0.0.32",
+		"acp-kernel": "file:../acp-kernel/acp-kernel-0.0.33.tgz",
 		"billion-context-kit": "0.2.0",
 		"tsup": "^8.5.1",
 		"tsx": "^4.23.1",

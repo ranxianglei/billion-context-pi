@@ -7,7 +7,7 @@ import type {
 import type { AcpRuntime } from "./runtime.js";
 import { debug, logError, logInfo, logThrow, logWarn } from "./log.js";
 import { estimateTokens, collectCoveredMessageIds, calibrateTokens } from "./tokens.js";
-import { defaultCountTokens, type CompressionBlock } from "acp-kernel";
+import { defaultCountTokens, salvageParseRanges, type CompressionBlock } from "acp-kernel";
 import { getSystemPromptText } from "./compat.js";
 
 function formatK(n: number): string {
@@ -78,6 +78,20 @@ function normalizeRanges(content: CompressArgs["content"]): RangeEntry[] | strin
     try {
       ranges = JSON.parse(ranges);
     } catch (e) {
+      // Weak/local models emit truncated or malformed JSON here ~50% of the
+      // time (see billion-context-omp#121). Before giving up, run the kernel's
+      // salvage ladder (fences / comma+newline repairs / truncated-array
+      // prefix / field-regex). Recovered entries proceed as normal ranges.
+      const sal = salvageParseRanges(ranges as string);
+      logWarn("compress", {
+        event: "content-salvage",
+        layer: sal.layer,
+        note: sal.note,
+        ranges: sal.ranges.length,
+      });
+      if (sal.ranges.length > 0) {
+        return sal.ranges.map((r) => ({ startId: r.startRef, endId: r.endRef, summary: r.summary, ...(r.topic ? { topic: r.topic } : {}) })) as RangeEntry[];
+      }
       return `Invalid content: not valid JSON (${e instanceof Error ? e.message : String(e)}). content must be an ARRAY of {startId, endId, summary} objects — pass the array directly, not a string.`;
     }
   }

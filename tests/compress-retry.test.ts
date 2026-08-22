@@ -175,6 +175,26 @@ test("compress tool accepts JSON-encoded string content (non-strict-tool provide
   await rm(`${stateFile}.acp.json`, { force: true });
 });
 
+test("compress tool SALVAGES truncated JSON string content (omp#121)", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+  const stateFile = "/tmp/pai-acp-retry-salvage.session.json";
+  await rm(`${stateFile}.acp.json`, { force: true });
+  const entries = [userMsg("e1", ZH)];
+  const ctx = fakeCtx(() => entries, stateFile);
+  await fire(handlers, ctx); // assigns refs
+
+  const compressTool = api.tools.find((t: any) => t.name === "compress")!;
+  // truncated mid-second-entry: strict parse fails, the first complete entry
+  // must be salvaged by the kernel ladder instead of throwing
+  const truncated =
+    '[{"startId":"m00001","endId":"m00001","summary":"first entry fully intact and salvageable"},{"startId":"m0';
+  const out = await compressTool.execute("tc1", { content: truncated }, undefined, undefined, ctx);
+  const text = typeof out === "string" ? out : out.content?.[0]?.text ?? String(out);
+  assert.ok(/ACP \|/.test(text), `expected success panel: ${text}`);
+  await rm(`${stateFile}.acp.json`, { force: true });
+});
+
 test("compress tool THROWS on garbage string content (isError:true → retry nudge fires)", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api as any);
