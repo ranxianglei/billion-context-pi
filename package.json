@@ -1,6 +1,6 @@
 {
 	"name": "billion-context-pi",
-	"version": "0.1.44",
+	"version": "0.1.46",
 	"description": "One billion, not one million. Model-driven context management for the Pi coding agent.",
 	"main": "dist/index.js",
 	"types": "dist/index.d.ts",
@@ -60,7 +60,7 @@
 	"devDependencies": {
 		"@earendil-works/pi-coding-agent": "0.83.0",
 		"@types/node": "^26.1.2",
-		"acp-kernel": "0.0.30",
+		"acp-kernel": "0.0.32",
 		"billion-context-kit": "0.2.0",
 		"tsup": "^8.5.1",
 		"tsx": "^4.23.1",
