@@ -9,10 +9,11 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { CoreMessage, NudgeDecision, CompressionBlock, Prompts } from "acp-kernel";
-import { renderNudgeText, resolvePrompts, defaultPrompts, viableRanges } from "acp-kernel";
-import { type AdapterConfig, resolveDelegate, resolveHostSession, DEFAULT_DELEGATE_POLICY } from "./config.js";
-import { createRuntime, type AcpRuntime } from "./runtime.js";
+import { renderNudgeText, resolvePrompts, defaultPrompts, viableRanges, buildAbsorbSystemPrompt } from "acp-kernel";
+import { type AdapterConfig, resolveDelegate, resolveAbsorb, resolveHostSession, DEFAULT_DELEGATE_POLICY } from "./config.js";
+import { createRuntime, type AcpRuntime, MAX_COMPRESS_ATTEMPTS } from "./runtime.js";
 import { makeCompressTool, isCompressSuccessText, isCompressNoopText } from "./compress-tool.js";
+import { makeAbsorbTool } from "./absorb-tool.js";
 import { makeDecompressTool } from "./decompress-tool.js";
 import { makeSearchTool } from "./search-tool.js";
 import { makeStatusTool } from "./status-tool.js";
@@ -105,10 +106,17 @@ export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactor
     pi.registerTool(makeDecompressTool(runtime, toolSurface.decompress));
     pi.registerTool(makeSearchTool(runtime, toolSurface.search_context));
     pi.registerTool(makeStatusTool(runtime, toolSurface.acp_status));
+    registerAbsorbIfEnabled(pi, runtime, adapter);
     for (const { name, options } of makeCommands(runtime, pi)) {
       pi.registerCommand(name, options);
     }
   };
+}
+
+function registerAbsorbIfEnabled(pi: ExtensionAPI, runtime: AcpRuntime, adapter: AdapterConfig): void {
+  const absorb = resolveAbsorb(adapter);
+  if (!absorb.enabled) return;
+  pi.registerTool(makeAbsorbTool(runtime, absorb.toolName));
 }
 
 export default createAcpExtension();
@@ -235,6 +243,7 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
         });
       }
     }
+    registerAbsorbIfEnabled(pi, runtime, runtime.adapter);
     // Headless hosts exit as soon as the turn ends; awaiting the check keeps
     // the process alive until a running install finishes. TUI stays
     // fire-and-forget so interactive startup is never blocked by npm.
@@ -636,9 +645,12 @@ function wireSystemPrompt(pi: ExtensionAPI, runtime: AcpRuntime): void {
     }
     const delegate = resolveDelegate(runtime.adapter).enabled;
     const acp = buildAcpSystemPrompt(runtime.prompts, merged.promptSections);
+    const sections = [acp];
+    const absorb = resolveAbsorb(runtime.adapter);
+    if (absorb.enabled) sections.push(buildAbsorbSystemPrompt(absorb.toolName ?? "absorb"));
     const delegateText = merged.delegatePrompt !== undefined ? merged.delegatePrompt : ACP_DELEGATE_PROMPT;
-    const prompt = delegate && delegateText !== null ? `${acp}\n${delegateText}` : acp;
-    return { systemPrompt: formatSystemPromptForEvent(event.systemPrompt, prompt) };
+    if (delegate && delegateText !== null) sections.push(delegateText);
+    return { systemPrompt: formatSystemPromptForEvent(event.systemPrompt, sections.join("\n")) };
   });
 }
 
