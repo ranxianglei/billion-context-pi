@@ -5,10 +5,11 @@ import type {
   SessionMessageEntry,
 } from "@earendil-works/pi-coding-agent";
 import type { CoreMessage, NudgeDecision, CompressionBlock, Prompts } from "acp-kernel";
-import { renderNudgeText, resolvePrompts, defaultPrompts, viableRanges } from "acp-kernel";
-import { type AdapterConfig, resolveDelegate } from "./config.js";
+import { renderNudgeText, resolvePrompts, defaultPrompts, viableRanges, buildAbsorbSystemPrompt } from "acp-kernel";
+import { type AdapterConfig, resolveDelegate, resolveAbsorb } from "./config.js";
 import { createRuntime, type AcpRuntime, MAX_COMPRESS_ATTEMPTS } from "./runtime.js";
 import { makeCompressTool, isCompressSuccessText, isCompressNoopText } from "./compress-tool.js";
+import { makeAbsorbTool } from "./absorb-tool.js";
 import { makeDecompressTool } from "./decompress-tool.js";
 import { makeSearchTool } from "./search-tool.js";
 import { makeStatusTool } from "./status-tool.js";
@@ -56,10 +57,17 @@ export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactor
     pi.registerTool(makeDecompressTool(runtime));
     pi.registerTool(makeSearchTool(runtime));
     pi.registerTool(makeStatusTool(runtime));
+    registerAbsorbIfEnabled(pi, runtime, adapter);
     for (const { name, options } of makeCommands(runtime)) {
       pi.registerCommand(name, options);
     }
   };
+}
+
+function registerAbsorbIfEnabled(pi: ExtensionAPI, runtime: AcpRuntime, adapter: AdapterConfig): void {
+  const absorb = resolveAbsorb(adapter);
+  if (!absorb.enabled) return;
+  pi.registerTool(makeAbsorbTool(runtime, absorb.toolName));
 }
 
 export default createAcpExtension();
@@ -110,6 +118,7 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
       pi.registerTool(makeDelegateWaitTool(pi));
       pi.registerTool(makeDelegateCancelTool(pi));
     }
+    registerAbsorbIfEnabled(pi, runtime, runtime.adapter);
     // Headless hosts exit as soon as the turn ends; awaiting the check keeps
     // the process alive until a running install finishes. TUI stays
     // fire-and-forget so interactive startup is never blocked by npm.
@@ -383,9 +392,11 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
 function wireSystemPrompt(pi: ExtensionAPI, runtime: AcpRuntime): void {
   pi.on("before_agent_start", (event) => {
     const delegate = runtime.adapter.delegate !== false;
-    const acp = buildAcpSystemPrompt(runtime.prompts);
-    const prompt = delegate ? `${acp}\n${ACP_DELEGATE_PROMPT}` : acp;
-    return { systemPrompt: formatSystemPromptForEvent(event.systemPrompt, prompt) };
+    const sections = [buildAcpSystemPrompt(runtime.prompts)];
+    const absorb = resolveAbsorb(runtime.adapter);
+    if (absorb.enabled) sections.push(buildAbsorbSystemPrompt(absorb.toolName));
+    if (delegate) sections.push(ACP_DELEGATE_PROMPT);
+    return { systemPrompt: formatSystemPromptForEvent(event.systemPrompt, sections.join("\n")) };
   });
 }
 

@@ -49,6 +49,12 @@ Create `~/.pi/acp.json` (or `<project>/.pi/acp.json`) and drop in whichever keys
     "maxContextLimit": "75%",
     "emergencyThresholdPercent": "95%",
     "nudgeGrowthTokens": 50000
+  },
+
+  "absorb": {
+    "minToolTokens": 1000,
+    "contextThresholdPct": 0,
+    "excludeTools": ["read"]
   }
 }
 ```
@@ -125,6 +131,16 @@ All keys below are currently **ACTIVE**.
 | `compress.emergencyThresholdPercent` | number \| string | `"95%"` | 🟢 ACTIVE | Context threshold that triggers emergency truncation. |
 | `compress.nudgeGrowthTokens` | number | `50000` | 🟢 ACTIVE | Token growth step for soft compression nudges. |
 
+**Absorb keys**
+
+| Key | Type | Default | Status | Description |
+|-----|------|---------|--------|-------------|
+| `absorb` | boolean \| object | `false` | 🟢 ACTIVE | `true` enables instant tool-result absorption with defaults; an object tunes it. |
+| `absorb.toolName` | string | `"absorb"` | 🟢 ACTIVE | Name of the absorb tool exposed to the model. |
+| `absorb.minToolTokens` | number | `1000` | 🟢 ACTIVE | Tool results below this estimated size never get the absorb prompt. |
+| `absorb.contextThresholdPct` | number \| string | `0` | 🟢 ACTIVE | Only prompt when context usage is at or above this fraction (`0.3` / `"30%"`); `0` = size alone decides. |
+| `absorb.excludeTools` | string[] | `[]` | 🟢 ACTIVE | Tool names whose results are never absorbable. |
+
 **Prompts keys**
 
 | Key | Type | Default | Status | Description |
@@ -181,6 +197,41 @@ All keys below are currently **ACTIVE**.
 - **Default:** `200000`
 - **Status:** 🟢 ACTIVE
 - **Description:** A hard byte cap (~200 KB, roughly 5000 lines) applied to tool result text via the `tool_result` hook. It stops runaway output that Pi's own caps cannot catch (for example, from tools Pi does not cap). When the cap fires, the oversized text is head-truncated with a notice telling the model how to see the full output. Set lower (e.g. `8192`) for a tighter context budget, or set to `0` to disable the cap entirely.
+
+---
+
+## Absorb
+
+The `absorb` sub-object enables **instant tool-result compression** — designed for small-context setups (e.g. a 10K–20K window) where waiting for a regular compression nudge starves the model of working room. Tool calls are the biggest context consumer; absorption makes the model pay that cost back immediately after every large tool result.
+
+How it works:
+
+1. When a tool result is large enough (≥ `absorb.minToolTokens` estimated tokens) and not excluded/protected, a forced `[ACP absorb]` instruction is appended to it: the model must immediately call the `absorb` tool with the result's ref and a distilled summary.
+2. Once absorbed, the original tool-call + tool-result pair is **hidden from all later turns**; the `absorb` call (carrying your summary) becomes the durable record.
+3. `absorb` calls are ordinary tool calls — the regular compression system can fold them into blocks later, so the two mechanisms stay orthogonal.
+
+Shorthand forms (like `delegate`): `absorb: true` enables with defaults; an object tunes it.
+
+### `absorb.minToolTokens`
+
+- **Type:** `number`
+- **Default:** `1000`
+- **Status:** 🟢 ACTIVE
+- **Description:** Tool results estimated below this many tokens never get the absorb prompt. Keep it high enough that only genuinely bulky outputs demand a distill step.
+
+### `absorb.contextThresholdPct`
+
+- **Type:** `number | string`
+- **Default:** `0`
+- **Status:** 🟢 ACTIVE
+- **Description:** Only append absorb prompts when context usage is at or above this fraction of the window (`0.3` or `"30%"`). With the default `0`, size alone decides — every qualifying result is absorbed immediately, which is what small-context setups want.
+
+### `absorb.excludeTools`
+
+- **Type:** `string[]`
+- **Default:** `[]`
+- **Status:** 🟢 ACTIVE
+- **Description:** Tool names whose results are never absorbable. ACP's own tool results (`compress`, `decompress`, `search_context`, `acp_status`, …) and protected tools are always excluded automatically.
 
 ---
 

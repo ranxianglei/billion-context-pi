@@ -1,6 +1,28 @@
 import { defaultConfig, type Config, type Prompts } from "acp-kernel";
 import type { ThrottleRetryConfig } from "./throttle-retry.js";
 
+/** Instant tool-result absorption settings (small-context mode). Mirrors
+ *  acp-kernel's absorb feature: when enabled, every eligible large tool
+ *  result gets a forced [ACP absorb] prompt and the model must distill it
+ *  via the absorb tool; the original tool-call + tool-result pair is then
+ *  hidden from subsequent turns. */
+export interface AbsorbSettings {
+  /** Enable instant absorption. Default: false. */
+  enabled?: boolean;
+  /** Registered name of the absorb tool. Default: "absorb". */
+  toolName?: string;
+  /** Minimum estimated tokens of a tool result before it demands
+   *  absorption. Smaller results stay as-is. Default: 1000. */
+  minToolTokens?: number;
+  /** Context usage percentage (ratio 0.3 or percent string "30%") above
+   *  which absorption prompts fire. 0 = fire on size alone regardless of
+   *  usage. Default: 0. */
+  contextThresholdPct?: number | string;
+  /** Tool names whose results are never absorb-prompted (in addition to
+   *  ACP's own tools and protectedTools). */
+  excludeTools?: string[];
+}
+
 /** Delegate sub-agent configuration. */
 export interface DelegateConfig {
   /** Enable acp_delegate tools (delegate/wait/cancel) and their system-prompt
@@ -94,6 +116,10 @@ export interface AdapterConfig {
   delegate?: boolean | DelegateConfig;
   /** Compression tuning. */
   compress?: CompressConfig;
+  /** Instant tool-result absorption (small-context mode). Accepts a boolean
+   *  shorthand (`true` → enabled with defaults) or an AbsorbSettings object.
+   *  Default: disabled. */
+  absorb?: boolean | AbsorbSettings;
   /** Provider token-throttle (Bedrock "Too many tokens, please wait before
    *  trying again.") auto-retry. Accepts a boolean shorthand (`false`
    *  disables) or a ThrottleRetryConfig object. Default: enabled, 10 retries,
@@ -164,6 +190,23 @@ export function resolveCompress(
   return mergeCompress(compress, prov, model);
 }
 
+/** Resolve absorb settings from the adapter config, handling the boolean
+ *  shorthand. contextThresholdPct is parsed to a ratio when provided. */
+export function resolveAbsorb(adapter: AdapterConfig): { enabled: boolean; toolName?: string; minToolTokens?: number; contextThresholdPct?: number; excludeTools?: string[] } {
+  const a = adapter.absorb;
+  if (a === true) return { enabled: true };
+  if (typeof a === "object" && a !== null) {
+    return {
+      enabled: a.enabled !== false,
+      toolName: a.toolName,
+      minToolTokens: a.minToolTokens,
+      contextThresholdPct: a.contextThresholdPct !== undefined ? parsePercent(a.contextThresholdPct) : undefined,
+      excludeTools: a.excludeTools,
+    };
+  }
+  return { enabled: false };
+}
+
 export function resolveConfig(adapter: AdapterConfig, liveContextLimit: number, provider?: string, modelId?: string): Config {
   const envLimit = process.env.ACP_MODEL_CONTEXT_LIMIT;
   const envLimitNum = envLimit ? Number(envLimit) : NaN;
@@ -191,6 +234,16 @@ export function resolveConfig(adapter: AdapterConfig, liveContextLimit: number, 
   if (c.nudgeGrowthTokens !== undefined) {
     config.nudge.growthFloor = c.nudgeGrowthTokens;
     config.nudge.growthCap = c.nudgeGrowthTokens;
+  }
+  const absorb = resolveAbsorb(adapter);
+  if (absorb.enabled) {
+    config.absorb = {
+      enabled: true,
+      toolName: absorb.toolName ?? "absorb",
+      minToolTokens: absorb.minToolTokens ?? 1000,
+      contextThresholdPct: absorb.contextThresholdPct ?? 0,
+      excludeTools: absorb.excludeTools ?? [],
+    };
   }
   return config;
 }
