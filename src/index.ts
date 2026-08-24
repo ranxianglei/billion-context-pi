@@ -20,6 +20,7 @@ import { delegateStatusWidget } from "./fleet-widget.js";
 import { wireToolGuardrails } from "./tool-guardrails.js";
 import { debug, logError, logInfo, logWarn, logThrow, closeLogStream } from "./log.js";
 import { collectCoveredMessageIds, estimateTokens, lastUserMessageId, calibrateTokens } from "./tokens.js";
+import { providerAnchoredTokens } from "./arbitration.js";
 import { checkForUpdate } from "./update.js";
 import {
   THROTTLE_RETRY_ERROR_MESSAGE,
@@ -199,6 +200,30 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       // below is fed the RAW sentTokens — its samples must stay on the
       // raw basis or density would chase its own calibration.
       let tokenCount = calibrateTokens(sentTokens, runtime.density.densityFor(modelId));
+      // A compress happened since the previous context round: blocks are
+      // created out-of-band by the compress tool, so detect new active
+      // blocks on the LOADED state vs. the previous round (comparing a
+      // single processTurn's input/output can never see them). Hoisted ABOVE
+      // the provider-anchored arbitration below: post-compression turns must
+      // not consume pi's usage anchor (it predates the shrink — see
+      // arbitration.ts).
+      const postCompression = runtime.noteActiveBlocks(
+        sid,
+        state.blocks.filter((b) => b.active).map((b) => b.blockId),
+      );
+      // Provider-anchored arbitration (incident 01a02d90): when pi's usage
+      // anchor is trustworthy it beats the calibrated estimate outright —
+      // that session arbitrated on 57K (51.8%) while the provider was already
+      // rejecting a 134.5K prompt (4.5× underestimate; density was clamped at
+      // its 2.5 ceiling and could never catch up). Take the LARGER of the
+      // two so a stale-low estimate can never mask a real overflow; the
+      // anchored number already includes pi's estimated trailing tail.
+      // Guarded against post-compression transients and the
+      // provider-never-reports-usage tree-sum regime (omp #18).
+      const anchoredTokens = providerAnchoredTokens(realUsage, entries, postCompression);
+      if (anchoredTokens !== null && anchoredTokens > tokenCount) {
+        tokenCount = anchoredTokens;
+      }
       // Self-heal (armed): after an overflow, force this turn's usage to >=95%
       // so the kernel's emergency nudge + tool-result truncate fire immediately,
       // even if the density-calibrated estimate under-reports the sent view.
@@ -212,14 +237,6 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
           logWarn("overflow-selfheal", { sid, event: "armed-emergency", tokenCount, limit: config.modelContextLimit });
         }
       }
-      // A compress happened since the previous context round: blocks are
-      // created out-of-band by the compress tool, so detect new active
-      // blocks on the LOADED state vs. the previous round (comparing a
-      // single processTurn's input/output can never see them).
-      const postCompression = runtime.noteActiveBlocks(
-        sid,
-        state.blocks.filter((b) => b.active).map((b) => b.blockId),
-      );
 
       debug.event("context-in", {
         sid,
@@ -230,6 +247,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
         coreMsgs: coreMessages.length,
         tokenCount,
         sessionTokens: realUsage?.tokens ?? null,
+        anchoredTokens,
         limit: config.modelContextLimit,
         blocksBefore: state.blocks.length,
         activeBefore: state.blocks.filter((b) => b.active).length,
