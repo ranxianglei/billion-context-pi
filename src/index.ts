@@ -8,7 +8,7 @@ import type { CoreMessage, NudgeDecision, CompressionBlock, Prompts } from "acp-
 import { renderNudgeText, resolvePrompts, defaultPrompts, viableRanges } from "acp-kernel";
 import { type AdapterConfig, resolveDelegate } from "./config.js";
 import { createRuntime, type AcpRuntime, MAX_COMPRESS_ATTEMPTS } from "./runtime.js";
-import { makeCompressTool, isCompressSuccessText, isCompressNoopText } from "./compress-tool.js";
+import { makeCompressTool, isCompressSuccessText, isCompressNoopText, isNothingToCompressText } from "./compress-tool.js";
 import { makeDecompressTool } from "./decompress-tool.js";
 import { makeSearchTool } from "./search-tool.js";
 import { makeStatusTool } from "./status-tool.js";
@@ -343,16 +343,28 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
     }
 
     if (outcome !== null) {
-      const failed = outcome.retryFor !== null ? compressOutcomes.find((o) => o.toolCallId === outcome.retryFor) : undefined;
-      if (failed) {
-        rebuilt.push(compressRetryMessage(failed.text, outcome.count, MAX_COMPRESS_ATTEMPTS));
-        logWarn("nudge", { sid, event: "compress-retry-inject", attempt: outcome.count, max: MAX_COMPRESS_ATTEMPTS, toolCallId: failed.toolCallId });
-        debug.event("compress-retry-injected", { sid, turnKey, attempt: outcome.count, toolCallId: failed.toolCallId, text: failed.text.slice(0, 200) });
-      } else if (outcome.cappedNow) {
-        logWarn("nudge", { sid, event: "compress-retry-capped", failures: outcome.count });
-        debug.event("compress-retry-capped", { sid, turnKey, failures: outcome.count });
-        if (ctx.hasUI) {
-          ctx.ui.notify(`[ACP] compress failed ${outcome.count}× this turn — retry prompts disabled until the next user message.`);
+      if (outcome.continueFor !== null) {
+        // "Nothing to compress" is a terminal state, not a retryable error:
+        // inject a one-shot "continue your task" message and STOP re-injecting.
+        // (Re-injecting on every LLM call is what drove the acp_status loop.)
+        if (!runtime.continueShownFor(turnKey)) {
+          rebuilt.push(compressContinueMessage());
+          runtime.markContinueShown(turnKey);
+          logWarn("nudge", { sid, event: "compress-continue-inject", toolCallId: outcome.continueFor });
+          debug.event("compress-continue-injected", { sid, turnKey, toolCallId: outcome.continueFor });
+        }
+      } else {
+        const failed = outcome.retryFor !== null ? compressOutcomes.find((o) => o.toolCallId === outcome.retryFor) : undefined;
+        if (failed) {
+          rebuilt.push(compressRetryMessage(failed.text, outcome.count, MAX_COMPRESS_ATTEMPTS));
+          logWarn("nudge", { sid, event: "compress-retry-inject", attempt: outcome.count, max: MAX_COMPRESS_ATTEMPTS, toolCallId: failed.toolCallId });
+          debug.event("compress-retry-injected", { sid, turnKey, attempt: outcome.count, toolCallId: failed.toolCallId, text: failed.text.slice(0, 200) });
+        } else if (outcome.cappedNow) {
+          logWarn("nudge", { sid, event: "compress-retry-capped", failures: outcome.count });
+          debug.event("compress-retry-capped", { sid, turnKey, failures: outcome.count });
+          if (ctx.hasUI) {
+            ctx.ui.notify(`[ACP] compress failed ${outcome.count}× this turn — retry prompts disabled until the next user message.`);
+          }
         }
       }
     }
@@ -533,15 +545,15 @@ function turnStartIndex(entries: Array<{ type: string; message?: { role?: string
 // session would keep an old failure as the "newest outcome" forever, and the
 // per-turn counter reset would then re-prompt it with count 0 on every LLM
 // call of every later turn (review finding on 7ddd2c6).
-function collectCompressOutcomes(entries: Array<{ type: string; id: string; message?: AgentMessage }>, startIndex: number): Array<{ toolCallId: string; isError: boolean; success: boolean; noop: boolean; text: string }> {
-  const out: Array<{ toolCallId: string; isError: boolean; success: boolean; noop: boolean; text: string }> = [];
+function collectCompressOutcomes(entries: Array<{ type: string; id: string; message?: AgentMessage }>, startIndex: number): Array<{ toolCallId: string; isError: boolean; success: boolean; noop: boolean; nothingToCompress: boolean; text: string }> {
+  const out: Array<{ toolCallId: string; isError: boolean; success: boolean; noop: boolean; nothingToCompress: boolean; text: string }> = [];
   for (let i = Math.max(startIndex, -1) + 1; i < entries.length; i++) {
     const entry = entries[i]!;
     if (entry.type !== "message" || !entry.message) continue;
     const m = entry.message as { role?: string; toolName?: string; toolCallId?: string; isError?: boolean; content?: unknown };
     if (m.role !== "toolResult" || m.toolName !== "compress" || !m.toolCallId) continue;
     const text = extractText(m.content);
-    out.push({ toolCallId: m.toolCallId, isError: m.isError === true, success: m.isError !== true && isCompressSuccessText(text), noop: m.isError !== true && isCompressNoopText(text), text });
+    out.push({ toolCallId: m.toolCallId, isError: m.isError === true, success: m.isError !== true && isCompressSuccessText(text), noop: m.isError !== true && isCompressNoopText(text), nothingToCompress: m.isError === true && isNothingToCompressText(text), text });
   }
   return out;
 }
@@ -563,6 +575,20 @@ function compressRetryMessage(errorText: string, attempt: number, maxAttempts: n
     attempt >= maxAttempts - 1 ? "- This is your LAST retry for this turn — if it fails again, compression pauses until the next user message." : null,
     "- If ranges were skipped (already compressed / too small), do NOT retry the same refs — run acp_status and use its CURRENT compressible ranges.",
   ].filter((l): l is string => l !== null).join("\n");
+  return { role: "user", content: [{ type: "text", text }], timestamp: Date.now() } as AgentMessage;
+}
+
+/** One-shot message for the "nothing to compress" terminal state: the model's
+ *  requested ranges are already compressed / below the min threshold, so there
+ *  is nothing to fix. Tell it to STOP compressing and continue its task. Injected
+ *  exactly once per turn (tracked by continueShownFor) — NOT re-injected on
+ *  every LLM call, which is what caused the acp_status re-check loop. */
+function compressContinueMessage(): AgentMessage {
+  const text = [
+    "[ACP] Nothing left to compress — your requested ranges are already compressed (or below the minimum threshold).",
+    "",
+    "Do NOT call compress or acp_status again for this. Continue with your original task.",
+  ].join("\n");
   return { role: "user", content: [{ type: "text", text }], timestamp: Date.now() } as AgentMessage;
 }
 

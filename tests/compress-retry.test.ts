@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { rm } from "node:fs/promises";
 import { createAcpExtension } from "../src/index.js";
 import { createRuntime, MAX_COMPRESS_ATTEMPTS } from "../src/runtime.js";
-import { isCompressSuccessText, isCompressNoopText } from "../src/compress-tool.js";
+import { isCompressSuccessText, isCompressNoopText, isNothingToCompressText } from "../src/compress-tool.js";
 
 // Failure-triggered compress retry (session 01a00a38 post-mortem): the model's
 // ONLY compress call in a 3-hour session was rejected by pi's typebox
@@ -60,6 +60,10 @@ const SUCCESS_PANEL = "▣ ACP | 58.5K → 5.7K tokens (~52.8K reclaimed, 4 bloc
 const PARTIAL_PANEL = "▣ ACP | 58.5K → 30K tokens (~28.5K reclaimed, 3 blocks)\nErrors: range m00009..m00012: Summary too long";
 const NOOP_PANEL = "▣ ACP | 58.5K → 58.5K tokens (~0 reclaimed, 0 blocks)\nErrors: range m00001..m00002: Requested range(s) already compressed; nothing to compress";
 const NEUTRAL_TEXT = "No ranges provided.";
+// The kernel's "nothing to compress" terminal error (session 01a02715 loop):
+// the requested ranges are already compressed / below the min threshold. This
+// is NOT a retryable parameter error — the model should stop and continue.
+const NOTHING_TO_COMPRESS_ERR = "Requested range(s) already compressed (e.g. m00809..m00888); remaining compressible content 1009 chars < min 5000. Nothing to do. Current active blocks span b1..b23 — retry with startId/endId set to active block IDs in that span.";
 
 function fakeCtx(getEntries: () => any[], stateFile: string) {
   return {
@@ -424,5 +428,74 @@ test("emergency nudge stops re-injecting once the turn's retry cap is burned (is
   entries = [...entries, toolResultMsg("ec4", "call_4", SUCCESS_PANEL, false)];
   const rRe = await fire(handlers, ctx);
   assert.ok(nudgeCount(rRe) >= 1, "after a successful compress the emergency nudge may resume");
+  await rm(`${stateFile}.acp.json`, { force: true });
+});
+
+// ─── session 01a02715: "nothing to compress" must NOT re-nudge (acp_status loop) ──
+//
+// The model's compress call was rejected with "Nothing to do" (ranges already
+// compressed / below min). The old retry nudge re-injected on EVERY LLM call
+// (the cap only advances on a NEW compress failure, and the model switched to
+// acp_status) → 203 acp_status calls. Fix: "nothing to compress" is a terminal
+// state → one-shot "continue your task" message, NOT re-injected, and it does
+// not consume the retry budget.
+
+test("classification: 'nothing to compress' errors are terminal, not retryable", () => {
+  assert.equal(isNothingToCompressText(NOTHING_TO_COMPRESS_ERR), true);
+  assert.equal(isNothingToCompressText("Total compressible content too small (100 chars). Combine more messages into your range(s) to meet the threshold."), true);
+  assert.equal(isNothingToCompressText("already compressed (messages consumed by existing block(s)); nothing to compress."), true);
+  assert.equal(isNothingToCompressText(VALIDATION_ERR), false, "parameter errors are NOT nothing-to-compress");
+  assert.equal(isNothingToCompressText(SUCCESS_PANEL), false);
+  assert.equal(isNothingToCompressText(NEUTRAL_TEXT), false);
+});
+
+test("noteCompressOutcomes: nothing-to-compress → continueFor (not retryFor), does not consume retry budget", () => {
+  const rt = createRuntime({});
+  const nothing = (id: string) => ({ toolCallId: id, isError: true, success: false, nothingToCompress: true });
+  const fail = (id: string) => ({ toolCallId: id, isError: true, success: false });
+
+  let r = rt.noteCompressOutcomes("u1", [nothing("t0")]);
+  assert.equal(r.count, 0, "nothing-to-compress does NOT consume a retry attempt");
+  assert.equal(r.retryFor, null, "no retry prompt for terminal state");
+  assert.equal(r.continueFor, "t0", "continue signal set");
+
+  // a later genuine parameter error still gets its full budget (attempt 1, not 2)
+  r = rt.noteCompressOutcomes("u1", [nothing("t0"), fail("t1")]);
+  assert.equal(r.count, 1, "genuine failure after nothing-to-compress is attempt 1");
+  assert.equal(r.retryFor, "t1");
+  assert.equal(r.continueFor, null, "latest is a parameter error, not nothing-to-compress");
+});
+
+test("nothing-to-compress error → one-shot 'continue task' message, NOT re-injected (acp_status loop breaker)", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+  const stateFile = "/tmp/pai-acp-retry-nothing.session.json";
+  await rm(`${stateFile}.acp.json`, { force: true });
+
+  let entries: any[] = [userMsg("e1", ZH)];
+  const ctx = fakeCtx(() => entries, stateFile);
+  await fire(handlers, ctx);
+
+  const continueMsgs = (r: any) =>
+    (r?.messages ?? []).filter((m: any) => m.role === "user" && /Nothing left to compress/.test(JSON.stringify(m.content)));
+
+  // model calls compress with already-compressed ranges → "Nothing to do" error
+  entries = [...entries, toolResultMsg("e2", "call_1", NOTHING_TO_COMPRESS_ERR, true)];
+  const r1 = await fire(handlers, ctx);
+  assert.equal(continueMsgs(r1).length, 1, "nothing-to-compress → one-shot continue message");
+  assert.equal(retryMsgs(r1).length, 0, "no retry nudge for terminal state");
+  const ct = r1.messages.find((m: any) => m.role === "user" && /Nothing left to compress/.test(JSON.stringify(m.content)))?.content[0].text as string;
+  assert.match(ct, /Do NOT call compress or acp_status again/);
+
+  // re-fire (model calls acp_status, context fires again): continue message NOT re-injected
+  const r2 = await fire(handlers, ctx);
+  assert.equal(continueMsgs(r2).length, 0, "continue message is one-shot, not re-injected on every fire");
+  assert.equal(retryMsgs(r2).length, 0, "no retry nudge either");
+
+  // a NEW genuine parameter error in the same turn still gets a retry nudge
+  entries = [...entries, toolResultMsg("e3", "call_2", VALIDATION_ERR, true)];
+  const r3 = await fire(handlers, ctx);
+  assert.equal(retryMsgs(r3).length, 1, "genuine parameter error still triggers retry nudge");
+  assert.match(retryText(r3), /attempt 1 of 3/);
   await rm(`${stateFile}.acp.json`, { force: true });
 });

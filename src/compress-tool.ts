@@ -119,6 +119,15 @@ export function isCompressNoopText(text: string): boolean {
   return compressPanelBlocks(text) === 0;
 }
 
+/** "Nothing to compress" = the kernel found no compressible content in the
+ *  requested ranges (all already compressed / below the min threshold). This
+ *  is a TERMINAL state, not a retryable parameter error: the model should stop
+ *  compressing and continue its task, not retry. Detected by string-matching
+ *  the kernel's error text (ApplyCompressionResult.errors is string[]). */
+export function isNothingToCompressText(text: string): boolean {
+  return /Nothing to do|nothing to compress|too small/i.test(text);
+}
+
 function tier3OnlyRewrite(newBlocks: CompressionBlock[], allBlocks: CompressionBlock[]): string[] | null {
   if (newBlocks.length === 0) return null;
   const byId = new Map(allBlocks.map((b) => [b.blockId, b]));

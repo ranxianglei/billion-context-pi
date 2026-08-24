@@ -68,6 +68,8 @@ export interface AcpRuntime {
   setPrompts(prompts: Prompts): void;
   markNudgeShown(turnKey: string): void;
   nudgeShownFor(turnKey: string): boolean;
+  markContinueShown(turnKey: string): void;
+  continueShownFor(turnKey: string): boolean;
   /** Process compress toolResults for the CURRENT user turn only (the caller
    *  scopes the list — see collectCompressOutcomes in src/index.ts); idempotent
    *  per toolCallId. Outcome classes: isError or noop (0-block panel) →
@@ -75,7 +77,7 @@ export interface AcpRuntime {
    *  text → neutral (count unchanged). Returns the failure count, the
    *  toolCallId of the newest failure that still needs a retry prompt (null
    *  when none, capped, or count 0), and whether the cap was just reached. */
-  noteCompressOutcomes(turnKey: string, outcomes: ReadonlyArray<{ toolCallId: string; isError: boolean; success: boolean; noop?: boolean }>): { count: number; retryFor: string | null; cappedNow: boolean };
+  noteCompressOutcomes(turnKey: string, outcomes: ReadonlyArray<{ toolCallId: string; isError: boolean; success: boolean; noop?: boolean; nothingToCompress?: boolean }>): { count: number; retryFor: string | null; continueFor: string | null; cappedNow: boolean };
   /** True when this turn already burned MAX_COMPRESS_ATTEMPTS failed/no-op
    *  compress calls — used to stop re-injecting the (dedup-exempt) emergency
    *  nudge that would otherwise keep looping no-op compressions (issue #6). */
@@ -289,8 +291,12 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   const compressOutcomeSeen = new Set<string>();
   let compressFailTurnKey: string | null = null;
   let compressFailCount = 0;
+  // turnKeys that already received the one-shot "nothing to compress → continue
+  // your task" message. Prevents re-injecting it on every LLM call (the
+  // acp_status re-check loop). Reset per turn via clearCompressRetryTracking.
+  const continueShownTurns = new Set<string>();
 
-  function noteCompressOutcomes(turnKey: string, outcomes: ReadonlyArray<{ toolCallId: string; isError: boolean; success: boolean; noop?: boolean }>): { count: number; retryFor: string | null; cappedNow: boolean } {
+  function noteCompressOutcomes(turnKey: string, outcomes: ReadonlyArray<{ toolCallId: string; isError: boolean; success: boolean; noop?: boolean; nothingToCompress?: boolean }>): { count: number; retryFor: string | null; continueFor: string | null; cappedNow: boolean } {
     if (compressFailTurnKey !== turnKey) {
       compressFailTurnKey = turnKey;
       compressFailCount = 0;
@@ -299,6 +305,11 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     for (const o of outcomes) {
       if (compressOutcomeSeen.has(o.toolCallId)) continue;
       compressOutcomeSeen.add(o.toolCallId);
+      if (o.nothingToCompress === true) {
+        // terminal state: not a retryable failure — do NOT consume a retry
+        // attempt, so a later genuine parameter error still gets its full cap.
+        continue;
+      }
       if (o.isError || o.noop === true) {
         compressFailCount += 1;
       } else if (o.success) {
@@ -307,12 +318,17 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
       // neutral: counter untouched
     }
     const latest = outcomes.length > 0 ? outcomes[outcomes.length - 1] : undefined;
+    const latestFailed = latest && (latest.isError || latest.noop === true);
+    const isNothing = latestFailed !== null && latestFailed !== undefined && latestFailed && latest.nothingToCompress === true;
     // count >= 1 guards against a deduped stale failure sliding in with a
     // reset-to-0 counter (defense in depth; the caller's turn scoping already
     // prevents it — an "attempt 0 of 3" prompt must be impossible).
-    const retryFor = latest && (latest.isError || latest.noop === true) && compressFailCount >= 1 && compressFailCount < MAX_COMPRESS_ATTEMPTS ? latest.toolCallId : null;
+    // retryFor: retryable parameter error (NOT nothing-to-compress).
+    const retryFor = latestFailed && !isNothing && compressFailCount >= 1 && compressFailCount < MAX_COMPRESS_ATTEMPTS ? latest.toolCallId : null;
+    // continueFor: nothing-to-compress (terminal — tell the model to continue).
+    const continueFor = isNothing ? latest.toolCallId : null;
     const cappedNow = compressFailCount >= MAX_COMPRESS_ATTEMPTS && prevCount < MAX_COMPRESS_ATTEMPTS;
-    return { count: compressFailCount, retryFor, cappedNow };
+    return { count: compressFailCount, retryFor, continueFor, cappedNow };
   }
 
   function compressRetryCappedFor(turnKey: string): boolean {
@@ -323,6 +339,7 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     compressOutcomeSeen.clear();
     compressFailTurnKey = null;
     compressFailCount = 0;
+    continueShownTurns.clear();
   }
 
   async function acquireLock(sid: string): Promise<() => void> {
@@ -410,4 +427,4 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     lastActiveBlockIds.delete(sid);
   }
 
-  return { core, store, density, setCountModel: (m) => { countModelId = m; }, noteActiveBlocks, clearSessionTracking, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reloadConfig, stateFor, save, acquireLock, overflowFor, overflowDrop, throttleFor, throttleDrop };}
+  return { core, store, density, setCountModel: (m) => { countModelId = m; }, noteActiveBlocks, clearSessionTracking, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), markContinueShown: (k) => { continueShownTurns.add(k); }, continueShownFor: (k) => continueShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reloadConfig, stateFor, save, acquireLock, overflowFor, overflowDrop, throttleFor, throttleDrop };}
