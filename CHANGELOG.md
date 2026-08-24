@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased (master, since v0.1.38)
+- **fix(overflow)**: 无 body 4xx 也触发溢出自愈 — pi 把 provider 空 body 的 4xx 原样透出为 `400/413 status code (no body)`（pi-ai 自身按 `/^4(?:00|13)\s*(?:status code)?\s*\(no body\)/i` 归类为 overflow），但 OVERFLOW_MARKER 不含该形态，扩展侧自愈永不武装 → 死循环无法恢复（2026-08-23 事故：50k 字符 bash toolResult 撞穿 sglang input+max_tokens 硬上限，此后每轮 400 无 body，模型永远等不到成功回合去 compress，用户「继续」只是原样重发超限上下文）。现将其作为**疑似溢出**信号：仅当发送视图估算 ≥ 有效上限 50%（与 turn 日志 pct 同口径）或自上次成功 assistant 回合起连续 ≥2 次无 body 4xx 时才武装紧急压缩；成功回合/新会话清零计数（runtime 内存态，与 armed 同生命周期，不入 acp.json）。无 body 解析不出窗口数 → 不学习窗口，紧急压缩直接用已解析的有效上限。经典文本标记路径不变 (relates #204)
 - **fix(guardrail): `toolOutputMaxBytes` 未配置时文档默认值 200000 现在实际生效** — 原接线 `if (max !== undefined && max > 0)` 把「未配置」当成「禁用」，内置 200KB 天花板永远不可达（`capToolOutput` 内部的回退到不了）；pi 只内置 cap bash/read/grep，其余工具可无限注入 context，与 CONFIGURATION.md 承诺的 ACTIVE 默认不符。改为接线层 `?? DEFAULT_TOOL_OUTPUT_MAX_BYTES` 回退，`0`/负数禁用语义不变 (#210)
 
 - **fix(compress): 接受 JSON 字符串形式的 `content` 参数** — 非严格工具 provider（vLLM openai-completions，`supportsStrictTools:false`）会把嵌套数组参数字符串化，pi 的 typebox 校验直接拒掉（`content.0: must be object`）。实测会话 01a00a38 全部唯一一次 compress 调用即死于此，3 小时会话零压缩。schema 改为 `Type.Union([Array, String])`，字符串自动 `JSON.parse` 并校验（错误信息引导模型传数组）

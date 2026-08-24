@@ -32,7 +32,7 @@ import {
 } from "./throttle-retry.js";
 import { defaultCountTokens } from "acp-kernel";
 import { formatSystemPromptForEvent, getSystemPromptText } from "./compat.js";
-import { inspectOverflowMessage, reserveOutputHeadroom, shouldReserveOutputHeadroom } from "./overflow-selfheal.js";
+import { inspectOverflowMessage, isNoBody4xxError, reserveOutputHeadroom, shouldReserveOutputHeadroom } from "./overflow-selfheal.js";
 
 type AgentMessage = SessionMessageEntry["message"];
 
@@ -199,6 +199,12 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       // below is fed the RAW sentTokens — its samples must stay on the
       // raw basis or density would chase its own calibration.
       let tokenCount = calibrateTokens(sentTokens, runtime.density.densityFor(modelId));
+      // Basis for the no-body-4xx overflow guard (wireOverflowSelfHeal): the
+      // sent-view estimate + effective limit of the request about to be sent —
+      // the same pct basis as the turn log below. Recorded BEFORE the armed
+      // boost so a guard consult after an error sees the real estimate, not
+      // the forced >=95% floor.
+      ov.noteSentView(tokenCount, config.modelContextLimit);
       // Self-heal (armed): after an overflow, force this turn's usage to >=95%
       // so the kernel's emergency nudge + tool-result truncate fire immediately,
       // even if the density-calibrated estimate under-reports the sent view.
@@ -402,21 +408,46 @@ function wireOverflowSelfHeal(pi: ExtensionAPI, runtime: AcpRuntime): void {
   pi.on("message_end", (event, ctx) => {
     const msg = event.message;
     if (msg.role !== "assistant") return;
-    if (msg.stopReason !== "error") return;
+    const sid = ctx.sessionManager.getSessionId();
+    const ov = runtime.overflowFor(sid);
+    if (msg.stopReason !== "error") {
+      // Successful assistant turn: the request loop is unwedged, so the
+      // consecutive no-body-4xx count (possible-overflow path below)
+      // restarts from zero.
+      ov.noteSuccess();
+      return;
+    }
     // Haystack = errorMessage + error content: some relays put the upstream
     // error body in the streamed content and leave errorMessage generic
     // ("Provider finish_reason: error_finish") — errorMessage alone would miss
     // them. (Same haystack approach as isThrottleError.)
     const haystack = `${msg.errorMessage ?? ""}\n${extractText(msg.content)}`;
     const info = inspectOverflowMessage(haystack);
-    if (!info.isOverflow) return;
-    const sid = ctx.sessionManager.getSessionId();
     const modelId = (ctx.model as { id?: string } | undefined)?.id ?? "default";
-    const ov = runtime.overflowFor(sid);
-    if (info.window) ov.setLearnedWindow(modelId, info.window);
+    if (info.isOverflow) {
+      if (info.window) ov.setLearnedWindow(modelId, info.window);
+      ov.armed = true;
+      logWarn("overflow-selfheal", { sid, modelId, event: "detected", window: info.window ?? null, message: info.message.slice(0, 200) });
+      if (ctx.hasUI) ctx.ui.notify(`[ACP] context overflow detected${info.window ? ` (window ${info.window})` : ""} — forcing emergency compression next turn`);
+      return;
+    }
+    // Possible overflow: pi's bodyless "4xx ... (no body)" (incident
+    // 2026-08-23: a huge bash tool result pushed every request past sglang's
+    // input+max_tokens cap; each retry returned "400 status code (no body)"
+    // forever and the text-marker path above never matched, so the emergency
+    // never fired and the session dead-looped). The text is ambiguous — the
+    // same 4xx comes back for invalid models / malformed requests (see
+    // messages.ts) — so arm only with corroboration: sent-view >= 50% of the
+    // effective limit, or the >=2nd consecutive no-body since the last
+    // successful turn. Unlike the path above no window can be parsed from a
+    // bodyless error, so none is learned: the armed emergency uses the
+    // already-resolved effective limit (wireContextTransform).
+    if (!isNoBody4xxError(haystack)) return;
+    const decision = ov.onNoBody4xx();
+    if (!decision.arm) return;
     ov.armed = true;
-    logWarn("overflow-selfheal", { sid, modelId, event: "detected", window: info.window ?? null, message: info.message.slice(0, 200) });
-    if (ctx.hasUI) ctx.ui.notify(`[ACP] context overflow detected${info.window ? ` (window ${info.window})` : ""} — forcing emergency compression next turn`);
+    logWarn("overflow-selfheal", { sid, modelId, event: "no-body-arm", consecutive: decision.consecutive, ratio: decision.ratio, message: haystack.slice(0, 200) });
+    if (ctx.hasUI) ctx.ui.notify(`[ACP] possible context overflow (4xx no-body error, ${decision.consecutive} consecutive) — forcing emergency compression next turn`);
   });
   pi.on("session_shutdown", (_event, ctx) => {
     runtime.overflowDrop(ctx.sessionManager.getSessionId());

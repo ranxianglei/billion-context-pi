@@ -49,6 +49,40 @@ export function inspectOverflowMessage(haystack: string | undefined | null): Ove
   return { isOverflow: true, window: parseOverflowWindow(body), message: body };
 }
 
+// Pi surfaces a provider 4xx whose response body is empty verbatim as the
+// errorMessage: "400 status code (no body)" / "413 (no body)". sglang and
+// other OpenAI-compatible backends return exactly this when the request busts
+// a hard input+max_tokens cap (incident 2026-08-23: a 50k-char bash tool
+// result pushed every subsequent request past the cap; each retry came back
+// "400 status code (no body)" forever, the model never got a successful turn
+// to compress, and the text-marker path above never matched). pi's own
+// classifier DOES treat the text as overflow (pi-stable-ai OVERFLOW_PATTERNS
+// ends with the same anchored regex), but OVERFLOW_MARKER deliberately does
+// not: the SAME no-body text is returned for NON-overflow 4xx (invalid model,
+// malformed request — see the note in messages.ts), so it is a POSSIBLE
+// overflow only, armed by the wiring when OverflowEpisode.onNoBody4xx()
+// corroborates it (usage ratio or consecutive count).
+export const NO_BODY_4XX_MARKER = /^4(?:00|13)\s*(?:status code)?\s*\(no body\)/i;
+
+export function isNoBody4xxError(haystack: string | undefined | null): boolean {
+  const body = (haystack ?? "").trim();
+  return body.length > 0 && NO_BODY_4XX_MARKER.test(body);
+}
+
+/** Corroboration threshold for arming on an ambiguous no-body 4xx: the
+ *  calibrated sent-view estimate must be at least this fraction of the
+ *  effective limit (same basis as the turn log's `pct`). */
+export const NO_BODY_ARM_RATIO = 0.5;
+
+/** Decision returned by OverflowEpisode.onNoBody4xx(). */
+export interface NoBodyDecision {
+  arm: boolean;
+  /** Consecutive no-body 4xx errors since the last successful assistant turn. */
+  consecutive: number;
+  /** Recorded sent-view estimate / effective limit, when both were seen. */
+  ratio: number | null;
+}
+
 function parseOverflowWindow(text: string): number | undefined {
   // Anthropic: "prompt is too long: 130000 tokens > 128000 maximum" -> 128000
   let m = />\s*(\d[\d,]*)\s*(?:tokens?)?\s*maximum/i.exec(text);
@@ -130,8 +164,65 @@ export class OverflowEpisode {
    *  session-scoped (not per-model): the context did not shrink, so the next
    *  turn needs the emergency regardless of which model answers it. */
   armed = false;
+
+  // --- Ambiguous no-body 4xx corroboration (incident 2026-08-23) ---
+  // Runtime/in-memory like `armed` above, NOT persisted to acp.json: the
+  // count and the sent-view basis describe the live request loop of the
+  // current process. A resumed session re-establishes both within one turn
+  // (the context event re-records the sent view; the next error re-counts),
+  // while a persisted count would arm an emergency against a fresh session
+  // whose first request may succeed.
+  /** Sent-view estimate + effective limit recorded by the context event —
+   *  the numbers of the request that just ended. */
+  private sentTokens: number | null = null;
+  private sentLimit: number | null = null;
+  /** Consecutive no-body 4xx errors since the last successful assistant
+   *  turn. 0 at session start (the episode is created per session). */
+  private noBody4xx = 0;
+
+  noteSentView(tokens: number, limit: number): void {
+    this.sentTokens = tokens > 0 ? tokens : null;
+    this.sentLimit = limit > 0 ? limit : null;
+  }
+
+  /** A successful assistant turn unwedged the request loop: the consecutive
+   *  no-body count restarts from zero. */
+  noteSuccess(): void {
+    this.noBody4xx = 0;
+  }
+
+  /**
+   * Record one ambiguous no-body 4xx and decide whether it corroborates a
+   * probable context overflow. Guards against the false positive (the same
+   * text serves non-overflow 4xx): arm only when the current sent-view
+   * estimate is >= NO_BODY_ARM_RATIO of the effective limit, OR this is the
+   * >=2nd consecutive no-body since the last success. The consecutive guard
+   * recovers the dead-loop even at a low ratio (the incident ran at ~24%:
+   * the estimate under-reported vs the input+max_tokens cap) — a genuine
+   * overflow fails identically while the context is unchanged, so repeated
+   * no-body errors with no successful turn in between are size-dependent by
+   * construction. No window can be parsed from a bodyless error, so when
+   * this arms, the emergency uses the already-resolved effective limit (no
+   * window is learned).
+   */
+  onNoBody4xx(): NoBodyDecision {
+    this.noBody4xx += 1;
+    const ratio =
+      this.sentTokens !== null && this.sentLimit !== null && this.sentLimit > 0
+        ? this.sentTokens / this.sentLimit
+        : null;
+    return {
+      arm: (ratio !== null && ratio >= NO_BODY_ARM_RATIO) || this.noBody4xx >= 2,
+      consecutive: this.noBody4xx,
+      ratio,
+    };
+  }
+
   reset(): void {
     this.learned.clear();
     this.armed = false;
+    this.sentTokens = null;
+    this.sentLimit = null;
+    this.noBody4xx = 0;
   }
 }

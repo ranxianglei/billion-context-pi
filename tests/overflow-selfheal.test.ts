@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { inspectOverflowMessage, OverflowEpisode, OVERFLOW_MARKER, reserveOutputHeadroom, shouldReserveOutputHeadroom } from "../src/overflow-selfheal.js";
+import { inspectOverflowMessage, OverflowEpisode, OVERFLOW_MARKER, isNoBody4xxError, NO_BODY_ARM_RATIO, reserveOutputHeadroom, shouldReserveOutputHeadroom } from "../src/overflow-selfheal.js";
 
 test("inspectOverflowMessage: detects OpenAI context-overflow + parses window", () => {
   const info = inspectOverflowMessage(
@@ -83,11 +83,18 @@ test("OverflowEpisode: initial state + reset", () => {
   assert.equal(ep.armed, false);
   ep.setLearnedWindow("m1", 100000);
   ep.armed = true;
+  ep.noteSentView(60_000, 100_000);
+  assert.equal(ep.onNoBody4xx().arm, true);
+  ep.noteSuccess();
+  ep.noteSentView(10_000, 100_000);
+  assert.equal(ep.onNoBody4xx().arm, false, "low ratio + first occurrence after reset");
   assert.equal(ep.learnedWindowFor("m1"), 100000);
   assert.equal(ep.armed, true);
   ep.reset();
   assert.equal(ep.learnedWindowFor("m1"), null);
   assert.equal(ep.armed, false);
+  assert.equal(ep.onNoBody4xx().ratio, null, "reset clears the recorded sent view");
+  assert.equal(ep.onNoBody4xx().consecutive, 2, "reset clears the consecutive count");
 });
 
 test("OverflowEpisode: learned windows are per-model (no cross-model crosstalk)", () => {
@@ -133,6 +140,97 @@ test("OVERFLOW_MARKER: case-insensitive and matches the shared guard patterns", 
   assert.ok(OVERFLOW_MARKER.test("Context Length Exceeded"));
   assert.ok(OVERFLOW_MARKER.test("context_length_exceeded"));
   assert.ok(!OVERFLOW_MARKER.test("too many tokens, please wait before trying again"));
+});
+
+// --- no-body 4xx (incident 2026-08-23): pi's ambiguous "4xx ... (no body)" ---
+// pi surfaces a bodyless provider 4xx verbatim; pi-ai's own classifier
+// treats the text as overflow (same anchored regex), but our marker set must
+// NOT — the text also carries non-overflow 4xx. It is a possible-overflow
+// signal armed only with corroboration (OverflowEpisode.onNoBody4xx).
+test("isNoBody4xxError: matches pi's surfaced forms of the bodyless 4xx", () => {
+  assert.equal(isNoBody4xxError("400 status code (no body)"), true, "the incident form");
+  assert.equal(isNoBody4xxError("413 status code (no body)"), true);
+  assert.equal(isNoBody4xxError("400 (no body)"), true);
+  assert.equal(isNoBody4xxError("413(no body)"), true, "zero spaces allowed");
+});
+
+test("isNoBody4xxError: other statuses / texts / empty are not no-body 4xx", () => {
+  assert.equal(isNoBody4xxError("429 status code (no body)"), false, "throttle stays on the throttle path");
+  assert.equal(isNoBody4xxError("500 status code (no body)"), false);
+  assert.equal(isNoBody4xxError("404 status code (no body)"), false);
+  assert.equal(isNoBody4xxError("insufficient_quota"), false);
+  assert.equal(isNoBody4xxError(""), false);
+  assert.equal(isNoBody4xxError(undefined), false);
+  assert.equal(isNoBody4xxError("Error: 400 status code (no body)"), false, "anchored like pi-ai's classifier — a prefix is not pi's surface form");
+});
+
+test("no-body 4xx stays OUT of the unconditional text-marker path", () => {
+  assert.equal(inspectOverflowMessage("400 status code (no body)").isOverflow, false);
+  assert.equal(inspectOverflowMessage("413 (no body)").isOverflow, false);
+});
+
+test("inspectOverflowMessage: classic 'maximum context length is 262144' still arms via the text-marker path (regression)", () => {
+  const info = inspectOverflowMessage(
+    "This model's maximum context length is 262144 tokens. However, you requested about 262200 tokens. Please reduce the length of the messages.",
+  );
+  assert.equal(info.isOverflow, true);
+  assert.equal(info.window, 262144);
+  assert.equal(isNoBody4xxError(info.message), false);
+});
+
+test("no-body guard: low estimate + first occurrence → NO arm (false-positive guard)", () => {
+  // Incident scale: ~31.5k estimated on a 131,072 effective limit (~24%) —
+  // the estimate under-reports vs sglang's input+max_tokens cap, so the
+  // ratio guard alone cannot fire; a single hit must not arm either.
+  const ep = new OverflowEpisode();
+  ep.noteSentView(31_475, 131_072);
+  const d = ep.onNoBody4xx();
+  assert.equal(d.arm, false);
+  assert.equal(d.consecutive, 1);
+  assert.equal(d.ratio, 31_475 / 131_072);
+});
+
+test("no-body guard: estimate >= 50% of effective limit → arm on first occurrence", () => {
+  const ep = new OverflowEpisode();
+  ep.noteSentView(70_000, 131_072);
+  assert.equal(ep.onNoBody4xx().arm, true);
+});
+
+test("no-body guard: exactly the threshold ratio arms (>= semantics)", () => {
+  const ep = new OverflowEpisode();
+  ep.noteSentView(65_536, 131_072);
+  const d = ep.onNoBody4xx();
+  assert.equal(d.ratio, NO_BODY_ARM_RATIO);
+  assert.equal(d.arm, true, "ratio == threshold arms on the first occurrence");
+});
+
+test("no-body guard: second consecutive no-body at low estimate → arm (incident dead-loop)", () => {
+  const ep = new OverflowEpisode();
+  ep.noteSentView(31_475, 131_072);
+  assert.equal(ep.onNoBody4xx().arm, false, "first: low ratio, first occurrence");
+  const d = ep.onNoBody4xx();
+  assert.equal(d.arm, true, "second consecutive since last success arms");
+  assert.equal(d.consecutive, 2);
+});
+
+test("no-body guard: successful turn resets the consecutive count", () => {
+  const ep = new OverflowEpisode();
+  ep.noteSentView(31_475, 131_072);
+  assert.equal(ep.onNoBody4xx().arm, false);
+  ep.noteSuccess();
+  assert.equal(ep.onNoBody4xx().arm, false, "after a success the count restarts — a lone no-body does not arm");
+  assert.equal(ep.onNoBody4xx().arm, true, "the next consecutive pair still arms");
+});
+
+test("no-body guard: no recorded sent view (fresh episode) → first no-body does not arm", () => {
+  // message_end can only see a sent view recorded by a context event; on a
+  // mid-session extension reload the first error has no basis — only the
+  // consecutive guard can fire (on the second hit).
+  const ep = new OverflowEpisode();
+  const d = ep.onNoBody4xx();
+  assert.equal(d.arm, false);
+  assert.equal(d.ratio, null);
+  assert.equal(ep.onNoBody4xx().arm, true);
 });
 
 // Provider phrasings the shorter marker set missed — mirrored from pi-ai's
