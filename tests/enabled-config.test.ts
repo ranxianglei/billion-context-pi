@@ -15,6 +15,10 @@ function withAcpJson(content: string, fn: (api: any) => void): void {
   const home = mkdtempSync(path.join(os.tmpdir(), "bili-acp-enabled-"));
   const prevHome = process.env.HOME;
   const prevUserProfile = process.env.USERPROFILE;
+  // getAgentDir() honors this override (#231); a stale value would redirect the
+  // fresh-location read out of the faked home and make these tests env-dependent.
+  const prevAgentDir = process.env.PI_CODING_AGENT_DIR;
+  delete process.env.PI_CODING_AGENT_DIR;
   process.env.HOME = home;
   if (prevUserProfile !== undefined) process.env.USERPROFILE = home;
   const cwd = path.join(home, "project");
@@ -39,9 +43,78 @@ function withAcpJson(content: string, fn: (api: any) => void): void {
     else process.env.HOME = prevHome;
     if (prevUserProfile === undefined) delete process.env.USERPROFILE;
     else process.env.USERPROFILE = prevUserProfile;
+    if (prevAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = prevAgentDir;
     rmSync(home, { recursive: true, force: true });
   }
 }
+
+test("#231 enabled:false in agent-dir location disables ACP (factory gate reads fresh)", () => {
+  const home = mkdtempSync(path.join(os.tmpdir(), "bili-acp-fresh-"));
+  const prevHome = process.env.HOME;
+  // os.homedir() reads %USERPROFILE% on Windows, $HOME on POSIX — fake both.
+  const prevUserProfile = process.env.USERPROFILE;
+  const prevAgentDir = process.env.PI_CODING_AGENT_DIR;
+  delete process.env.PI_CODING_AGENT_DIR;
+  process.env.HOME = home;
+  if (prevUserProfile !== undefined) process.env.USERPROFILE = home;
+  mkdirSync(path.join(home, ".pi", "agent"), { recursive: true });
+  writeFileSync(path.join(home, ".pi", "agent", "acp.json"), "{ \"enabled\": false }");
+  try {
+    const handlers = new Map<string, ((e: any, ctx: any) => any)[]>();
+    const api = {
+      on(event: string, handler: (e: any, ctx: any) => any) { handlers.set(event, handler); },
+      tools: [] as any[],
+      commands: new Map<string, any>(),
+      registerTool(tool: any) { this.tools.push(tool); },
+      registerCommand(name: string, options: any) { this.commands.set(name, options); },
+    };
+    createAcpExtension({})(api as any);
+    assert.equal(api.tools.length, 0, "migrated enabled:false must still disable at factory time");
+  } finally {
+    if (prevHome === undefined) delete process.env.HOME;
+    else process.env.HOME = prevHome;
+    if (prevUserProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = prevUserProfile;
+    if (prevAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = prevAgentDir;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("#231 corrupt fresh + valid legacy enabled:false still disables (no shadowing)", () => {
+  const home = mkdtempSync(path.join(os.tmpdir(), "bili-acp-shadow-"));
+  const prevHome = process.env.HOME;
+  // os.homedir() reads %USERPROFILE% on Windows, $HOME on POSIX — fake both.
+  const prevUserProfile = process.env.USERPROFILE;
+  const prevAgentDir = process.env.PI_CODING_AGENT_DIR;
+  delete process.env.PI_CODING_AGENT_DIR;
+  process.env.HOME = home;
+  if (prevUserProfile !== undefined) process.env.USERPROFILE = home;
+  mkdirSync(path.join(home, ".pi", "agent"), { recursive: true });
+  writeFileSync(path.join(home, ".pi", "agent", "acp.json"), "{ bad json cut off mid-edit");
+  writeFileSync(path.join(home, ".pi", "acp.json"), "{ \"enabled\": false }");
+  try {
+    const handlers = new Map<string, ((e: any, ctx: any) => any)[]>();
+    const api = {
+      on(event: string, handler: (e: any, ctx: any) => any) { handlers.set(event, handler); },
+      tools: [] as any[],
+      commands: new Map<string, any>(),
+      registerTool(tool: any) { this.tools.push(tool); },
+      registerCommand(name: string, options: any) { this.commands.set(name, options); },
+    };
+    createAcpExtension({})(api as any);
+    assert.equal(api.tools.length, 0, "a broken fresh copy must not shadow the legacy master switch");
+  } finally {
+    if (prevHome === undefined) delete process.env.HOME;
+    else process.env.HOME = prevHome;
+    if (prevUserProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = prevUserProfile;
+    if (prevAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = prevAgentDir;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
 
 test("#467 unquoted keys in acp.json still disable ACP", () => {
   withAcpJson("{ enabled : false }", (api) => {

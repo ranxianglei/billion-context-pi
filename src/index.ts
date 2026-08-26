@@ -4,12 +4,9 @@ import type {
   ExtensionFactory,
   SessionMessageEntry,
 } from "@earendil-works/pi-coding-agent";
-import { CONFIG_DIR_NAME } from "./config-dir.js";
-import { parseAcpJson } from "./user-config.js";
+import { acpJsonScopes, parseAcpJson } from "./user-config.js";
 import type { KeyId } from "@earendil-works/pi-tui";
 import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
 import type { CoreMessage, NudgeDecision, CompressionBlock, Prompts } from "acp-kernel";
 import { renderNudgeText, resolvePrompts, defaultPrompts, viableRanges } from "acp-kernel";
 import { type AdapterConfig, resolveDelegate, resolveHostSession, DEFAULT_DELEGATE_POLICY } from "./config.js";
@@ -151,33 +148,35 @@ export default createAcpExtension();
 // files are repaired when possible and otherwise warned about loudly (#467).
 function userConfigDisabled(cwd: string): boolean {
   let disabled: boolean | undefined;
-  for (const base of [join(homedir(), CONFIG_DIR_NAME), join(cwd, CONFIG_DIR_NAME)]) {
-    const file = join(base, "acp.json");
-    let text: string;
-    try {
-      text = readFileSync(file, "utf8");
-    } catch {
-      continue; // missing file → nothing to say
-    }
-    // #467: hand-edited configs commonly carry BOM heads, unquoted keys, or
-    // trailing commas (Windows notepad defaults). Strict JSON.parse made every
-    // one of those silently mean "not disabled" — the exact opposite of the
-    // user's intent. parseAcpJson repairs the common shapes and warns loudly
-    // on whatever still fails instead of swallowing it.
-    const r = parseAcpJson(file, text);
-    if (r.status === "failed") {
-      console.warn(`[bcp] ${r.reason}`);
-      continue;
-    }
-    if (r.status === "repaired") {
-      console.warn(`[bcp] ${r.reason}`);
-    }
-    if (r.value) {
-      const v = r.value.enabled;
-      if (v === true || v === false) disabled = v;
-      else if (v !== undefined) {
-        console.warn(`[bcp] ${file}: enabled must be the literal boolean true/false, got ${JSON.stringify(v)} — ignoring. ACP stays enabled.`);
+  for (const scope of acpJsonScopes(cwd)) {
+    for (const file of [scope.fresh, scope.legacy]) {
+      let text: string;
+      try {
+        text = readFileSync(file, "utf8");
+      } catch {
+        continue; // missing file → nothing to say
       }
+      // #467: hand-edited configs commonly carry BOM heads, unquoted keys, or
+      // trailing commas (Windows notepad defaults). Strict JSON.parse made every
+      // one of those silently mean "not disabled" — the exact opposite of the
+      // user's intent. parseAcpJson repairs the common shapes and warns loudly
+      // on whatever still fails instead of swallowing it.
+      const r = parseAcpJson(file, text);
+      if (r.status === "failed") {
+        console.warn(`[bcp] ${r.reason}`);
+        continue;
+      }
+      if (r.status === "repaired") {
+        console.warn(`[bcp] ${r.reason}`);
+      }
+      if (r.value) {
+        const v = r.value.enabled;
+        if (v === true || v === false) disabled = v;
+        else if (v !== undefined) {
+          console.warn(`[bcp] ${file}: enabled must be the literal boolean true/false, got ${JSON.stringify(v)} — ignoring. ACP stays enabled.`);
+        }
+      }
+      break;
     }
   }
   return disabled === false;

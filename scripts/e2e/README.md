@@ -78,7 +78,7 @@ docker run --rm bcp-e2e 03-nudge     # filtered
 {
   "name": "basic-compress",
   "description": "...",
-  "acpConfig": { "modelContextLimit": 1500 },  // optional, merged into ~/.pi/acp.json
+  "acpConfig": { "modelContextLimit": 1500 },  // optional, merged into ~/.pi/agent/acp.json
   "turns": [
     { "respond": "text",  "userText": "...", "text": "..." },     // assistant text reply
     { "respond": "compress", "range": "all", "topic": "...", "summary": "...",

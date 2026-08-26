@@ -49,9 +49,10 @@ or equivalently
 ```json
 { "hostSession": { "countCustomMessages": true } }
 ```
-in `~/.pi/acp.json` / `<project>/.pi/acp.json`, or programmatically on the adapter config
-passed to `createAcpExtension(adapter)`. Invalid values warn and fall back to off; they
-never fail a session.
+in `~/.pi/agent/acp.json` / `<project>/.pi/agent/acp.json` (legacy `~/.pi/acp.json` /
+`<project>/.pi/acp.json` are still read when no fresh file exists), or programmatically on
+the adapter config passed to `createAcpExtension(adapter)`. Invalid values warn and fall
+back to off; they never fail a session.
 
 **Default-off guarantee:** with no `hostSession` key the predicate reduces to the exact
 pre-#364 rule (user-role only). This is pinned by unit tests that compare against the
@@ -213,5 +214,12 @@ while loader-based aliasing (Prime's loader) surfaces it as `undefined` at runti
 previously broke `path.join()` outright. The adapter therefore imports the pi package as a
 **namespace** in `src/config-dir.ts` (safe under both resolvers) and feature-detects the
 property; it is the only value import from the pi package — every other import is type-only
-and erased at build time. All config/log/session paths flow through the single constant
-there.
+and erased at build time. All config/log/session paths flow through that one module.
+
+The agent directory (`getAgentDir()`, e.g. `~/.pi/agent`) is resolved there under the same
+contract: if the host re-exports `getAgentDir` it wins (it honors the host's
+`<APP>_CODING_AGENT_DIR` env override); otherwise the adapter falls back to Pi's default
+shape `<home>/<CONFIG_DIR_NAME>/agent`. The user config files live under it
+(`<agentDir>/acp.json`), with the pre-agent-dir locations kept as legacy fallbacks (#231).
+On a host that does not re-export `getAgentDir`, the env override does not apply to these
+paths — a documented limitation (every real host running Pi's own code re-exports it).
