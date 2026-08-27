@@ -213,6 +213,15 @@ interface DelegateRun {
   /** True while the run sits in the coalescing notification queue (scheduled
    *  for the next batched flush, not yet delivered). */
   notifyQueued?: boolean;
+  /** When the model successfully read this run's result file (read tool, or a
+   *  bash command referencing it). A read at/after finishedAt means the model
+   *  already saw the final result — the completion notification is then
+   *  suppressed (notifyIfRead: "skip"). */
+  readAt?: number;
+  /** True when the completion notification was suppressed because the model
+   *  had already read the result file. Treated as delivered (injected=true)
+   *  so wait/recovery never re-surface the result. */
+  readSuppressed?: boolean;
 }
 const runs = new Map<string, DelegateRun>();
 
@@ -338,6 +347,50 @@ function normalizeModelRef(m: string | undefined): string | undefined {
   if (!m) return undefined;
   const s = m.trim();
   return s.includes("/") ? s : undefined;
+}
+
+let delegateNotifyIfRead: "skip" | "always" = "skip";
+
+export function setDelegateNotifyIfRead(mode: "skip" | "always"): void {
+  delegateNotifyIfRead = mode;
+}
+
+/** Mark the run whose result file the model just read (via the `read` tool).
+ *  Returns true when a run matched. A read of the final result file after the
+ *  run finished means the model already saw the result — the completion
+ *  notification is then suppressed (notifyIfRead: "skip"). */
+export function markDelegateResultRead(filePath: string): boolean {
+  if (!filePath) return false;
+  const abs = resolvePath(filePath);
+  let matched = false;
+  for (const run of runs.values()) {
+    if (join(OUT_DIR, `${run.runId}.out`) === abs) {
+      run.readAt = Date.now();
+      suppressIfReadNow(run);
+      matched = true;
+    }
+  }
+  return matched;
+}
+
+/** Mark runs referenced by a bash command (e.g. `cat <result file>`).
+ *  Matches runIds appearing anywhere in the command string; only existing
+ *  runs are affected, so task text that merely contains "del_..." is inert. */
+export function markDelegateRunReadByCommand(command: string): boolean {
+  if (!command) return false;
+  const ids = command.match(/del_[a-z0-9]+_[a-z0-9]+/g);
+  if (!ids) return false;
+  let matched = false;
+  const now = Date.now();
+  for (const id of new Set(ids)) {
+    const run = runs.get(id);
+    if (run) {
+      run.readAt = now;
+      suppressIfReadNow(run);
+      matched = true;
+    }
+  }
+  return matched;
 }
 
 
@@ -636,7 +689,7 @@ Agents (pick by name):
 ${AGENT_NAMES.map(agentListLine).join("\n")}
 
 Behavior:
-• async=true (default): returns immediately with a runId. The delegate runs in the background. Call acp_delegate_wait({ runId }) to block for its result (up to a timeout); if you let the timeout lapse, or never call wait, a short completion notification (status + file path) is still injected into this chat when it finishes. In one-shot sessions (print/json) async auto-downgrades to sync so the result is returned inline within the same turn. Call acp_delegate again to launch more runs in parallel.${concurrencyNote}
+• async=true (default): returns immediately with a runId. The delegate runs in the background. Call acp_delegate_wait({ runId }) to block for its result (up to a timeout); if you let the timeout lapse, or never call wait, a short completion notification (status + file path) is still injected into this chat when it finishes — unless you already read the result file after it finished, in which case the notification is skipped (you have the result). In one-shot sessions (print/json) async auto-downgrades to sync so the result is returned inline within the same turn. Call acp_delegate again to launch more runs in parallel.${concurrencyNote}
 • async=false: blocks until the delegate finishes. The full output is saved to a file; the tool result contains the path. Use the \`read\` tool to open the file for the complete content.
 
 There is NO non-blocking status tool. To get a delegate's result, call acp_delegate_wait with the runId — it blocks until the run finishes or the timeout elapses. Use acp_delegate_cancel only to stop a run you no longer want.
@@ -913,10 +966,15 @@ function withUndeliveredNotice(result: AgentToolResult<unknown>): AgentToolResul
  *  once via this tool result). Returns null when the run was NOT injected,
  *  in which case the caller delivers the full payload via formatRunResult(). */
 export function injectedWaitMessage(
-  run: { injected?: boolean; result?: { file: string } },
+  run: { injected?: boolean; readSuppressed?: boolean; result?: { file: string } },
   runId: string,
   remainingLine: string,
 ): string | null {
+  if (run.readSuppressed) {
+    const file = run.result?.file;
+    const fileLine = file ? ` The result file is: \`${file}\`.` : "";
+    return `Delegate \`${runId}\` already finished and you read its result file — no completion notification was injected.${remainingLine}${fileLine}`;
+  }
   if (!run.injected) return null;
   const file = run.result?.file;
   const fileLine = file ? ` If you need details, read the result file: \`${file}\`.` : "";
@@ -1366,6 +1424,19 @@ async function runDelegate(
               delegateStatusWidget.poke();
               return;
             }
+            // Read-tracking: if the model already read the final result file
+            // after this run finished, skip the completion notification — it
+            // would only re-inject content the model already saw. Completed runs
+            // only: a FAILED run's file holds partial output without any failure
+            // marker, so the model cannot tell it failed from the file — the
+            // FAILED notification must still go out.
+            if (run.status === "completed" && shouldSuppressRead(run, delegateNotifyIfRead)) {
+              applyReadSuppression(run, runId);
+              debug.event("delegate-done", { runId, code, status: run.status, injected: false, suppressed: true, outLen: output.length, file });
+              logInfo("delegate", { event: "done", runId, agent: args.agent, code, status: run.status, injected: false, suppressed: true, outLen: output.length, file });
+              delegateStatusWidget.poke();
+              return;
+            }
             scheduleRunNotification(pi, run);
             debug.event("delegate-done", { runId, code, status: run.status, injected: false, queued: true, outLen: output.length, file });
             logInfo("delegate", { event: "done", runId, agent: args.agent, code, status: run.status, injected: false, queued: true, outLen: output.length, file });
@@ -1439,7 +1510,7 @@ async function runDelegate(
         : `Delegated to **${args.agent}** (runId \`${runId}\`).`,
       `Task: ${truncate(taskText, 160)}`,
       `QUEUED — at most ${delegatePolicy.maxConcurrent} background delegate(s) run concurrently; ${Math.max(0, delegateGate.queuedCount - 1)} ahead of it. It starts automatically when a slot frees.`,
-      `Call acp_delegate_wait({ runId: "${runId}" }) to block for the result; a completion notification is injected when it finishes.`,
+      `Call acp_delegate_wait({ runId: "${runId}" }) to block for the result; a completion notification is injected when it finishes (unless you already read the result file after it finished — then it's skipped).`,
     ].join("\n");
   }
 
@@ -1664,6 +1735,42 @@ export function effectiveExitCode(code: number | null, output: string, stderr: s
   return code ?? (output || stderr ? 0 : null);
 }
 
+/** Should the completion notification be suppressed because the model already
+ *  read the final result file? Only a read at/after finishedAt counts — a read
+ *  while the run was still in flight (readAt < finishedAt) saw partial output,
+ *  so the notification still goes out. */
+export function shouldSuppressRead(
+  run: { readAt?: number; finishedAt?: number },
+  mode: "skip" | "always",
+): boolean {
+  if (mode !== "skip") return false;
+  if (run.readAt === undefined || run.finishedAt === undefined) return false;
+  return run.readAt >= run.finishedAt;
+}
+
+/** Suppress the completion notification for a run the model already read:
+ *  mark it delivered (so wait/recovery/flush never re-surface the result),
+ *  account its usage in separate mode, and log the skip. Idempotent. */
+export function applyReadSuppression(run: DelegateRun, runId: string): void {
+  run.readSuppressed = true;
+  run.injected = true;
+  if (run.usage && !run.usageReported && delegateDisplayUsage === "separate") {
+    addDelegateUsage(run.usage);
+    run.usageReported = true;
+  }
+  debug.event("delegate-inject-suppressed", { runId, reason: "result-file-read", readAt: run.readAt, finishedAt: run.finishedAt });
+  logInfo("delegate", { event: "inject-suppressed", runId, reason: "result-file-read", readAt: run.readAt, finishedAt: run.finishedAt });
+}
+
+/** Apply read-suppression immediately when a qualifying read just happened.
+ *  Covers the window where the notification is already queued in the
+ *  coalescing batch but not yet flushed: marking the run delivered here makes
+ *  the flush skip it. Inert for running runs (readAt < finishedAt) and for
+ *  "always" mode. */
+function suppressIfReadNow(run: DelegateRun): void {
+  if (shouldSuppressRead(run, delegateNotifyIfRead)) applyReadSuppression(run, run.runId);
+}
+
 /** status (set by finalize from the effective exit code) is the authority for
  *  the FAILED/completed decision; the raw code is diagnostic display only
  *  ("exit ?"), so the notification can never disagree with run.status. */
@@ -1765,6 +1872,10 @@ function notifyTerminalFailure(pi: ExtensionAPI, run: DelegateRun): void {
   const hadWaiter = run.waiter !== undefined;
   run.waiter?.();
   if (hadWaiter || run.consumed) return;
+  if (shouldSuppressRead(run, delegateNotifyIfRead)) {
+    applyReadSuppression(run, run.runId);
+    return;
+  }
   scheduleRunNotification(pi, run);
 }
 

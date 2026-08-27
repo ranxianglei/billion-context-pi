@@ -91,22 +91,30 @@ test("resolveConfig handles all three compress fields together", () => {
   assert.equal(cfg.nudge.growthCap, 40000);
 });
 
-test("resolveDelegate: undefined delegate defaults to enabled + separate", () => {
+test("resolveDelegate: undefined delegate defaults to enabled + separate + skip", () => {
   const r = resolveDelegate({});
   assert.equal(r.enabled, true);
   assert.equal(r.displayUsage, "separate");
+  assert.equal(r.notifyIfRead, "skip");
 });
 
 test("resolveDelegate: boolean true shorthand", () => {
   const r = resolveDelegate({ delegate: true });
   assert.equal(r.enabled, true);
   assert.equal(r.displayUsage, "separate");
+  assert.equal(r.notifyIfRead, "skip");
 });
 
 test("resolveDelegate: boolean false shorthand", () => {
   const r = resolveDelegate({ delegate: false });
   assert.equal(r.enabled, false);
   assert.equal(r.displayUsage, "separate");
+  assert.equal(r.notifyIfRead, "skip");
+});
+
+test("resolveDelegate: notifyIfRead always is honored, skip is the default", () => {
+  assert.equal(resolveDelegate({ delegate: { notifyIfRead: "always" } }).notifyIfRead, "always");
+  assert.equal(resolveDelegate({ delegate: { enabled: true } }).notifyIfRead, "skip");
 });
 
 test("resolveDelegate: object with enabled + displayUsage", () => {

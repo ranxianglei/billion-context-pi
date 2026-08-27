@@ -65,6 +65,12 @@ export interface DelegateConfig {
    *  oracle, or any custom role). See DelegateRoleConfig. Only affects roles
    *  that are named here; other roles inherit the parent model + Pi defaults. */
   agents?: Record<string, DelegateRoleConfig>;
+  /** What happens to the completion notification when the model has already
+   *  read the delegate's result file after the run finished.
+   *  "skip" (default) — the notification is not injected; the model already
+   *  saw the result, so re-injecting it would only waste context.
+   *  "always" — always inject the notification (previous behavior). */
+  notifyIfRead?: "skip" | "always";
 }
 
 /** Resolved delegate policy: what actually takes effect after merging acp.json,
@@ -83,6 +89,9 @@ export interface DelegatePolicy {
   thinkingLevel?: string;
   /** Per-role defaults keyed by role name (undefined when unset). */
   agents?: Record<string, DelegateRoleConfig>;
+  /** Whether to suppress the completion notification when the model already
+   *  read the result file after the run finished. Always resolved ("skip" default). */
+  notifyIfRead: "skip" | "always";
 }
 
 export const DEFAULT_DELEGATE_POLICY: DelegatePolicy = {
@@ -93,6 +102,7 @@ export const DEFAULT_DELEGATE_POLICY: DelegatePolicy = {
   idleMs: 5 * 60_000,
   asyncTimeoutMs: 30 * 60_000,
   maxConcurrent: Infinity,
+  notifyIfRead: "skip",
 };
 
 /** Compression tuning fields, shared by all three levels (global, provider,
@@ -235,7 +245,7 @@ export function resolveDelegate(adapter: AdapterConfig): DelegatePolicy {
       hint: "no-output watchdog is off; hung async runs must be cancelled manually via acp_delegate_cancel",
     });
   }
-  return { enabled, displayUsage, maxDepth, syncTimeoutMs, idleMs, asyncTimeoutMs, maxConcurrent, thinkingLevel: cfg.thinkingLevel, agents: cfg.agents };
+  return { enabled, displayUsage, maxDepth, syncTimeoutMs, idleMs, asyncTimeoutMs, maxConcurrent, thinkingLevel: cfg.thinkingLevel, agents: cfg.agents, notifyIfRead: cfg.notifyIfRead ?? "skip" };
 }
 
 function resolveMaxDepth(value: number | string | undefined): number {

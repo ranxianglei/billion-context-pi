@@ -133,7 +133,7 @@ Worker runs on Pi's full default toolset - no `--tools` allowlist is applied, so
 
 The full delegate result is saved to a file (`/tmp/acp-delegate/<runId>.out`); the tool result and injected notification carry only the **task title + file path** (no preview) - use `read` for the details. This keeps the parent context lean.
 
-- **Interactive (TUI) & RPC modes**: `async:true` (default) runs the child in the background; a short completion notification is injected into the chat when it finishes.
+- **Interactive (TUI) & RPC modes**: `async:true` (default) runs the child in the background; a short completion notification is injected into the chat when it finishes — **unless the model already read the result file after the run finished** (detected via the `read` tool or a bash command referencing the file), in which case the notification is skipped: the model already has the result, so re-injecting it would only waste context. Set `delegate: { notifyIfRead: "always" }` in `acp.json` to restore the always-inject behavior.
 - **Print / JSON modes** (`pi -p`, SDK): `async:true` auto-downgrades to **synchronous** — the result returns as the tool result in the same turn (the parent exits after one turn, so background injection would be lost).
 - **Failures are loud, never silent.** A run that fails (nonzero exit, spawn error, watchdog timeout) injects a `FAILED ⚠️` notification carrying a short error excerpt, so a failed delegate cannot hide among sibling completions. If a notification cannot be delivered at all, a recovery notice is attached to the next delegate notification or the next `acp_delegate` / `acp_delegate_wait` / `acp_delegate_cancel` tool result — a dispatched run's failure always reaches the model before it wraps up.
 
