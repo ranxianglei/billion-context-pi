@@ -61,6 +61,19 @@ assign refs → sync blocks → prune → filter → hide calls → recommend �
 
 Pi 内置的自动压缩会被取消 —— billion-context 是唯一的上下文管理者。
 
+## 批量 rollover —— Prompt Cache 稳定性
+
+就地压缩的主要成本不是摘要的 output tokens,而是 **Prompt Cache 失效**:在历史中间改写会把压缩点之后的整个后缀踢出 provider 的缓存前缀,之后每一轮都要按全价重算这段 input。
+
+批量 rollover 模式(默认开启)让 model-visible history 在阶段内 **append-only**:
+
+- `compress` 立即校验范围(坏范围仍然当场报错),但只把范围**记录**为 pending —— 原文保持可见。
+- `absorb` 把大型工具输出蒸馏成你写的摘要;原文保持可见,直到批量生效。
+- 当上下文用量越过 rollover 阈值(默认 **70%**,低于 75% 强制 nudge 带)时,所有 pending 工作**一次性**应用 —— 一次缓存失效,摊薄到整个阶段 —— 并追加一条一次性的 `▣ ACP rollover | ...` 报告。
+- `decompress` / `search_context` 的结果落在历史尾部,前缀永不被触碰。
+
+pending 工作会显示在 `acp_status` 中,并跨重启持久化;`/acp-rollover` 可立即强制批量生效。在 `acp.json` 中设置 `"rollover": false` 可恢复旧的就地立即压缩行为。权衡与阈值详见 [CONFIGURATION.zh-CN.md](./CONFIGURATION.zh-CN.md#rollover-prompt-cache-稳定性)。
+
 ## 插件兼容性与排序
 
 billion-context 通过拦截 Pi 的 `context` 事件接管上下文管理。**Pi 没有插件优先级机制** —— 当多个扩展为同一个事件注册 handler 时,它们按固定顺序(加载顺序)执行,没有 `priority`/`weight` 字段,用户也无法控制顺序。`context` 事件尤其是一个*管线*:每个 handler 都接收上一个 handler 的输出,没有短路,**最后一个** handler 对发给模型的内容拥有最终决定权。
@@ -75,7 +88,8 @@ billion-context 通过拦截 Pi 的 `context` 事件接管上下文管理。**Pi
 
 | 工具 | 作用 |
 |------|------|
-| `compress` | 用详细摘要替换连续的消息范围 |
+| `compress` | 用详细摘要替换连续的消息范围(批量模式下延迟到下一次 rollover 生效) |
+| `absorb` | 把大型工具输出蒸馏成你写的紧凑摘要;原文在下一次 rollover 时移除 |
 | `decompress` | 恢复之前压缩的块内容 |
 | `search_context` | 按关键词搜索已压缩块摘要(及可见消息) |
 | `acp_status` | 显示上下文用量、已压缩块、可压缩范围 |
@@ -131,6 +145,8 @@ Blocks: 3 active (3.7K summary, 15.2K original compressed)
   b2 (T1)  8.2K→2.1K  age=2m  "Debug session"
   b3 (T2)  3.3K→1.0K  age=1m  "Architecture review"
 ```
+
+批量 rollover 模式下,状态面板还会显示 pending 工作(`Rollover: N pending compression(s) + M absorb(s) — ~X tokens pending (threshold 70%, current Y%)`),`/acp-rollover` 可立即应用 pending 批量,而不必等待阈值。
 
 ## `/acp-subagents` 命令
 

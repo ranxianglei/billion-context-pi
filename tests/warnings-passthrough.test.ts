@@ -45,7 +45,7 @@ function fakeCtx(entries: any[]) {
 
 async function setup(entries: any[]) {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+  createAcpExtension({ rollover: false, modelContextLimit: 200_000 })(api as any);
   const ctx = fakeCtx(entries);
   await handlers.get("context")![0]!({ type: "context", messages: [] }, ctx);
   const compressTool = api.tools.find((t: any) => t.name === "compress")!;

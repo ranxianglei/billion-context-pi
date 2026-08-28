@@ -125,6 +125,14 @@
 | `compress.emergencyThresholdPercent` | number \| string | `"95%"` | 🟢 ACTIVE | 触发紧急截断的上下文阈值。 |
 | `compress.nudgeGrowthTokens` | number | `50000` | 🟢 ACTIVE | 软压缩 nudge 的 token 增长步长。 |
 
+**Rollover 键**
+
+| 键 | 类型 | 默认值 | 状态 | 说明 |
+|----|------|--------|------|------|
+| `rollover` | boolean \| object | `true` | 🟢 ACTIVE | 批量 rollover 模式:`compress`/`absorb` 延迟生效,在上下文压力越过阈值时一次性批量应用。 |
+| `rollover.enabled` | boolean | `true` | 🟢 ACTIVE | 启用批量 rollover 模式。`false` 恢复旧的就地立即压缩行为。 |
+| `rollover.threshold` | number \| string | `"70%"` | 🟢 ACTIVE | pending 压缩/吸收一次性批量应用的上下文用量阈值。 |
+
 **prompts 键**
 
 | 键 | 类型 | 默认值 | 状态 | 说明 |
@@ -337,6 +345,53 @@ provider 的 key 是 **Pi provider 名**(如 `"anthropic"`、`"openai"`、`"zhip
 ```
 
 在 `anthropic` / `claude-sonnet-4-5` 下,生效阈值变为 `maxContextLimit=70%`、`nudgeGrowthTokens=30000`、`emergencyThresholdPercent=95%`(继承自全局)。
+
+---
+
+## Rollover（Prompt Cache 稳定性）
+
+批量 rollover 模式 —— **默认开启** —— 用一点临时 context 换取大幅减少的 prompt-cache 失效次数。旧模式下每次 `compress` 都在历史中间就地改写,把压缩点之后的整个后缀踢出 provider 缓存前缀;之后每一轮都按全价重算这段 input。rollover 模式让 model-visible history 在阶段内 **append-only**:
+
+1. **延迟压缩** —— `compress` 调用立即校验范围(坏范围仍当场报错),但只把范围*记录*为 pending。原文保持可见,直到批量应用。
+2. **`absorb` 工具** —— 把大型工具输出蒸馏成你写的紧凑摘要;原文标记为 pending drop,保持可见直到批量应用(摘要是持久记录)。
+3. **批量 rollover** —— 当上下文用量越过 `rollover.threshold`(默认 70%)时,所有 pending 压缩与吸收**一次性**应用:一次缓存失效,摊薄到整个阶段。该轮追加一条一次性 `▣ ACP rollover | ...` 报告。
+4. **检索结果追加到尾部** —— `decompress` / `search_context` 的结果是历史末尾的 tool result,前缀永不被触碰。
+
+pending 工作显示在 `acp_status`(`Rollover: N pending ...` 行)中,并跨重启持久化(与 ACP state 一起保存)。想提前强制批量,运行 `/acp-rollover`。
+
+### 权衡
+
+pending 内容在 rollover 触发前一直占用 context —— 这是换取稳定缓存前缀的代价。默认阈值(70%)位于强制 nudge 带(`compress.maxContextLimit`,75%)**之下**,保证 rollover 总在 nudge 升级之前应用;回收的 token(通常是窗口的百分之几十)一步就把用量拉回带内。
+
+### `rollover`
+
+- **类型:** `boolean | object`
+- **默认值:** `true`
+- **状态:** 🟢 ACTIVE
+- **说明:** 启用批量 rollover 模式。`false`(或 `{"enabled": false}`)恢复旧行为:每次 `compress` 立即就地改写历史。
+
+### `rollover.enabled`
+
+- **类型:** `boolean`
+- **默认值:** `true`
+- **状态:** 🟢 ACTIVE
+- **说明:** 与 `rollover` 简写相同。`false` 禁用延迟压缩:`compress` 立即生效,不注册 `absorb` 工具,系统提示词中也不含 rollover 段落。
+
+### `rollover.threshold`
+
+- **类型:** `number | string`
+- **默认值:** `0.70`(或 `"70%"`)
+- **状态:** 🟢 ACTIVE
+- **说明:** pending 压缩/吸收一次性批量应用的上下文用量阈值。接受比例(`0.70`)或百分号字符串(`"70%"`)。保持**低于** `compress.maxContextLimit`,让 rollover 在强制 nudge 开始之前触发。值越高,前缀稳定时间越长,但携带的 pending context 越多;值越低,回收越早。
+
+```json
+{
+  "rollover": {
+    "enabled": true,
+    "threshold": "70%"
+  }
+}
+```
 
 ---
 

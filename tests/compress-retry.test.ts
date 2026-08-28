@@ -143,7 +143,7 @@ test("noteCompressOutcomes: counts, caps, resets on success, resets per turn, ne
 
 test("compress tool accepts JSON-encoded string content (non-strict-tool providers)", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+  createAcpExtension({ rollover: false, modelContextLimit: 200_000 })(api as any);
   const stateFile = "/tmp/pai-acp-retry-str.session.json";
   await rm(`${stateFile}.acp.json`, { force: true });
   const entries = [userMsg("e1", ZH)];
@@ -164,7 +164,7 @@ test("compress tool accepts JSON-encoded string content (non-strict-tool provide
 
 test("compress tool THROWS on garbage string content (isError:true → counted by the outcome tracker)", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+  createAcpExtension({ rollover: false, modelContextLimit: 200_000 })(api as any);
   const stateFile = "/tmp/pai-acp-retry-str2.session.json";
   await rm(`${stateFile}.acp.json`, { force: true });
   const entries = [userMsg("e1", ZH)];
@@ -186,7 +186,7 @@ test("compress tool THROWS on garbage string content (isError:true → counted b
 
 test("failed compress toolResults never inject a transient retry prompt; the error itself persists in context (#223)", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+  createAcpExtension({ rollover: false, modelContextLimit: 200_000 })(api as any);
   const stateFile = "/tmp/pai-acp-retry-it1.session.json";
   await rm(`${stateFile}.acp.json`, { force: true });
 
@@ -230,7 +230,7 @@ test("failed compress toolResults never inject a transient retry prompt; the err
 
 test("neutral and no-op outcomes inject nothing; only the counter state changes", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+  createAcpExtension({ rollover: false, modelContextLimit: 200_000 })(api as any);
   const stateFile = "/tmp/pai-acp-retry-noop.session.json";
   await rm(`${stateFile}.acp.json`, { force: true });
 
@@ -300,7 +300,7 @@ test("noteCompressOutcomes: no-op panels advance the counter toward the cap", ()
 
 test("emergency nudge stops re-injecting once the turn's cap is burned (issue #6 loop breaker)", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 180_000 })(api as any);
+  createAcpExtension({ rollover: false, modelContextLimit: 180_000 })(api as any);
   const stateFile = "/tmp/pai-acp-retry-emerg.session.json";
   await rm(`${stateFile}.acp.json`, { force: true });
 

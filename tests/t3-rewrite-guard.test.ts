@@ -60,7 +60,7 @@ function fakeCtx(entries: Array<ReturnType<typeof userMsg>>, stateFile: string) 
 async function setup(stateFile: string) {
   await rm(stateFile + ".acp.json", { force: true });
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as never);
+  createAcpExtension({ rollover: false, modelContextLimit: 200_000 })(api as never);
   const entries = Array.from({ length: 12 }, (_, i) => userMsg(i));
   const ctx = fakeCtx(entries, stateFile);
   await handlers.get("context")![0]!({ type: "context", messages: [] }, ctx);

@@ -62,6 +62,19 @@ Each message gets an invisible `<acp>` ref tag (`m00001`, `m00002`, ...) visible
 
 Pi's built-in auto-compaction is cancelled — billion-context is the sole context manager.
 
+## Batch rollover — Prompt Cache stability
+
+The dominant cost of in-place compression is not the summary's output tokens — it is the **prompt-cache invalidation**: rewriting history mid-stream evicts the entire suffix after the compression point from the provider's cache prefix, and every later round re-pays full price for it.
+
+Batch rollover mode (on by default) makes the model-visible history **append-only within a phase**:
+
+- `compress` validates its ranges immediately but only **records** them as pending — the range stays visible.
+- `absorb` distills a large tool result into a summary you write; the original stays visible until the batch applies.
+- When context usage crosses the rollover threshold (default **70%**, below the 75% forced-nudge band), all pending work is applied in **one** rewrite — one cache invalidation, amortized over the whole phase — and a one-shot `▣ ACP rollover | ...` report is appended.
+- `decompress` / `search_context` results land at the tail of the history; the prefix is never touched.
+
+Pending work shows up in `acp_status` and survives restarts; `/acp-rollover` forces the batch early. Set `"rollover": false` in `acp.json` to restore the legacy immediate-compression behavior. See [CONFIGURATION.md](./CONFIGURATION.md#rollover-prompt-cache-stability) for the trade-off and thresholds.
+
 ## Plugin compatibility & ordering
 
 billion-context takes over context management by intercepting Pi's `context` event. **Pi has no plugin priority mechanism** — when multiple extensions register handlers for the same event, they run in a fixed sequence (load order), with no `priority`/`weight` field and no way for the user to control the order. The `context` event specifically is a *pipeline*: every handler receives the previous handler's output, there is no short-circuit, and the **last** handler has the final say over what reaches the model.
@@ -76,7 +89,8 @@ This has two practical implications:
 
 | Tool | What it does |
 |------|-------------|
-| `compress` | Replace a contiguous message range with a detailed summary |
+| `compress` | Replace a contiguous message range with a detailed summary (deferred to the next rollover in batch mode) |
+| `absorb` | Distill a large tool result into a compact summary; the original is dropped at the next rollover |
 | `decompress` | Restore a previously compressed block's content |
 | `search_context` | Search compressed block summaries (and visible messages) by keyword |
 | `acp_status` | Show context usage, compressed blocks, compressible ranges |
@@ -133,6 +147,8 @@ Blocks: 3 active (3.7K summary, 15.2K original compressed)
   b2 (T1)  8.2K→2.1K  age=2m  "Debug session"
   b3 (T2)  3.3K→1.0K  age=1m  "Architecture review"
 ```
+
+In batch rollover mode the status also shows pending work (`Rollover: N pending compression(s) + M absorb(s) — ~X tokens pending (threshold 70%, current Y%)`), and `/acp-rollover` applies the pending batch immediately instead of waiting for the threshold.
 
 ## `/acp-subagents` command
 

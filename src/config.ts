@@ -34,6 +34,21 @@ export interface CompressSettings {
   nudgeGrowthTokens?: number;
 }
 
+/** Batch rollover tuning (Prompt Cache stability, #241). Deferred compress /
+ *  absorb work is applied in one batch when the calibrated sent-view usage
+ *  crosses `threshold` (or via `/acp rollover`), so the model-visible history
+ *  stays append-only within a phase and the cache prefix is rewritten once
+ *  per rollover instead of once per compression. */
+export interface RolloverConfig {
+  /** Enable batch rollover mode. Default: true. Set `false` (or
+   *  `rollover: false`) to restore the legacy immediate-compression behavior. */
+  enabled?: boolean;
+  /** Context usage percentage that triggers a rollover. Accepts a ratio (0.7)
+   *  or percent string ("70%"). Default: 0.70 — below the 0.75 forced-nudge
+   *  band so pending work is reclaimed before nudges start. */
+  threshold?: number | string;
+}
+
 /** Per-provider compression overrides. Carries the same tuning fields as the
  *  global level, plus an optional per-model map keyed by model id. */
 export interface ProviderCompress extends CompressSettings {
@@ -111,6 +126,10 @@ export interface AdapterConfig {
    *  replacing the kernel's tuned compression rules may reduce summary quality
    *  (lost paths/signatures/decisions → worse retrieval). */
   acknowledgePromptsRisk?: boolean;
+  /** Batch rollover mode (Prompt Cache stability, #241). Accepts a boolean
+   *  shorthand (`false` disables) or a RolloverConfig object. Default: enabled
+   *  at a 0.70 usage threshold. */
+  rollover?: boolean | RolloverConfig;
   coreOverrides?: Partial<Config>;
 }
 
@@ -130,6 +149,22 @@ export function resolveDelegate(adapter: AdapterConfig): { enabled: boolean; dis
   return {
     enabled: d !== false,
     displayUsage: adapter.displayUsage ?? "separate",
+  };
+}
+
+/** Resolve rollover config from the adapter, handling the boolean shorthand.
+ *  Default: enabled at a 0.70 usage threshold. */
+export function resolveRollover(adapter: AdapterConfig): { enabled: boolean; threshold: number } {
+  const r = adapter.rollover;
+  if (typeof r === "object" && r !== null) {
+    return {
+      enabled: r.enabled !== false,
+      threshold: r.threshold !== undefined ? parsePercent(r.threshold) : 0.7,
+    };
+  }
+  return {
+    enabled: r !== false,
+    threshold: 0.7,
   };
 }
 

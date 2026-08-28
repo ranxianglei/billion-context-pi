@@ -125,6 +125,14 @@ All keys below are currently **ACTIVE**.
 | `compress.emergencyThresholdPercent` | number \| string | `"95%"` | 🟢 ACTIVE | Context threshold that triggers emergency truncation. |
 | `compress.nudgeGrowthTokens` | number | `50000` | 🟢 ACTIVE | Token growth step for soft compression nudges. |
 
+**Rollover keys**
+
+| Key | Type | Default | Status | Description |
+|-----|------|---------|--------|-------------|
+| `rollover` | boolean \| object | `true` | 🟢 ACTIVE | Batch rollover mode: `compress`/`absorb` are deferred and applied in one batch rewrite when context pressure crosses the threshold. |
+| `rollover.enabled` | boolean | `true` | 🟢 ACTIVE | Enable batch rollover mode. `false` restores the legacy immediate in-place compression. |
+| `rollover.threshold` | number \| string | `"70%"` | 🟢 ACTIVE | Context-usage threshold at which pending compressions/absorbs are applied in one batch. |
+
 **Prompts keys**
 
 | Key | Type | Default | Status | Description |
@@ -337,6 +345,53 @@ The provider key is the **Pi provider name** (e.g. `"anthropic"`, `"openai"`, `"
 ```
 
 On `anthropic` / `claude-sonnet-4-5` the effective thresholds become `maxContextLimit=70%`, `nudgeGrowthTokens=30000`, and `emergencyThresholdPercent=95%` (inherited from global).
+
+---
+
+## Rollover (Prompt Cache Stability)
+
+Batch rollover mode — **on by default** — trades a little temporary context for dramatically fewer prompt-cache invalidations. In legacy mode every `compress` call rewrites the model-visible history in place, evicting the entire suffix after the compression point from the provider's cache prefix; every subsequent round re-pays full price for that suffix. Rollover mode makes history **append-only within a phase**:
+
+1. **Deferred compress** — a `compress` call validates its ranges immediately (bad ranges still fail now, with errors) but only *records* them as pending. The range stays visible until the batch applies.
+2. **`absorb` tool** — distills a large tool result into a compact summary you write; the original output is marked pending drop and stays visible until the batch applies (the summary is the durable record).
+3. **Batch rollover** — when context usage crosses `rollover.threshold` (default 70%), all pending compressions and absorbs are applied in **one** rewrite: one cache invalidation, amortized over the whole phase. A one-shot `▣ ACP rollover | ...` report is appended to that round.
+4. **Retrieval appends to the tail** — `decompress` / `search_context` results are tool results at the end of the history; the prefix is never touched.
+
+Pending work is visible in `acp_status` (`Rollover: N pending ...` line) and survives restarts (persisted alongside the ACP state). To force the batch early, run `/acp-rollover`.
+
+### Trade-off
+
+Pending content occupies context until the rollover fires — that is the price of a stable cache prefix. The default threshold (70%) sits **below** the forced-nudge band (`compress.maxContextLimit`, 75%) so the rollover always applies before the nudge escalation, and the reclaimed tokens (typically tens of percent of the window) drop usage well back below the band in one step.
+
+### `rollover`
+
+- **Type:** `boolean | object`
+- **Default:** `true`
+- **Status:** 🟢 ACTIVE
+- **Description:** Enable batch rollover mode. `false` (or `{"enabled": false}`) restores the legacy behavior where every `compress` call rewrites history in place immediately.
+
+### `rollover.enabled`
+
+- **Type:** `boolean`
+- **Default:** `true`
+- **Status:** 🟢 ACTIVE
+- **Description:** Same as the `rollover` shorthand. `false` disables deferred compression: `compress` applies immediately, the `absorb` tool is not registered, and the rollover system-prompt section is omitted.
+
+### `rollover.threshold`
+
+- **Type:** `number | string`
+- **Default:** `0.70` (or `"70%"`)
+- **Status:** 🟢 ACTIVE
+- **Description:** Context-usage threshold at which pending compressions/absorbs are applied in one batch. Accepts a ratio (`0.70`) or a percent string (`"70%"`). Keep it **below** `compress.maxContextLimit` so the rollover fires before forced nudges start. A higher value keeps the prefix stable longer at the cost of carrying more pending context; a lower value reclaims sooner.
+
+```json
+{
+  "rollover": {
+    "enabled": true,
+    "threshold": "70%"
+  }
+}
+```
 
 ---
 

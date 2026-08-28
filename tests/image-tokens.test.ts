@@ -115,7 +115,7 @@ test("sent-view token count includes image tokens (vision model)", async () => {
   await rm(logFile, { force: true });
   process.env.ACP_LOG_FILE = logFile;
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 10_000 })(api as any);
+  createAcpExtension({ rollover: false, modelContextLimit: 10_000 })(api as any);
   const entries = Array.from({ length: 8 }, (_, i) => imgEntry(`e${i}`));
   const ctx = ctxWithModel(entries, 10_000, ["text", "image"]);
   await handlers.get("context")![0]!({ type: "context", messages: entries.map((e) => e.message) }, ctx);
@@ -129,7 +129,7 @@ test("sent-view token count ignores images for non-vision models", async () => {
   await rm(logFile, { force: true });
   process.env.ACP_LOG_FILE = logFile;
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 10_000 })(api as any);
+  createAcpExtension({ rollover: false, modelContextLimit: 10_000 })(api as any);
   const entries = Array.from({ length: 8 }, (_, i) => imgEntry(`e${i}`));
   const ctx = ctxWithModel(entries, 10_000, ["text"]);
   await handlers.get("context")![0]!({ type: "context", messages: entries.map((e) => e.message) }, ctx);
@@ -144,7 +144,7 @@ test("sent-view token count ignores images for non-vision models", async () => {
 test("emergency nudge fires when images push the sent view past the window", async () => {
   await rm(`${STATE_FILE}.acp.json`, { force: true });
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 10_000 })(api as any);
+  createAcpExtension({ rollover: false, modelContextLimit: 10_000 })(api as any);
   const filler = "lorem ".repeat(300);
   const entries = [
     ...Array.from({ length: 30 }, (_, i) => ({
@@ -167,7 +167,7 @@ test("emergency nudge fires when images push the sent view past the window", asy
 test("identical text-only session stays quiet (same window)", async () => {
   await rm(`${STATE_FILE}.acp.json`, { force: true });
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 10_000 })(api as any);
+  createAcpExtension({ rollover: false, modelContextLimit: 10_000 })(api as any);
   const entries = Array.from({ length: 8 }, (_, i) => textEntry(`e${i}`, "x"));
   const ctx = ctxWithModel(entries, 10_000, ["text", "image"]);
   const r = await handlers.get("context")![0]!({ type: "context", messages: entries.map((e) => e.message) }, ctx);
@@ -178,7 +178,7 @@ test("identical text-only session stays quiet (same window)", async () => {
 test("pi host: image-only user message survives the transform with its ref tag", async () => {
   await rm(`${STATE_FILE}.acp.json`, { force: true });
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+  createAcpExtension({ rollover: false, modelContextLimit: 200_000 })(api as any);
   const entries = [imgEntry("e1")];
   const ctx = ctxWithModel(entries, 200_000, ["text", "image"]);
   const r = await handlers.get("context")![0]!({ type: "context", messages: entries.map((e) => e.message) }, ctx);

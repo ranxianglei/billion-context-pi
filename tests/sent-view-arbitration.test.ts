@@ -63,7 +63,7 @@ const nudgeCount = (r: any) =>
 test("context transform ignores session-tree accounting (180K window, 366K tree)", async () => {
   await rm(`${STATE_FILE}.365606.acp.json`, { force: true });
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 180_000 })(api as any);
+  createAcpExtension({ rollover: false, modelContextLimit: 180_000 })(api as any);
 
   // Host reports a tree that outgrew the window (switched down from 1M).
   // The live stream the model actually sees is ~36K — 20% of the window.
@@ -80,7 +80,7 @@ test("context transform ignores session-tree accounting (180K window, 366K tree)
 test("context transform DOES go emergency when the sent view itself overflows", async () => {
   await rm(`${STATE_FILE}.1000.acp.json`, { force: true });
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 180_000 })(api as any);
+  createAcpExtension({ rollover: false, modelContextLimit: 180_000 })(api as any);
 
   // Host reports a small tree; irrelevant now. The stream itself is 60 ×
   // ~4.5K ≈ 270K tokens → 150% of the 180K window.

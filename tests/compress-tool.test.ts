@@ -61,7 +61,7 @@ async function runContextRound(handlers: Map<string, any[]>, ctx: any) {
 
 test("compress beforeTokens at density=1 is uncalibrated estimateTokens", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+  createAcpExtension({ rollover: false, modelContextLimit: 200_000 })(api as any);
   const stateFile = "/tmp/pai-acp-compress-density-a.session.json";
   await rm(`${stateFile}.acp.json`, { force: true });
   const entries = [userMsg("e1", "hello world"), userMsg("e2", ZH)];
@@ -81,7 +81,7 @@ test("compress beforeTokens at density=1 is uncalibrated estimateTokens", async 
 
 test("compress beforeTokens scales with calibrated density (Phase 2)", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+  createAcpExtension({ rollover: false, modelContextLimit: 200_000 })(api as any);
   const stateFile = "/tmp/pai-acp-compress-density-b.session.json";
   await rm(`${stateFile}.acp.json`, { force: true });
   const entries = [userMsg("e1", "hello world"), userMsg("e2", ZH)];
@@ -118,7 +118,7 @@ test("compress beforeTokens scales with calibrated density (Phase 2)", async () 
 // cumulative summary mass of all blocks, exactly in long sessions.
 test("compress afterTokens is measured on the same sent-view scale as beforeTokens (multi-block)", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+  createAcpExtension({ rollover: false, modelContextLimit: 200_000 })(api as any);
   const stateFile = "/tmp/pai-acp-compress-scales.session.json";
   await rm(`${stateFile}.acp.json`, { force: true });
   const entries = [userMsg("e1", "hello world"), userMsg("e2", ZH), userMsg("e3", ZH2), userMsg("e4", ZH2)];

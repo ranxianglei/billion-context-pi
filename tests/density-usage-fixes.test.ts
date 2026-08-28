@@ -63,7 +63,7 @@ async function runCalibratedScenario(realScale: number) {
   const stateFile = `/tmp/pai-acp-calibrated-${realScale}.session.json`;
   await rm(`${stateFile}.acp.json`, { force: true });
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+  createAcpExtension({ rollover: false, modelContextLimit: 200_000 })(api as any);
 
   let usage = 0;
   const ctx: any = {

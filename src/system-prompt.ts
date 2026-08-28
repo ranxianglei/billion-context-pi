@@ -71,6 +71,19 @@ Retries are capped; when the cap is reached the error is surfaced to the user un
 `;
 }
 
+export const ROLLOVER_PROMPT_SECTION = `
+ROLLOVER MODE (deferred compression)
+
+This session runs in batch-rollover mode: visible history is append-only within a phase, so the provider's prompt cache stays warm. Compression is therefore DEFERRED:
+- A successful compress records the range as pending — it does NOT rewrite history yet. The range stays visible in your context until the next rollover. The panel says "recorded for next rollover".
+- A rollover applies ALL pending compressions and absorbs in ONE batch — a single history rewrite, one cache invalidation, amortized over the phase. It fires automatically when context usage crosses the rollover threshold (acp_status shows the threshold and what is pending), or immediately via /acp-rollover.
+- Refs stay stable while ranges are pending (nothing is rewritten yet). They renumber only when a rollover applies. After a rollover, pre-rollover refs are stale — run acp_status before compressing again.
+- Do NOT re-compress a range that is already pending — overlapping ranges are rejected.
+- absorb({ ref, summary }) distills a large tool result into a summary you write. The original output stays visible until the next rollover, then is removed in the same batch rewrite.
+- Pending content is still visible, so you can keep using it; the cost is temporary extra context. Record compressions as soon as content is consumed — don't wait for the threshold.
+- When a rollover fires, a one-shot "▣ ACP rollover" report is appended at the end of context: what was applied and the token delta.
+`;
+
 export const ACP_DELEGATE_PROMPT = `
 ACP_DELEGATE NOTIFICATIONS
 

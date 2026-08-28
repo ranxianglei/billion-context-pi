@@ -51,7 +51,7 @@ function fakeCtx(entries: any[], stateFile: string, notifies: string[]) {
 // (append semantics: the block stays folded, content shown via notify).
 test("/acp-decompress returns a block's content and stays repeatable (append mode)", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+  createAcpExtension({ rollover: false, modelContextLimit: 200_000 })(api as any);
 
   const stateFile = "/tmp/pai-acp-decompress-it.session.json";
   await cleanState(stateFile);
@@ -99,7 +99,7 @@ test("/acp-decompress returns a block's content and stays repeatable (append mod
 
 test("/acp-decompress rejects invalid input with a usage message", async () => {
   const { api } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+  createAcpExtension({ rollover: false, modelContextLimit: 200_000 })(api as any);
 
   const notifies: string[] = [];
   const ctx = fakeCtx([], "/tmp/pai-acp-decompress-invalid.session.json", notifies);
@@ -118,7 +118,7 @@ test("/acp-decompress rejects invalid input with a usage message", async () => {
 
 test("/acp-decompress reports not-found for a valid id with no matching block", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+  createAcpExtension({ rollover: false, modelContextLimit: 200_000 })(api as any);
 
   const notifies: string[] = [];
   const ctx = fakeCtx([userMsg("e1", "only message")], "/tmp/pai-acp-decompress-nf.session.json", notifies);

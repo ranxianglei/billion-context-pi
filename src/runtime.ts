@@ -12,6 +12,7 @@ import { resolveConfig, type AdapterConfig } from "./config.js";
 import { DensityEstimator } from "./density.js";
 import { entriesToCoreMessages, extractText, matchesStoredText, messageIdentity, messageRef } from "./messages.js";
 import { SessionStateStore, type LiveRefOrigin } from "./state.js";
+import type { RolloverPending } from "./rollover.js";
 import { loadUserConfig, applyUserConfig } from "./user-config.js";
 import { ThrottleEpisode } from "./throttle-retry.js";
 import { logInfo, logWarn, setDebugEnabled } from "./log.js";
@@ -89,6 +90,14 @@ export interface AcpRuntime {
   reloadConfig(cwd: string): Promise<void>;
   stateFor(ctx: ExtensionContext, liveMessages?: AgentMessage[]): Promise<{ state: CompressionState; coreMessages: ReturnType<typeof entriesToCoreMessages>; entries: SessionEntry[] }>;
   save(state: CompressionState, ctx: ExtensionContext): Promise<void>;
+  /** Batch-rollover pending work (#241): compressions recorded by the compress
+   *  tool and absorbs recorded by the absorb tool. Applied in one batch at
+   *  rollover (usage ≥ threshold or /acp rollover) so the model-visible
+   *  history stays append-only within a phase. */
+  getRolloverPending(ctx: ExtensionContext): RolloverPending | null;
+  /** Synchronous on purpose: callers do a read-modify-write of the pending
+   *  list and need it atomic under parallel tool calls (no await between). */
+  setRolloverPending(ctx: ExtensionContext, pending: RolloverPending | null): void;
   acquireLock(sid: string): Promise<() => void>;
   /** Per-session overflow self-heal state (learned window + armed emergency).
    *  Keyed by session id so concurrent sessions cannot share an episode. */
@@ -392,6 +401,15 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     await store.save(state, sm.getSessionFile() ?? undefined, sm.getSessionId());
   }
 
+  function getRolloverPending(ctx: ExtensionContext): RolloverPending | null {
+    const sm = ctx.sessionManager;
+    return store.getRolloverPending(sm.getSessionFile() ?? undefined, sm.getSessionId());
+  }
+  async function setRolloverPending(ctx: ExtensionContext, pending: RolloverPending | null): Promise<void> {
+    const sm = ctx.sessionManager;
+    await store.setRolloverPending(sm.getSessionFile() ?? undefined, sm.getSessionId(), pending);
+  }
+
   function noteActiveBlocks(sid: string, activeBlockIds: string[]): boolean {
     const current = new Set(activeBlockIds);
     const prev = lastActiveBlockIds.get(sid);
@@ -403,4 +421,4 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     lastActiveBlockIds.delete(sid);
   }
 
-  return { core, store, density, setCountModel: (m) => { countModelId = m; }, noteActiveBlocks, clearSessionTracking, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reloadConfig, stateFor, save, acquireLock, overflowFor, overflowDrop, throttleFor, throttleDrop };}
+  return { core, store, density, setCountModel: (m) => { countModelId = m; }, noteActiveBlocks, clearSessionTracking, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reloadConfig, stateFor, save, getRolloverPending, setRolloverPending, acquireLock, overflowFor, overflowDrop, throttleFor, throttleDrop };}

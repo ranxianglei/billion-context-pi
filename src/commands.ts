@@ -6,6 +6,8 @@ import { collectCoveredMessageIds, estimateTokens, calibrateTokens, collectImage
 import { buildStatusPanel } from "acp-kernel/panel";
 import { getDelegateUsage } from "./delegate-tool.js";
 import { ensureSubagentAcpTools } from "./setup-subagent-tools.js";
+import { resolveRollover } from "./config.js";
+import { pendingHasWork, runRollover, rolloverReportText } from "./rollover.js";
 
 declare const CURRENT_VERSION: string;
 
@@ -39,6 +41,38 @@ export function makeCommands(runtime: AcpRuntime): Array<{ name: string; options
       options: {
         description: "Detailed ACP status (block tiers, token breakdown, delegate usage).",
         handler: async (_args, ctx) => ctx.ui.notify(await statusReport(runtime, ctx)),
+      },
+    },
+    {
+      name: "acp-rollover",
+      options: {
+        description: "Apply all pending rollover work now (batch-compress + absorb pending ranges in one rewrite). Usage: /acp-rollover",
+        handler: async (_args, ctx) => {
+          const rollover = resolveRollover(runtime.adapter);
+          if (!rollover.enabled) {
+            ctx.ui.notify("Rollover mode is disabled (rollover: false). Nothing to do.");
+            return;
+          }
+          if (!pendingHasWork(runtime.getRolloverPending(ctx))) {
+            ctx.ui.notify("No pending rollover work (no recorded compressions or absorbs).");
+            return;
+          }
+          const release = await runtime.acquireLock(ctx.sessionManager.getSessionId());
+          try {
+            const { state, coreMessages, entries } = await runtime.stateFor(ctx);
+            const config = runtime.configFor(ctx);
+            const modelId = (ctx.model as { id?: string } | undefined)?.id ?? "default";
+            const systemPromptText = getSystemPromptText(ctx);
+            const systemPromptTokens = systemPromptText ? defaultCountTokens(systemPromptText) : 0;
+            const imageTokens = collectImageTokens(entries, modelSupportsImages(ctx.model));
+            const sentTokens = estimateTokens(coreMessages, collectCoveredMessageIds(state), imageTokens) + systemPromptTokens;
+            const turn = runtime.core.processTurn({ messages: coreMessages, state, config, tokenCount: calibrateTokens(sentTokens, runtime.density.densityFor(modelId)) });
+            const result = await runRollover({ runtime, ctx, config, coreMessages, turn, modelId, imageTokens, systemPromptTokens });
+            ctx.ui.notify(result ? rolloverReportText(result) : "No pending rollover work.");
+          } finally {
+            release();
+          }
+        },
       },
     },
     {
