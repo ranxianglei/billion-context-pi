@@ -6,10 +6,20 @@ import { collectCoveredMessageIds, estimateTokens, calibrateTokens, collectImage
 import { buildStatusPanel } from "acp-kernel/panel";
 import { getDelegateUsage } from "./delegate-tool.js";
 import { ensureSubagentAcpTools } from "./setup-subagent-tools.js";
+import { SESSION_MODEL_REF } from "./compress-model.js";
 
 declare const CURRENT_VERSION: string;
 
 type CommandOptions = Omit<RegisteredCommand, "name" | "sourceInfo">;
+
+/** Command handlers are typed `(args: string, ...)`. Real pi passes a string;
+ *  some tests pass an array. Normalize both to a string. */
+function commandArgString(args: string): string {
+  const a: unknown = args;
+  if (typeof a === "string") return a;
+  if (Array.isArray(a)) return (a as string[]).join(" ");
+  return "";
+}
 
 /** Extract per-request prompt-cache usage from assistant messages' provider
  *  reported usage (footer of each entry). Requests without cache reporting
@@ -30,8 +40,18 @@ export function makeCommands(runtime: AcpRuntime): Array<{ name: string; options
     {
       name: "acp",
       options: {
-        description: "Show ACP context usage, token breakdown, and compression status.",
-        handler: async (_args, ctx) => ctx.ui.notify(await statusReport(runtime, ctx)),
+        description:
+          "Show ACP context usage, token breakdown, and compression status. " +
+          "Subcommand: /acp compact [session|model-id|reset] to manage the dedicated compression model.",
+        handler: async (args, ctx) => {
+          const argStr = commandArgString(args);
+          const first = argStr.trim().split(/\s+/)[0];
+          if (first === "compact") {
+            ctx.ui.notify(await handleCompact(argStr, runtime, ctx));
+            return;
+          }
+          ctx.ui.notify(await statusReport(runtime, ctx));
+        },
       },
     },
     {
@@ -162,4 +182,65 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
     text += `Tokens: ${delegateUsage.input.toLocaleString()} in, ${delegateUsage.output.toLocaleString()} out (${delegateUsage.totalTokens.toLocaleString()} total)${costStr}`;
   }
   return text;
+}
+
+/** `/acp compact [model-id|reset]` — manage the dedicated compression model.
+ *  No arg: show status + list models.json. `reset`: clear. `<id>`: set (validated). */
+async function handleCompact(args: string, runtime: AcpRuntime, ctx: ExtensionCommandContext): Promise<string> {
+  const parts = args.trim().split(/\s+/).filter(Boolean);
+  const rest = parts.slice(1); // drop leading "compact"
+  const client = runtime.compressionModel;
+
+  if (rest.length === 0) {
+    const current = runtime.getCompressionModelRef();
+    if (!current) {
+      const models = await client.listModels();
+      const list = models.length > 0
+        ? models.map((m) => `  ${m.provider}/${m.id}${m.name ? ` — ${m.name}` : ""}`).join("\n")
+        : "  (no models found in models.json)";
+      return (
+        "Compression model: NOT SET — the main model writes summaries (default).\n\n" +
+        "Options:\n" +
+        `  /acp compact ${SESSION_MODEL_REF}   — use the session's own model, reusing its prompt prefix (prompt-cache friendly)\n` +
+        `Available models in models.json:\n${list}\n\n` +
+        "Set one with: /acp compact <model-id>"
+      );
+    }
+    if (current === SESSION_MODEL_REF) {
+      return "Compression model: session — the session's own model writes summaries, reusing its prompt prefix (prompt-cache friendly). Falls back to the main model on error.\nReset with: /acp compact reset";
+    }
+    const resolved = await client.resolveModel(current);
+    if (resolved.model) {
+      return `Compression model: ${resolved.model.provider}/${resolved.model.id} — a dedicated model writes summaries (falls back to the main model on error).\nReset with: /acp compact reset`;
+    }
+    return `Compression model: ${current} — configured but NOT resolvable in models.json, so compress will fall back to the main model.\nReset with: /acp compact reset`;
+  }
+
+  const target = rest.join(" ");
+  if (target === "reset") {
+    await runtime.setCompressionModelRef(null);
+    return "Compression model cleared — reverting to main-model compression.";
+  }
+  if (target === SESSION_MODEL_REF) {
+    await runtime.setCompressionModelRef(SESSION_MODEL_REF);
+    return "Compression model set to session — the session's own model writes summaries, reusing its prompt prefix (prompt-cache friendly). Falls back to the main model on error.";
+  }
+
+  const resolved = await client.resolveModel(target);
+  if (resolved.ambiguous.length > 0) {
+    return (
+      `Ambiguous model id "${target}". Use "provider/id" instead:\n` +
+      resolved.ambiguous.map((m) => `  ${m.provider}/${m.id}`).join("\n")
+    );
+  }
+  if (!resolved.model) {
+    const models = await client.listModels();
+    const list = models.length > 0
+      ? models.map((m) => `  ${m.provider}/${m.id}`).join("\n")
+      : "  (no models found in models.json)";
+    return `Model "${target}" not found in models.json.\nAvailable:\n${list}`;
+  }
+  const canonical = `${resolved.model.provider}/${resolved.model.id}`;
+  await runtime.setCompressionModelRef(canonical);
+  return `Compression model set to ${canonical}. Compress summaries will now be written by this model (falls back to the main model on error).`;
 }

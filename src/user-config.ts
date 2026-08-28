@@ -22,6 +22,9 @@ export interface UserAcpConfig {
   displayUsage?: "merged" | "separate";
   prompts?: Partial<Prompts>;
   acknowledgePromptsRisk?: boolean;
+  /** Model ref (bare id or "provider/id") from models.json used for compression
+   *  summaries. Absent = main model writes summaries (default). */
+  compressionModelId?: string;
 }
 
 /** Read global + project acp.json, project overrides global. Returns {} on any
@@ -56,7 +59,7 @@ const KNOWN = new Set([
   "debug", "autoUpdate", "modelContextLimit",
   "toolBashDefaultTimeout", "toolOutputMaxBytes",
   "delegate", "compress", "displayUsage", "throttleRetry",
-  "prompts", "acknowledgePromptsRisk",
+  "prompts", "acknowledgePromptsRisk", "compressionModelId",
 ]);
 
 function pickKnown(parsed: Record<string, unknown>): UserAcpConfig {
@@ -77,4 +80,22 @@ export function applyUserConfig(adapter: AdapterConfig, user: UserAcpConfig): Ad
     protectedTools: adapter.protectedTools,
     preserveRecentMessages: adapter.preserveRecentMessages,
   };
+}
+
+/** Persist compressionModelId to the GLOBAL ~/.pi/acp.json (other keys
+ *  preserved). Pass null to clear it (reverts to main-model compression). */
+export async function saveCompressionModelId(value: string | null): Promise<void> {
+  const file = join(homedir(), CONFIG_DIR_NAME, "acp.json");
+  let current: Record<string, unknown> = {};
+  try {
+    const raw = await fs.readFile(file, "utf8");
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object") current = parsed as Record<string, unknown>;
+  } catch {
+    // missing or unreadable — start fresh
+  }
+  if (value === null) delete current.compressionModelId;
+  else current.compressionModelId = value;
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, JSON.stringify(current, null, 2) + "\n", "utf8");
 }

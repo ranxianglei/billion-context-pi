@@ -1,14 +1,19 @@
 import { Type, type Static } from "typebox";
-import type {
-  AgentToolResult,
-  ExtensionContext,
-  ToolDefinition,
+import {
+  convertToLlm,
+  type AgentToolResult,
+  type ExtensionAPI,
+  type ExtensionContext,
+  type ToolDefinition,
+  type ToolInfo,
 } from "@earendil-works/pi-coding-agent";
+import type { Api, Context, Message, Model, Tool } from "@earendil-works/pi-ai";
 import type { AcpRuntime } from "./runtime.js";
 import { debug, logError, logInfo, logThrow, logWarn } from "./log.js";
 import { estimateTokens, collectCoveredMessageIds, calibrateTokens, collectImageTokens, modelSupportsImages } from "./tokens.js";
-import { defaultCountTokens, parseCompressArgs, type CompressionBlock, type CompressParseDiagnostics } from "acp-kernel";
+import { defaultCountTokens, parseCompressArgs, resolveBoundaries, type CompressionBlock, type CompressParseDiagnostics, type CoreMessage, type CompressionState } from "acp-kernel";
 import { getSystemPromptText } from "./compat.js";
+import { buildSummarizeSystemPrompt, truncateContent, SESSION_MODEL_REF, type ResolvedCompressionModel } from "./compress-model.js";
 
 function formatK(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(1)}K` : String(n);
@@ -38,12 +43,33 @@ const CompressParams = Type.Object({
 
 type CompressArgs = Static<typeof CompressParams>;
 
-export function makeCompressTool(runtime: AcpRuntime): ToolDefinition<typeof CompressParams> {
+/** Tool description is dynamic: when a dedicated compression model is
+ *  configured, the main model only chooses ranges and passes a minimal
+ *  placeholder summary (the compression model writes the real one) — saving the
+ *  main model's output tokens. Without one, the main model writes full summaries. */
+function compressDescription(ref: string | undefined): string {
+  if (ref) {
+    return (
+      "Replace older conversation ranges with summaries. A dedicated compression model (" + ref +
+      ") writes the summaries — you only choose the ranges. Pass a MINIMAL placeholder for each range's `summary` " +
+      "(e.g. \"compressed\"); it will be replaced by the compression model. Do NOT write a full summary. " +
+      "Single range: compress({ content: [{ startId, endId, summary: \"compressed\" }] }). " +
+      "Batch: compress({ content: [{ topic, startId, endId, summary: \"compressed\" }, ...] })."
+    );
+  }
+  return (
+    "Replace older conversation ranges with detailed summaries you write. Single range: compress({ content: [{ startId, endId, summary }] }). " +
+    "Batch: compress({ content: [{ topic, startId, endId, summary }, ...] }) — each entry gets its own summary."
+  );
+}
+
+export function makeCompressTool(runtime: AcpRuntime, pi: ExtensionAPI): ToolDefinition<typeof CompressParams> {
   return {
     name: "compress",
     label: "Compress",
-    description:
-      "Replace older conversation ranges with detailed summaries you write. Single range: compress({ content: [{ startId, endId, summary }] }). Batch: compress({ content: [{ topic, startId, endId, summary }, ...] }) — each entry gets its own summary.",
+    get description() {
+      return compressDescription(runtime.getCompressionModelRef());
+    },
     promptSnippet: "compress({ content: [{ startId, endId, summary }] }) or batch multiple ranges",
     promptGuidelines: [
       "Each message has an acp tag with its mNNNNN ref, token size, and type. Compress ranges by their refs.",
@@ -55,7 +81,7 @@ export function makeCompressTool(runtime: AcpRuntime): ToolDefinition<typeof Com
     async execute(toolCallId, params, _signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {
       let result: string;
       try {
-        result = await handleCompress(params as CompressArgs, runtime, ctx, toolCallId);
+        result = await handleCompress(params as CompressArgs, runtime, ctx, toolCallId, collectActiveTools(pi));
       } catch (e) {
         logThrow("compress", e, { sid: ctx.sessionManager.getSessionId(), ranges: typeof (params as CompressArgs).content === "string" ? "string" : ((params as CompressArgs).content?.length ?? 0) });
         throw e;
@@ -63,6 +89,22 @@ export function makeCompressTool(runtime: AcpRuntime): ToolDefinition<typeof Com
       return { details: undefined, content: [{ type: "text", text: result }] };
     },
   };
+}
+
+/** The active tools as pi-ai Tool[] — reused as the dedicated compression
+ *  model's prompt prefix (the "session" ref) so its request matches the main
+ *  model's and hits the provider's prompt cache. Defensive: a minimal host /
+ *  test mock without these methods yields [] (cache is best-effort). */
+function collectActiveTools(pi: ExtensionAPI): Tool[] {
+  try {
+    const active = new Set(pi.getActiveTools());
+    return pi
+      .getAllTools()
+      .filter((t: ToolInfo) => active.has(t.name))
+      .map((t: ToolInfo) => ({ name: t.name, description: t.description, parameters: t.parameters }));
+  } catch {
+    return [];
+  }
 }
 
 type RangeEntry = Static<typeof RangeSpec>;
@@ -138,7 +180,7 @@ function tier3OnlyRewrite(newBlocks: CompressionBlock[], allBlocks: CompressionB
   return spans;
 }
 
-async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: ExtensionContext, toolCallId?: string): Promise<string> {
+async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: ExtensionContext, toolCallId: string | undefined, tools: Tool[]): Promise<string> {
   const maybeRanges = normalizeRanges(args);
   // Argument errors throw (not return): pi-agent-core only sets isError:true
   // on THROWN tool errors, and the failure counter keys off isError. A
@@ -171,6 +213,85 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
   const beforeTokens = calibrateTokens(estimateTokens(messages, collectCoveredMessageIds(state), imageTokens), density);
   const summaryMaxChars = args.summaryMaxChars;
   const topLevelTopic = args.topic;
+
+  // Dedicated compression model: if configured and resolvable, generate each
+  // range's summary with the external model (the main model only passed a
+  // placeholder). On any failure, fall back to the main model's summary for
+  // that range so the session is never interrupted.
+  const compressionRef = runtime.getCompressionModelRef();
+  let compressionNote: string | null = null;
+  let compressionWarn = false;
+  if (compressionRef) {
+    const sid = ctx.sessionManager.getSessionId();
+    const maxTokens = Math.max(256, Math.ceil((summaryMaxChars ?? 20000) / 3));
+    let used = 0;
+    if (compressionRef === SESSION_MODEL_REF) {
+      // "session": summarize with the session's OWN model, reusing its prompt
+      // prefix (system prompt + active tools + the exact transformed messages
+      // Pi just sent) so the call hits the provider's prompt cache — isolation
+      // without a cheaper model. Falls back to the main model's summary per
+      // range on any failure, so the session is never interrupted.
+      const sessionModel = ctx.model as Model<Api> | undefined;
+      if (!sessionModel) {
+        compressionNote = 'compression model "session" has no active session model — using main model summaries';
+        compressionWarn = true;
+      } else {
+        const resolved: ResolvedCompressionModel = { provider: sessionModel.provider, id: sessionModel.id, model: sessionModel };
+        const prefix = runtime.getLastSentMessages(sid);
+        const llmPrefix: Message[] | null = prefix ? convertToLlm(prefix) : null;
+        const systemPrompt = getSystemPromptText(ctx);
+        for (const r of ranges) {
+          const instruction = buildRangeInstruction(r, r.topic ?? topLevelTopic);
+          // With a captured prefix: reuse it (prompt-cache hit) + a short
+          // instruction pointing at the range by ref. Without one (first turn /
+          // no context round yet): fall back to a fresh prompt with the
+          // extracted range content.
+          const context: Context = llmPrefix
+            ? { systemPrompt, messages: [...llmPrefix, { role: "user", content: instruction, timestamp: Date.now() }], tools }
+            : { systemPrompt: buildSummarizeSystemPrompt(runtime.prompts, r.topic ?? topLevelTopic), messages: [{ role: "user", content: `${instruction}\n\n<content>\n${extractRangeContent(messages, state, r.startId, r.endId) ?? "(range could not be extracted)"}\n</content>`, timestamp: Date.now() }] };
+          try {
+            r.summary = await runtime.compressionModel.summarizeContext(resolved, context, maxTokens);
+            used += 1;
+          } catch (e) {
+            logWarn("compress", { sid, event: "compression-model-failed", ref: compressionRef, error: e instanceof Error ? e.message : String(e) });
+          }
+        }
+        if (used > 0) {
+          compressionNote = `summaries written by session model ${resolved.provider}/${resolved.id} (${used}/${ranges.length} ranges${llmPrefix ? ", shared prefix" : ", no prefix captured"})`;
+        } else {
+          compressionNote = 'compression model "session" produced no summaries — using main model summaries';
+          compressionWarn = true;
+        }
+      }
+    } else {
+      // A models.json model: fresh single-message prompt (no prefix sharing — a
+      // different model lives in a different cache namespace).
+      const resolved = await runtime.compressionModel.resolveModel(compressionRef);
+      if (!resolved.model) {
+        compressionNote = `compression model "${compressionRef}" not resolvable in models.json — using main model summaries`;
+        compressionWarn = true;
+        logWarn("compress", { sid, event: "compression-model-unresolved", ref: compressionRef });
+      } else {
+        const systemPrompt = buildSummarizeSystemPrompt(runtime.prompts, topLevelTopic);
+        for (const r of ranges) {
+          const content = extractRangeContent(messages, state, r.startId, r.endId);
+          if (!content) continue; // cannot extract — keep the main model's summary
+          try {
+            r.summary = await runtime.compressionModel.summarize(resolved.model, truncateContent(content, 120000), systemPrompt, maxTokens);
+            used += 1;
+          } catch (e) {
+            logWarn("compress", { sid, event: "compression-model-failed", ref: compressionRef, error: e instanceof Error ? e.message : String(e) });
+          }
+        }
+        if (used > 0) {
+          compressionNote = `summaries written by ${resolved.model.provider}/${resolved.model.id} (${used}/${ranges.length} ranges)`;
+        } else {
+          compressionNote = `compression model "${compressionRef}" produced no summaries — using main model summaries`;
+          compressionWarn = true;
+        }
+      }
+    }
+  }
 
   debug.event("compress-in", {
     sid: ctx.sessionManager.getSessionId(),
@@ -255,7 +376,41 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
   }
 
   const lines = [`▣ ACP | ${formatK(beforeTokens)} → ${formatK(afterTokens)} tokens (~${formatK(reclaimed)} reclaimed, ${blocksCreated} block${blocksCreated > 1 ? "s" : ""})`];
+  if (compressionNote) lines.push((compressionWarn ? "⚠️ " : "ℹ️ ") + compressionNote);
   if (warnings.length > 0) lines.push("⚠️ " + warnings.join("; "));
   if (errors.length > 0) lines.push("Errors: " + errors.join("; "));
   return lines.join("\n");
+}
+
+function formatCoreMessage(m: CoreMessage): string {
+  const text = m.text ?? "";
+  if (m.contentType === "tool-call") return `[${m.role}:${m.toolName ?? "tool"} call] ${text}`;
+  if (m.contentType === "tool-result") return `[${m.role}:${m.toolName ?? "tool"} result] ${text}`;
+  return `[${m.role}] ${text}`;
+}
+
+/** Instruction for the dedicated compression model to summarize one range.
+ *  For the "session" ref the ACP compression rules already live in the reused
+ *  session system prompt, so this only points at the range (by ref) and the
+ *  output contract. */
+function buildRangeInstruction(r: RangeEntry, topic: string | undefined): string {
+  const topicLine = topic ? ` Topic: ${topic}.` : "";
+  return (
+    `Write the single detailed summary that replaces the conversation range from ${r.startId} to ${r.endId} ` +
+    `(the messages tagged [${r.startId}] through [${r.endId}]).${topicLine} ` +
+    `Follow the compression rules in your system prompt exactly. Output ONLY the summary text (no preamble, no code fences).`
+  );
+}
+
+/** Raw transcript of the messages in [startId, endId] (fed to the compression
+ *  model). Returns null when the range cannot be resolved. */
+function extractRangeContent(messages: CoreMessage[], state: CompressionState, startId: string, endId: string): string | null {
+  try {
+    const range = resolveBoundaries({ startRef: startId, endRef: endId, messages, state });
+    const slice = messages.slice(range.startIndex, range.endIndex + 1);
+    if (slice.length === 0) return null;
+    return slice.map(formatCoreMessage).join("\n\n");
+  } catch {
+    return null;
+  }
 }

@@ -134,6 +134,29 @@ Blocks: 3 active (3.7K summary, 15.2K original compressed)
   b3 (T2)  3.3K→1.0K  age=1m  "Architecture review"
 ```
 
+## `/acp compact` — dedicated compression model
+
+By default the `compress` tool's summaries are written by your **main model** — it spends output tokens producing them, and the summary-writing reasoning runs inside the main model's own turn. `/acp compact` offloads summary-writing to a **separate call** in one of two modes:
+
+- **`session`** — use the **same model as your session**, but in a separate call that **reuses the session's prompt prefix** (system prompt + active tools + the exact messages Pi just sent). Because that prefix matches what the main model already sent, the provider's **prompt cache** makes the input cheap, and the compression reasoning stays out of the main model's context. Recommended way to get isolation without switching models.
+- **`<id>`** — a model from Pi's `~/.pi/agent/models.json` (a cheaper small Qwen, `gpt-4o-mini`, …). No extra `baseUrl`/`apiKey` to duplicate. A different model has its own cache namespace, so it does **not** share the session prefix cache (input is billed in full), but you save on the model's per-token price.
+
+```
+/acp compact            # show the current compression model + list available models
+/acp compact session    # use the session model (shared prefix → prompt-cache friendly)
+/acp compact <id>       # set <id> (or <provider>/<id>) from models.json as the compression model
+/acp compact reset      # clear it — fall back to the main model
+```
+
+- **No argument** (`/acp compact`): shows the currently configured compression model (or "not set — the main model writes summaries") and lists the model ids available in `models.json` for reference.
+- **`/acp compact session`**: sets the compression model to the session model (shared-prefix mode).
+- **`/acp compact <id>`**: sets a `models.json` model. Accepts a bare id (`qwen-mini`) or an explicit `provider/id` (`openai/gpt-4o-mini`). The choice is persisted to `~/.pi/acp.json` (`compressionModelId`) and applies across sessions.
+- **`/acp compact reset`**: clears the setting; compression falls back to the main model (the default behavior).
+
+When a compression model is set, each `compress` call produces the summary in a separate call, so the **main model spends no output tokens** on summaries. If the call fails (network error, API error, empty response), the extension **falls back to the main model's summary** for that range — compression never blocks the session.
+
+> For `<id>` mode the model must have a working API key (in `models.json` or `~/.pi/agent/auth.json`); `session` mode reuses your session's existing credentials. See [CONFIGURATION.md](./CONFIGURATION.md#compressionmodelid) for details.
+
 ## `/acp-subagents` command
 
 **Optional, one-time setup — only if you also use [pi-subagents](https://github.com/nicobailon/pi-subagents).**

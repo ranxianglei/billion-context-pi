@@ -52,7 +52,7 @@ export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactor
     wireToolGuardrails(pi, runtime);
     wireOverflowSelfHeal(pi, runtime);
     wireThrottleRetry(pi, runtime);
-    pi.registerTool(makeCompressTool(runtime));
+    pi.registerTool(makeCompressTool(runtime, pi));
     pi.registerTool(makeDecompressTool(runtime));
     pi.registerTool(makeSearchTool(runtime));
     pi.registerTool(makeStatusTool(runtime));
@@ -359,6 +359,12 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       if (ctx.hasUI) ctx.ui.notify(msg);
     });
     if (!ctx.hasUI) await updateCheck;
+    // Capture the exact transformed messages Pi is about to send so the
+    // dedicated compression model (the "session" ref) can reuse them as a
+    // prompt prefix and hit the provider's prompt cache. Stored by session id;
+    // read by the compress tool during the same turn (before the next context
+    // round overwrites it).
+    runtime.setLastSentMessages(sid, rebuilt);
     return { messages: rebuilt };
     } catch (e) {
       logThrow("context", e, { sid, phase: "transform" });
