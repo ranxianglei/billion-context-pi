@@ -1,8 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { homedir, tmpdir } from "node:os";
-import { mkdtempSync, readFileSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 import type { NpmRunner } from "../src/update.js";
 
@@ -35,6 +35,9 @@ const {
   isAutoUpdatableSpec,
   runNpm,
   runNode,
+  findExtensionDir,
+  readOnlyMarkerFile,
+  resetUpdateStateForTest,
 } = await import("../src/update.js");
 
 const THROTTLE = join(
@@ -446,4 +449,57 @@ test("autoInstallLatest: npm install failure → failed, no rollback, no verify"
   assert.equal(outcome, "failed");
   assert.equal(nodeCalls, 0);
   rmSync(fx.root, { recursive: true, force: true });
+});
+
+// --- read-only (EACCES) handling (issue #267) ---
+
+test("autoInstallLatest: EACCES install failure → read-only outcome + stop-retry marker written", async () => {
+  const fx = makeFixture();
+  fx.writeInstalled("1.2.3");
+  setRunNpmForTest(makeFakeNpm(
+    { code: 0, stdout: "", stderr: "" },
+    { code: 1, stdout: "", stderr: "npm error code EACCES\nnpm error syscall open\nnpm error errno -13" },
+  ).impl);
+  setRunNodeForTest(async () => ({ code: 0, stdout: "", stderr: "" }));
+  const outcome = await autoInstallLatest("9.9.9", fx.extDir);
+  assert.equal(outcome, "read-only");
+  assert.ok(existsSync(readOnlyMarkerFile(fx.extDir)), "stop-retry marker written for the read-only location");
+  rmSync(fx.root, { recursive: true, force: true });
+});
+
+test("autoInstallLatest: non-permission failure (404) → failed, no stop-retry marker", async () => {
+  const fx = makeFixture();
+  fx.writeInstalled("1.2.3");
+  setRunNpmForTest(makeFakeNpm(
+    { code: 0, stdout: "", stderr: "" },
+    { code: 1, stdout: "", stderr: "npm error 404 Not Found - GET" },
+  ).impl);
+  setRunNodeForTest(async () => ({ code: 0, stdout: "", stderr: "" }));
+  const outcome = await autoInstallLatest("9.9.9", fx.extDir);
+  assert.equal(outcome, "failed");
+  assert.ok(!existsSync(readOnlyMarkerFile(fx.extDir)), "no marker for a non-permission failure");
+  rmSync(fx.root, { recursive: true, force: true });
+});
+
+test("checkForUpdate: read-only marker present → skips npm view entirely + notifies once per process", async () => {
+  resetUpdateStateForTest();
+  const extDir = await findExtensionDir();
+  assert.ok(extDir, "extension dir resolvable in test");
+  mkdirSync(dirname(readOnlyMarkerFile(extDir)), { recursive: true });
+  writeFileSync(readOnlyMarkerFile(extDir), String(Date.now()));
+  let npmCalls = 0;
+  setRunNpmForTest(async () => { npmCalls += 1; return { code: 0, stdout: "", stderr: "" }; });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (() => { throw new Error("fetch must not be called for a read-only location"); }) as typeof fetch;
+  const notes: string[] = [];
+  try {
+    await checkForUpdate(true, (m) => notes.push(m));
+    await checkForUpdate(true, (m) => notes.push(m));
+  } finally {
+    globalThis.fetch = originalFetch;
+    rmSync(readOnlyMarkerFile(extDir), { force: true });
+  }
+  assert.equal(npmCalls, 0, "no npm view when the install location is read-only");
+  assert.equal(notes.length, 1, "notify emitted once per process, not once per check");
+  assert.match(notes[0], /npm i -g billion-context-pi/);
 });

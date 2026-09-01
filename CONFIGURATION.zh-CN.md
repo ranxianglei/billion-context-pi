@@ -180,6 +180,8 @@
 - **默认值：** `true`
 - **状态：** 🟢 ACTIVE
 - **说明：** Pi 启动时检查 npm 是否有更新版本的 `billion-context-pi` 并自动安装。设为 `false` 可避免启动时的所有网络请求。也可通过 `ACP_AUTO_UPDATE` 环境变量（`ACP_AUTO_UPDATE=0` 或 `ACP_AUTO_UPDATE=false`）禁用，该变量优先于此配置。
+  - **只读安装位置：** 当该副本的安装前缀不可写（如 root 所有的 `npm i -g` 全局前缀）时，自动更新在首次 `EACCES`/权限失败后停止对该位置的重试，并一次性提示运行 `npm i -g billion-context-pi`（或若依赖 pi 自带安装则移除全局副本），而不是无限循环。检查节流与停止重试标记均按安装位置区分，因此健康副本不会压制失败副本的检查。
+  - **两套并行机制：** 此扩展侧自动更新与 pi 核心自身的更新 banner 相互独立——两者可能同时出现，禁用其中一个不影响另一个。
 
 ### `modelContextLimit`
 

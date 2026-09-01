@@ -4,6 +4,7 @@ import type { AcpRuntime } from "./runtime.js";
 import { buildStatusReport, defaultCountTokens, formatRanges, viableRanges } from "acp-kernel";
 import { estimateTokens, collectCoveredMessageIds, collectImageTokens, modelSupportsImages, adjustedTokenCount } from "./tokens.js";
 import { usageAnchorPredatesCompression } from "./floor-stale.js";
+import { applyOutputHeadroom } from "./overflow-selfheal.js";
 import { getSystemPromptText } from "./compat.js";
 import { logThrow } from "./log.js";
 import { getDelegateUsage } from "./delegate-tool.js";
@@ -49,7 +50,9 @@ export function makeStatusTool(runtime: AcpRuntime): ToolDefinition<typeof Statu
 
 async function handleStatus(args: StatusArgs, runtime: AcpRuntime, ctx: ExtensionContext): Promise<string> {
   const { state, coreMessages, entries } = await runtime.stateFor(ctx);
-  const config = runtime.configFor(ctx);
+  // Same real request limit (window − output headroom) as the live context
+  // transform, so the reported percentages match the nudge bands (issue #267).
+  const config = applyOutputHeadroom(runtime.configFor(ctx), ctx.model);
   // Run the same pipeline (assign-refs → prune → hide-compress-calls → ...) that
   // the context transform runs, so what acp_status reports matches what the
   // model actually receives. Without this, consumed/hidden compress calls and

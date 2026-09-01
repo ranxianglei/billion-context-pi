@@ -58,6 +58,13 @@ export interface AcpRuntime {
    *  pending kick sleep and releases the map entry so a long-lived process
    *  that cycles through many sessions doesn't accumulate them. */
   throttleDrop: (sid: string) => void;
+  /** Per-session tokenCount scale tracker (estimate vs provider). Returns true
+   *  when the scale just flipped (stale↔not-stale) so the caller can reset the
+   *  growth baseline — a cross-scale delta is a false artifact, not real growth
+   *  (issue #267). The first observation for a session never reports a flip. */
+  noteTokenScale: (sid: string, stale: boolean) => boolean;
+  /** Drop a session's token-scale tracker (session_shutdown). */
+  dropTokenScale: (sid: string) => void;
   store: SessionStateStore;
   adapter: AdapterConfig;
   setAdapter(adapter: AdapterConfig): void;
@@ -291,6 +298,19 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     throttleEpisodes.delete(sid);
   }
 
+  // Per-session tokenCount scale (estimate vs provider). When the anchor flips
+  // stale↔not-stale the meter switches rulers; a growth delta spanning that
+  // switch is a false artifact (issue #267), so the caller resets the baseline.
+  const tokenScaleStale = new Map<string, boolean>();
+  function noteTokenScale(sid: string, stale: boolean): boolean {
+    const prev = tokenScaleStale.get(sid);
+    tokenScaleStale.set(sid, stale);
+    return prev !== undefined && prev !== stale;
+  }
+  function dropTokenScale(sid: string): void {
+    tokenScaleStale.delete(sid);
+  }
+
   // Compress-failure tracking (see wireContextTransform): counts FAILED/no-op
   // compress calls per user turn so the nudge circuit breaker can stop
   // re-injecting the nudge at a model that answers every nudge with another
@@ -410,4 +430,4 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
 
   let refused = false;
   let refusalMessage: string | null = null;
-  return { core, store, get refused() { return refused; }, set refused(v: boolean) { refused = v; }, get refusalMessage() { return refusalMessage; }, set refusalMessage(v: string | null) { refusalMessage = v; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reloadConfig, stateFor, save, acquireLock, overflowFor, overflowDrop, noteDeadCompress, clearDeadCompress, throttleFor, throttleDrop };}
+  return { core, store, get refused() { return refused; }, set refused(v: boolean) { refused = v; }, get refusalMessage() { return refusalMessage; }, set refusalMessage(v: string | null) { refusalMessage = v; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reloadConfig, stateFor, save, acquireLock, overflowFor, overflowDrop, noteDeadCompress, clearDeadCompress, throttleFor, throttleDrop, noteTokenScale, dropTokenScale };}
