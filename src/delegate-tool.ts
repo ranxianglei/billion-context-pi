@@ -1735,10 +1735,14 @@ export function effectiveExitCode(code: number | null, output: string, stderr: s
   return code ?? (output || stderr ? 0 : null);
 }
 
-/** Should the completion notification be suppressed because the model already
- *  read the final result file? Only a read at/after finishedAt counts — a read
- *  while the run was still in flight (readAt < finishedAt) saw partial output,
- *  so the notification still goes out. */
+/** Pure read-after-finish predicate: should the completion notification be
+ *  suppressed because the model already read the final result file? Only a
+ *  read at/after finishedAt counts — a read while the run was still in flight
+ *  (readAt < finishedAt) saw partial output, so the notification still goes
+ *  out. Callers additionally gate on run.status === "completed": a FAILED
+ *  run's file holds only partial output with no failure marker, so the model
+ *  cannot tell it failed from the file — failure notifications are never
+ *  suppressed (failures are loud). */
 export function shouldSuppressRead(
   run: { readAt?: number; finishedAt?: number },
   mode: "skip" | "always",
@@ -1765,10 +1769,11 @@ export function applyReadSuppression(run: DelegateRun, runId: string): void {
 /** Apply read-suppression immediately when a qualifying read just happened.
  *  Covers the window where the notification is already queued in the
  *  coalescing batch but not yet flushed: marking the run delivered here makes
- *  the flush skip it. Inert for running runs (readAt < finishedAt) and for
+ *  the flush skip it. Inert for running runs (readAt < finishedAt), for
+ *  non-completed runs (failed/cancelled — see shouldSuppressRead), and for
  *  "always" mode. */
 function suppressIfReadNow(run: DelegateRun): void {
-  if (shouldSuppressRead(run, delegateNotifyIfRead)) applyReadSuppression(run, run.runId);
+  if (run.status === "completed" && shouldSuppressRead(run, delegateNotifyIfRead)) applyReadSuppression(run, run.runId);
 }
 
 /** status (set by finalize from the effective exit code) is the authority for
@@ -1867,15 +1872,13 @@ export function injectResult(
  *  error, result persistence error). A parked waiter owns the result; with no
  *  waiter the model must still learn the run failed — the coalescing queue
  *  delivers it, and runs whose send fails land in the undelivered set for
- *  recovery. */
+ *  recovery. Read-suppression never applies here: a failed run's file holds
+ *  only partial output with no failure marker, so the notification must go
+ *  out. */
 function notifyTerminalFailure(pi: ExtensionAPI, run: DelegateRun): void {
   const hadWaiter = run.waiter !== undefined;
   run.waiter?.();
   if (hadWaiter || run.consumed) return;
-  if (shouldSuppressRead(run, delegateNotifyIfRead)) {
-    applyReadSuppression(run, run.runId);
-    return;
-  }
   scheduleRunNotification(pi, run);
 }
 

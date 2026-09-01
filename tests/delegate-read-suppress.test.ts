@@ -12,6 +12,9 @@ import {
   getDelegateUsage,
   setDelegateDisplayUsage,
   makeDelegateTool,
+  makeDelegateWaitTool,
+  runningRunsSnapshot,
+  flushDelegateNotifications,
 } from "../src/delegate-tool.js";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
@@ -139,4 +142,44 @@ test("markDelegateRunReadByCommand matches runIds referenced in a bash command",
 test("markDelegateRunReadByCommand ignores runId-looking text with no matching run", async () => {
   await seedRunId();
   assert.equal(markDelegateRunReadByCommand("echo del_nosuchrun_1234"), false, "unknown runId does not match");
+});
+
+// ─── failures are loud: read-suppression never applies to FAILED runs ──────
+// A failed run's result file holds only partial output — no exit status, no
+// failure marker. A model polling the file after the failure cannot tell the
+// run failed from the file alone, so the FAILED notification must go out even
+// when readAt >= finishedAt.
+
+test("failed run read after finish still gets its FAILED notification", async () => {
+  const sent: string[] = [];
+  const pi = { sendUserMessage: (t: string) => sent.push(t) } as unknown as Parameters<typeof makeDelegateTool>[0];
+  const tool = makeDelegateTool(pi);
+  const ctx = { ...mockCtx(), mode: "tui", cwd: process.cwd() } as unknown as ExtensionContext;
+  const res = await tool.execute(
+    "tc-fail-loud",
+    { agent: "oracle", task: "e2e", cwd: "/nonexistent-e2e-cwd", async: true },
+    undefined,
+    undefined,
+    ctx,
+  );
+  const launch = (res.content[0] as { text?: string }).text ?? "";
+  const runId = /`(del_[a-z0-9_]+)`/.exec(launch)?.[1];
+  assert.ok(runId, `runId in launch message: ${launch}`);
+  const settleDeadline = Date.now() + 5000;
+  while (runningRunsSnapshot().length > 0 && Date.now() < settleDeadline) await new Promise((r) => setTimeout(r, 50));
+  assert.equal(runningRunsSnapshot().length, 0, "run settled");
+  // The model reads the result file AFTER the failure (e.g. it was polling
+  // for the result). readAt >= finishedAt now holds, but the run failed.
+  assert.equal(markDelegateResultRead(join(OUT_DIR, `${runId}.out`)), true, "read of the failed run's file matches");
+  flushDelegateNotifications();
+  const deliverDeadline = Date.now() + 5000;
+  while (!sent.some((t) => t.includes(runId!)) && Date.now() < deliverDeadline) await new Promise((r) => setTimeout(r, 50));
+  const mine = sent.find((t) => t.includes(runId!));
+  assert.ok(mine, `FAILED notification delivered despite the post-finish read, got ${JSON.stringify(sent)}`);
+  assert.match(mine!, /FAILED/);
+  assert.ok(!mine!.includes("no completion notification was injected"), "no suppression wording in the notification");
+  const waitTool = makeDelegateWaitTool(pi);
+  const waitRes = await waitTool.execute("tc-fail-loud-wait", { runId: runId! }, undefined, undefined, ctx);
+  const waitText = (waitRes.content[0] as { text?: string }).text ?? "";
+  assert.ok(!waitText.includes("no completion notification was injected"), `wait does not claim the notification was suppressed: ${waitText}`);
 });
