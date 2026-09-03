@@ -99,6 +99,18 @@ export interface AcpRuntime {
    *  renumbers refs so old fingerprints are meaningless; session_shutdown for
    *  memory hygiene). */
   clearDeadCompress(sid: string): void;
+  /** Record a SUCCESSFUL compress (>= 1 block created) for the current user
+   *  turn and return the per-turn success count. Turn changes reset the
+   *  counter. Used by the success throttle (see MAX_SUCCESSFUL_COMPRESSES_PER_TURN):
+   *  a model stuck in a tool-call repetition loop can (and in observed
+   *  sessions does) fire repeated successful compresses to erase its own
+   *  failure history — including repeated-call guard feedback — and resume
+   *  the identical call from a clean slate. Limiting successful compresses
+   *  per turn closes that escape hatch while leaving normal cross-turn
+   *  compression untouched. */
+  noteSuccessfulCompress(turnKey: string): number;
+  /** Success count for the given turn (0 when turnKey is not the tracked turn). */
+  successfulCompressCountFor(turnKey: string): number;
 }
 // omp fires the context event before the current user message is persisted to
 // the session branch, so merge event.messages (exact messages about to be sent,
@@ -239,6 +251,20 @@ function pruneOrphanRefs(state: CompressionState, messages: ReturnType<typeof en
 /** Max FAILED compress calls per user turn before the nudge circuit breaker engages. */
 export const MAX_COMPRESS_ATTEMPTS = 3;
 
+/** Max SUCCESSFUL compress calls per user turn before the compress tool starts
+ *  rejecting (compress.successThrottlePerTurn in acp.json; 0 disables). Motivated
+ *  by a real 2-hour unattended run (session 01a06693): the model entered a
+ *  tool-call repetition loop and fired three successful compresses in three
+ *  minutes (29.2K→9.9K, 9.9K→9.9K, 10.5K→5.0K) — each one erased the just-
+ *  delivered repeated-call BLOCKED feedback, so the model resumed the identical
+ *  call with no memory of the failures. Existing breakers only count FAILED
+ *  compresses (noteCompressOutcomes RESETS the failure counter on success), so
+ *  the escape hatch was wide open. 4 leaves headroom for legitimate dense
+ *  distillation chains (a tier-2 → tier-3 cascade costs 3 successes, see
+ *  t3-rewrite-guard.test.ts) while still intercepting the abuse cadence one
+ *  round after it starts. 0 disables (compress.successThrottlePerTurn). */
+export const MAX_SUCCESSFUL_COMPRESSES_PER_TURN = 4;
+
 export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   const core = createCore({
     // CJK-aware base counter (kernel default); the meter's real-scale floor
@@ -273,6 +299,24 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   }
   function clearDeadCompress(sid: string): void {
     deadCompressCounts.delete(sid);
+  }
+
+  // Per-turn SUCCESSFUL compress tracking (see MAX_SUCCESSFUL_COMPRESSES_PER_TURN).
+  // Single-turnKey mirror of the failure counter above: noteSuccessfulCompress
+  // resets when the turn advances, successfulCompressCountFor returns 0 for any
+  // untracked turn.
+  let successTurnKey: string | null = null;
+  let successCount = 0;
+  function noteSuccessfulCompress(turnKey: string): number {
+    if (successTurnKey !== turnKey) {
+      successTurnKey = turnKey;
+      successCount = 0;
+    }
+    successCount += 1;
+    return successCount;
+  }
+  function successfulCompressCountFor(turnKey: string): number {
+    return successTurnKey === turnKey ? successCount : 0;
   }
 
   const throttleEpisodes = new Map<string, ThrottleEpisode>();
@@ -405,4 +449,4 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   }
 
   let refused = false;
-  return { core, store, get refused() { return refused; }, set refused(v: boolean) { refused = v; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reloadConfig, stateFor, save, acquireLock, overflowFor, overflowDrop, noteDeadCompress, clearDeadCompress, throttleFor, throttleDrop };}
+  return { core, store, get refused() { return refused; }, set refused(v: boolean) { refused = v; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reloadConfig, stateFor, save, acquireLock, overflowFor, overflowDrop, noteDeadCompress, clearDeadCompress, noteSuccessfulCompress, successfulCompressCountFor, throttleFor, throttleDrop };}

@@ -5,7 +5,7 @@ import type {
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { AcpRuntime } from "./runtime.js";
-import { MAX_COMPRESS_ATTEMPTS } from "./runtime.js";
+import { MAX_COMPRESS_ATTEMPTS, MAX_SUCCESSFUL_COMPRESSES_PER_TURN } from "./runtime.js";
 import { debug, logError, logInfo, logThrow, logWarn } from "./log.js";
 import { estimateTokens, collectCoveredMessageIds, collectImageTokens, modelSupportsImages, lastUserMessageId } from "./tokens.js";
 import { defaultCountTokens, parseCompressArgs, viableRanges, formatRanges, type CompressionBlock, type CompressionState, type CompressParseDiagnostics, type NudgeDecision } from "acp-kernel";
@@ -253,6 +253,18 @@ function cappedRejectionText(snapshot: string): string {
   ].join("\n");
 }
 
+function successThrottledText(count: number, limit: number, snapshot: string): string {
+  return [
+    "▣ ACP | 0 → 0 tokens (~0 reclaimed, 0 blocks)",
+    `[ACP] THROTTLED — ${count} successful compresses already ran this turn (limit ${limit}).`,
+    "",
+    "Compressing again now would erase your OWN recent history — including the tool results telling you a repeated call was blocked. If you are about to repeat an action you already tried, do NOT compress to forget the failures: change approach, inspect different state, or report your results to the user.",
+    "",
+    "Current compressible ranges (compress re-opens on the next user message):",
+    snapshot,
+  ].join("\n");
+}
+
 function tier3OnlyRewrite(newBlocks: CompressionBlock[], allBlocks: CompressionBlock[]): string[] | null {
   if (newBlocks.length === 0) return null;
   const byId = new Map(allBlocks.map((b) => [b.blockId, b]));
@@ -301,6 +313,20 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
   const sid = ctx.sessionManager.getSessionId();
   const turnKey = lastUserMessageId(entries) ?? sid;
   const snapshot = compressibleSnapshotText(turn.nudge);
+  // Success throttle (see MAX_SUCCESSFUL_COMPRESSES_PER_TURN): a model in a
+  // tool-call repetition loop fires SUCCESSFUL compresses to erase its own
+  // failure history (repeated-call BLOCKED feedback included) and resumes the
+  // identical call from a clean slate. Existing caps only counted failures —
+  // noteCompressOutcomes even RESETS the failure counter on success — so this
+  // path was completely ungated. Read from the pi-side AdapterConfig (not the
+  // kernel Config): maxSuccessfulPerTurn is enforced at the tool layer here.
+  // limit <= 0 disables the throttle.
+  const successLimit = runtime.adapter.compress?.maxSuccessfulPerTurn ?? MAX_SUCCESSFUL_COMPRESSES_PER_TURN;
+  const successCount = runtime.successfulCompressCountFor(turnKey);
+  if (successLimit > 0 && successCount >= successLimit) {
+    logWarn("compress", { sid, event: "success-throttled", turnKey, successCount, successLimit });
+    return successThrottledText(successCount, successLimit, snapshot);
+  }
   if (runtime.compressRetryCappedFor(turnKey)) {
     logWarn("compress", { sid, event: "capped-reject", turnKey });
     return cappedRejectionText(snapshot);
@@ -351,6 +377,7 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
   const { blocksCreated, tokensCompressed, errors, warnings } = applied.result;
   if (blocksCreated > 0) {
     runtime.clearDeadCompress(sid);
+    runtime.noteSuccessfulCompress(turnKey);
   } else if (allDead) {
     const count = runtime.noteDeadCompress(sid, ranges.map((r) => `${r.startId}..${r.endId}`).join("|"));
     if (count >= DEAD_REPEAT_REJECT) {

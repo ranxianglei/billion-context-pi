@@ -32,6 +32,13 @@ export interface CompressSettings {
   /** Token growth threshold for soft compression nudges. Default: 50000.
    *  Maps to kernel nudge.growthFloor + nudge.growthCap. */
   nudgeGrowthTokens?: number;
+  /** Max SUCCESSFUL compress calls (>= 1 block created) per user turn before
+   *  the compress tool rejects further calls until the next user message.
+   *  Default: 3. Set to 0 to disable. A model stuck in a tool-call repetition
+   *  loop can fire repeated successful compresses to erase its own failure
+   *  history (including repeated-call guard feedback) and resume the identical
+   *  call — this throttle closes that escape hatch. */
+  maxSuccessfulPerTurn?: number;
 }
 
 /** Per-provider compression overrides. Carries the same tuning fields as the
