@@ -106,6 +106,10 @@
 |----|------|--------|------|------|
 | `delegate.enabled` | boolean | `true` | 🟢 ACTIVE | 启用 `acp_delegate` 工具及其系统提示部分。 |
 | `delegate.displayUsage` | string | `"separate"` | 🟢 ACTIVE | 控制 delegate 子代理的 token 用量如何报回主会话。 |
+| `delegate.maxDepth` | number | `2` | 🟢 ACTIVE | `acp_delegate` 最大嵌套深度（主会话 = 深度 0；处于该深度的会话成为叶子，不能再委派）。设为 `1` 可禁止 delegate 再嵌套。 |
+| `delegate.syncTimeoutMinutes` | number | `5` | 🟢 ACTIVE | **同步** `acp_delegate` 调用的硬超时（分钟）。`0` / `null` 禁用。 |
+| `delegate.idleTimeoutMinutes` | number | `5` | 🟢 ACTIVE | 异步 delegate 子进程的闲置看门狗——无输出超过该时长即强制结束。`0` / `null` 禁用。 |
+| `delegate.asyncTimeoutMinutes` | number | `30` | 🟢 ACTIVE | 异步 delegate 子进程的绝对硬上限（分钟）。`0` / `null` 禁用。 |
 
 **provider 限流重试键**
 
@@ -140,6 +144,10 @@
 | `ACP_MODEL_CONTEXT_LIMIT` | 覆盖上下文窗口大小（优先级最高）。 |
 | `ACP_DEBUG` | 设为 `1` / `true` 开启调试日志。 |
 | `ACP_LOG_FILE` | 覆盖日志文件路径（默认 `~/.pi/acp.log`）。 |
+| `PI_ACP_DELEGATE_MAX_DEPTH` | 覆盖 `delegate.maxDepth`。 |
+| `PI_ACP_DELEGATE_SYNC_TIMEOUT_MINUTES` | 覆盖 `delegate.syncTimeoutMinutes`；`0` 禁用同步硬超时。 |
+| `PI_ACP_DELEGATE_IDLE_TIMEOUT_MINUTES` | 覆盖 `delegate.idleTimeoutMinutes`；`0` 禁用闲置看门狗。 |
+| `PI_ACP_DELEGATE_ASYNC_TIMEOUT_MINUTES` | 覆盖 `delegate.asyncTimeoutMinutes`；`0` 禁用异步硬上限。 |
 
 > **只有文档中列出的键才会从 `acp.json` 读取。** 其他调优参数（`preserveRecentMessages`、`protectedTools`）是代码级别的，不开放给用户。三个压缩阈值构成三级递进：基于增长的软 nudge → 越过 `compress.maxContextLimit` 后的强制 nudge → 越过 `compress.emergencyThresholdPercent` 后的紧急截断。
 
@@ -205,6 +213,34 @@
 - **默认值：** `"separate"`
 - **状态：** 🟢 ACTIVE
 - **说明：** 控制 delegate 子代理的 token 用量如何报回主会话。`"separate"`（默认）将 delegate token 记入独立累加器——主会话总量保持干净，delegate 用量在 `acp_status` 中单独显示一块（不计入主总量）。`"merged"` 将 delegate token 用量并入工具返回的 `usage` 字段，算作主会话总量的一部分。仅在 `delegate.enabled` 为 `true` 时有意义。
+
+### `delegate.maxDepth`
+
+- **类型：** 整数 ≥ 1
+- **默认值：** `2`
+- **状态：** 🟢 ACTIVE
+- **说明：** `acp_delegate` 的最大嵌套深度。深度表示会话距主会话的层数（主会话 = 0）；只有当自身深度**低于**该限制时才能再委派，因此*处于*该深度的会话成为叶子、不能再委派。默认 `2` 允许 主 → delegate → 二级 delegate；设为 `1` 可实现编排者 / 叶子工作者模式（delegate 不再嵌套）。解析后的限制值通过内部环境变量 `PI_ACP_DELEGATE_MAX_DEPTH` 传递给子进程，即使某个子进程加载了不同的项目级 `acp.json`，也能约束整棵委派树。非法值（非整数、`< 1`）回退到默认值并记录警告日志。环境变量覆盖：`PI_ACP_DELEGATE_MAX_DEPTH`（优先于本键）。
+
+### `delegate.syncTimeoutMinutes`
+
+- **类型：** number（分钟，支持小数）或 `0` / `null`
+- **默认值：** `5`
+- **状态：** 🟢 ACTIVE
+- **说明：** **同步** `acp_delegate` 调用的硬超时——子进程未在该时间窗内结束即被杀死（SIGTERM）。设为 `0`（或 `null`）可禁用同步硬超时。支持小数分钟（如 `0.5` = 30 秒）。非法值回退到默认值并记录警告日志。环境变量覆盖：`PI_ACP_DELEGATE_SYNC_TIMEOUT_MINUTES`（`0` 禁用）。
+
+### `delegate.idleTimeoutMinutes`
+
+- **类型：** number（分钟，支持小数）或 `0` / `null`
+- **默认值：** `5`
+- **状态：** 🟢 ACTIVE
+- **说明：** 异步 delegate 子进程的闲置看门狗：若子进程在该时长内**没有任何输出**，即视为挂死并强制结束。这是防止卡住的子进程长期占用 stdout 管道的主要防线。设为 `0`（或 `null`）可禁用它——ACP 会记录一条醒目的警告；`acp_delegate_cancel` 仍可作为手动逃生通道。支持小数分钟。非法值回退到默认值并记录警告日志。环境变量覆盖：`PI_ACP_DELEGATE_IDLE_TIMEOUT_MINUTES`（`0` 禁用）。
+
+### `delegate.asyncTimeoutMinutes`
+
+- **类型：** number（分钟，支持小数）或 `0` / `null`
+- **默认值：** `30`
+- **状态：** 🟢 ACTIVE
+- **说明：** **异步** delegate 子进程的绝对硬上限，与是否活跃无关。设为 `0`（或 `null`）可让长任务不受绝对上限约束——闲置看门狗仍然生效（除非另行禁用）。支持小数分钟。非法值回退到默认值并记录警告日志。环境变量覆盖：`PI_ACP_DELEGATE_ASYNC_TIMEOUT_MINUTES`（`0` 禁用）。
 
 ---
 
@@ -412,3 +448,31 @@ provider 的 key 是 **Pi provider 名**(如 `"anthropic"`、`"openai"`、`"zhip
 - **默认值：** `~/.pi/acp.log`
 - **状态：** 🟢 ACTIVE
 - **说明：** 覆盖日志文件路径。默认情况下，结构化日志写入 `~/.pi/acp.log`（文件在 10MB 时轮转为 `~/.pi/acp.log.old`）。指向不同位置可为每个项目或每次运行保留独立日志。
+
+### `PI_ACP_DELEGATE_MAX_DEPTH`
+
+- **类型：** 整数 ≥ 1
+- **默认值：** *(未设置——遵循 `delegate.maxDepth`，再回退到 2)*
+- **状态：** 🟢 ACTIVE
+- **说明：** 不编辑配置文件，为单个会话覆盖 delegate 最大嵌套深度。优先于 `delegate.maxDepth`。解析后的值会被向下传递到整棵委派树。请勿在委派树中间手动设置它：这也是 ACP 用来把*生效限制*传入子进程的内部变量。
+
+### `PI_ACP_DELEGATE_SYNC_TIMEOUT_MINUTES`
+
+- **类型：** number（分钟）或 `0`
+- **默认值：** *(未设置——遵循 `delegate.syncTimeoutMinutes`，再回退到 5)*
+- **状态：** 🟢 ACTIVE
+- **说明：** 覆盖同步 `acp_delegate` 的硬超时。设为 `0` 可为单个会话禁用同步硬超时。优先于 `delegate.syncTimeoutMinutes`。
+
+### `PI_ACP_DELEGATE_IDLE_TIMEOUT_MINUTES`
+
+- **类型：** number（分钟）或 `0`
+- **默认值：** *(未设置——遵循 `delegate.idleTimeoutMinutes`，再回退到 5)*
+- **状态：** 🟢 ACTIVE
+- **说明：** 覆盖异步闲置看门狗的时间窗。设为 `0` 可为单个会话禁用闲置看门狗（ACP 会记录警告；`acp_delegate_cancel` 仍可作为手动逃生通道）。优先于 `delegate.idleTimeoutMinutes`。
+
+### `PI_ACP_DELEGATE_ASYNC_TIMEOUT_MINUTES`
+
+- **类型：** number（分钟）或 `0`
+- **默认值：** *(未设置——遵循 `delegate.asyncTimeoutMinutes`，再回退到 30)*
+- **状态：** 🟢 ACTIVE
+- **说明：** 覆盖异步 delegate 子进程的绝对硬上限。设为 `0` 可让长任务不受绝对上限约束（闲置看门狗仍然生效，除非另行禁用）。优先于 `delegate.asyncTimeoutMinutes`。

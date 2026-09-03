@@ -4,7 +4,8 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildChildArgs, delegateSpawnOptions, injectedWaitMessage, buildWaitResult, buildCancelResult, getDelegateUsage, resetDelegateUsage, injectResult, effectiveExitCode, formatRunResult, resolveWaitTimeoutMs, findUndeliveredRuns, undeliveredNoticeFrom, buildRecoveryNotice, makeDelegateTool, exitLabel, cancelledFileNote, delegateStdinText, readActivityTail, scheduleRunNotification, flushDelegateNotifications, formatBatchRunSection } from "../src/delegate-tool.js";
+import { buildChildArgs, delegateSpawnOptions, injectedWaitMessage, buildWaitResult, buildCancelResult, getDelegateUsage, resetDelegateUsage, injectResult, effectiveExitCode, formatRunResult, resolveWaitTimeoutMs, findUndeliveredRuns, undeliveredNoticeFrom, buildRecoveryNotice, makeDelegateTool, exitLabel, cancelledFileNote, delegateStdinText, readActivityTail, scheduleRunNotification, flushDelegateNotifications, formatBatchRunSection, setDelegatePolicy, delegateChildEnv, asyncWatchdogDescription } from "../src/delegate-tool.js";
+import { DEFAULT_DELEGATE_POLICY } from "../src/config.js";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 /** Minimal ctx mock - buildChildArgs reads ctx.model and sessionManager. */
@@ -806,4 +807,63 @@ test("formatBatchRunSection carries the timeout note and error excerpt", () => {
   const ok = formatBatchRunSection(mkRun("del_ok", "completed", { result: { code: 0, file: "/tmp/del_ok.out", body: "hidden" } }));
   assert.ok(ok.includes("[acp_delegate completed]"), "completed status");
   assert.ok(!ok.includes("hidden"), "completed runs carry no body");
+});
+
+// ─── #279: configurable maxDepth + timeouts ─────────────────────────────────
+
+test("depth gate honors configured maxDepth (rejection paths, no spawn)", async () => {
+  const pi = { sendUserMessage: () => {} } as unknown as Parameters<typeof makeDelegateTool>[0];
+  const tool = makeDelegateTool(pi);
+  const ctx = { ...mockCtx("pi"), mode: "tui", cwd: process.cwd() } as unknown as ExtensionContext;
+  const prev = process.env.PI_ACP_DELEGATE_DEPTH;
+  const textOf = (res: Awaited<ReturnType<typeof tool.execute>>): string => (res.content[0] as { text?: string }).text ?? "";
+  try {
+    setDelegatePolicy(DEFAULT_DELEGATE_POLICY);
+    process.env.PI_ACP_DELEGATE_DEPTH = "2";
+    let res = await tool.execute("tc-depth-a", { agent: "oracle", task: "x" }, undefined, undefined, ctx);
+    assert.match(textOf(res), /nesting limit reached \(depth 2, max 2\)/, "default maxDepth 2 rejects depth 2");
+
+    setDelegatePolicy({ ...DEFAULT_DELEGATE_POLICY, maxDepth: 1 });
+    process.env.PI_ACP_DELEGATE_DEPTH = "1";
+    res = await tool.execute("tc-depth-b", { agent: "oracle", task: "x" }, undefined, undefined, ctx);
+    assert.match(textOf(res), /nesting limit reached \(depth 1, max 1\)/, "maxDepth 1 rejects depth 1");
+
+    setDelegatePolicy({ ...DEFAULT_DELEGATE_POLICY, maxDepth: 3 });
+    process.env.PI_ACP_DELEGATE_DEPTH = "3";
+    res = await tool.execute("tc-depth-c", { agent: "oracle", task: "x" }, undefined, undefined, ctx);
+    assert.match(textOf(res), /nesting limit reached \(depth 3, max 3\)/, "maxDepth 3 rejects depth 3");
+  } finally {
+    if (prev === undefined) delete process.env.PI_ACP_DELEGATE_DEPTH;
+    else process.env.PI_ACP_DELEGATE_DEPTH = prev;
+    setDelegatePolicy(DEFAULT_DELEGATE_POLICY);
+  }
+});
+
+test("delegateChildEnv increments depth and propagates the maxDepth cap", () => {
+  const env = delegateChildEnv(1, 3);
+  assert.equal(env.PI_ACP_DELEGATE_DEPTH, "2", "child depth = parent + 1");
+  assert.equal(env.PI_ACP_DELEGATE_MAX_DEPTH, "3", "cap follows the delegation tree");
+  assert.equal(env.PATH, process.env.PATH, "parent env inherited");
+});
+
+test("asyncWatchdogDescription reflects the resolved policy", () => {
+  try {
+    setDelegatePolicy(DEFAULT_DELEGATE_POLICY);
+    assert.equal(
+      asyncWatchdogDescription(),
+      "A watchdog force-finishes a hung run: no output for 5m, 10s after output ends, or a 30m hard limit — the result reflects whatever was produced.",
+    );
+    setDelegatePolicy({ ...DEFAULT_DELEGATE_POLICY, idleMs: 10 * 60_000, asyncTimeoutMs: 90 * 60_000 });
+    assert.equal(
+      asyncWatchdogDescription(),
+      "A watchdog force-finishes a hung run: no output for 10m, 10s after output ends, or a 90m hard limit — the result reflects whatever was produced.",
+    );
+    setDelegatePolicy({ ...DEFAULT_DELEGATE_POLICY, idleMs: null, asyncTimeoutMs: null });
+    assert.equal(
+      asyncWatchdogDescription(),
+      "A watchdog force-finishes a hung run: 10s after output ends — the result reflects whatever was produced.",
+    );
+  } finally {
+    setDelegatePolicy(DEFAULT_DELEGATE_POLICY);
+  }
 });

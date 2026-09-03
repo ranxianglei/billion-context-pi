@@ -10,13 +10,13 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { CoreMessage, NudgeDecision, CompressionBlock, Prompts } from "acp-kernel";
 import { renderNudgeText, resolvePrompts, defaultPrompts, viableRanges } from "acp-kernel";
-import { type AdapterConfig, resolveDelegate } from "./config.js";
+import { type AdapterConfig, resolveDelegate, DEFAULT_DELEGATE_POLICY } from "./config.js";
 import { createRuntime, type AcpRuntime } from "./runtime.js";
 import { makeCompressTool, isCompressSuccessText, isCompressNoopText } from "./compress-tool.js";
 import { makeDecompressTool } from "./decompress-tool.js";
 import { makeSearchTool } from "./search-tool.js";
 import { makeStatusTool } from "./status-tool.js";
-import { makeDelegateTool, makeDelegateWaitTool, makeDelegateCancelTool, runningRunsSnapshot, resetDelegateUsage, setDelegateDisplayUsage } from "./delegate-tool.js";
+import { makeDelegateTool, makeDelegateWaitTool, makeDelegateCancelTool, runningRunsSnapshot, resetDelegateUsage, setDelegateDisplayUsage, setDelegatePolicy } from "./delegate-tool.js";
 import { makeCommands } from "./commands.js";
 import { coreOutToAgentMessages, extractText } from "./messages.js";
 import { buildAcpSystemPrompt, ACP_DELEGATE_PROMPT } from "./system-prompt.js";
@@ -137,6 +137,7 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
     runtime.clearCompressRetryTracking();
     resetDelegateUsage();
     setDelegateDisplayUsage("separate");
+    setDelegatePolicy(DEFAULT_DELEGATE_POLICY);
     const sid = ctx.sessionManager.getSessionId();
     // Model identity on every session start: diagnosing "which model loops
     // on compress rejections" from user logs required cwd forensics — the log
@@ -146,7 +147,9 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
     logInfo("session", { event: "start", sid, cwd: ctx.cwd, debug: runtime.adapter.debug ?? null, version: typeof CURRENT_VERSION !== "undefined" ? CURRENT_VERSION : null, model: modelInfo?.id ?? null, modelApi: modelInfo?.api ?? null, contextWindow: modelInfo?.contextWindow ?? null });
     try {
       await runtime.reloadConfig(ctx.cwd);
-      setDelegateDisplayUsage(resolveDelegate(runtime.adapter).displayUsage);
+      const delegateCfg = resolveDelegate(runtime.adapter);
+      setDelegateDisplayUsage(delegateCfg.displayUsage);
+      setDelegatePolicy(delegateCfg);
     } catch (e) {
       logThrow("config", e, { sid, phase: "session_start" });
     }

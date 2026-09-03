@@ -16,16 +16,13 @@ import type {
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { debug, logError, logInfo, logWarn } from "./log.js";
+import { DEFAULT_DELEGATE_POLICY, type DelegatePolicy } from "./config.js";
 import { attachWatchdogs } from "./delegate-watchdog.js";
 import { parseEventLine, activityLines, newPortion, ThinkingCollector, type Usage } from "./delegate-events.js";
 import { isPiHost } from "./runtime.js";
 
-const MAX_DEPTH = 2;
-const SYNC_TIMEOUT_MS = 5 * 60_000;
 const EOF_GRACE_MS = 10_000;
 const SETTLED_GRACE_MS = 10_000;
-const IDLE_GRACE_MS = 5 * 60_000;
-const ASYNC_TIMEOUT_MS = 30 * 60_000;
 const KILL_GRACE_MS = 10_000;
 const RESULT_SUMMARY_CHARS = 500;
 const OUT_DIR = join(tmpdir(), "acp-delegate");
@@ -55,6 +52,17 @@ export function delegateSpawnOptions(cwd: string, env: NodeJS.ProcessEnv): Spawn
     env,
     stdio: ["pipe", "pipe", "pipe"],
     shell: false,
+  };
+}
+
+/** Child process env for a nested delegate: depth increments by one, and the
+ *  resolved maxDepth rides along so the cap binds the whole delegation tree
+ *  even when the child loads a different project acp.json. */
+export function delegateChildEnv(parentDepth: number, maxDepth: number): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    PI_ACP_DELEGATE_DEPTH: String(parentDepth + 1),
+    PI_ACP_DELEGATE_MAX_DEPTH: String(maxDepth),
   };
 }
 
@@ -229,6 +237,12 @@ let delegateDisplayUsage: "merged" | "separate" = "separate";
 
 export function setDelegateDisplayUsage(mode: "merged" | "separate"): void {
   delegateDisplayUsage = mode;
+}
+
+let delegatePolicy: DelegatePolicy = DEFAULT_DELEGATE_POLICY;
+
+export function setDelegatePolicy(policy: DelegatePolicy): void {
+  delegatePolicy = policy;
 }
 
 
@@ -931,8 +945,9 @@ async function runDelegate(
     return `Unknown agent "${args.agent}". Choose one of: ${AGENT_NAMES.join(", ")}.`;
   }
   const parentDepth = Number(process.env.PI_ACP_DELEGATE_DEPTH ?? "0");
-  if (Number.isNaN(parentDepth) || parentDepth >= MAX_DEPTH) {
-    return `Delegate nesting limit reached (depth ${parentDepth}, max ${MAX_DEPTH}). The delegate cannot spawn further delegates.`;
+  const maxDepth = delegatePolicy.maxDepth;
+  if (Number.isNaN(parentDepth) || parentDepth >= maxDepth) {
+    return `Delegate nesting limit reached (depth ${parentDepth}, max ${maxDepth}). The delegate cannot spawn further delegates.`;
   }
   if (!args.task || !args.task.trim()) {
     if (!args.resumeFrom) {
@@ -956,10 +971,7 @@ async function runDelegate(
   const taskText = args.task?.trim() || (args.resumeFrom ? "(resumed — the original task is in the session history)" : "");
 
   const cwd = args.cwd && args.cwd.trim() ? args.cwd : ctx.cwd;
-  const childEnv = {
-    ...process.env,
-    PI_ACP_DELEGATE_DEPTH: String(parentDepth + 1),
-  };
+  const childEnv = delegateChildEnv(parentDepth, maxDepth);
   const runId = `del_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
   const { cliArgs, tmpDir, isAsync, useJsonStream, sessionFile } = await buildChildArgs(args, agent.prompt, ctx, runId);
   // One-shot modes (print/json = `pi -p` / SDK) exit after one turn, so async
@@ -1016,7 +1028,7 @@ async function runDelegate(
           debug.event("delegate-eof-grace", { runId, ms: EOF_GRACE_MS });
         },
       },
-      { eofGraceMs: EOF_GRACE_MS, idleMs: IDLE_GRACE_MS, timeoutMs: ASYNC_TIMEOUT_MS, killGraceMs: KILL_GRACE_MS },
+      { eofGraceMs: EOF_GRACE_MS, idleMs: delegatePolicy.idleMs, timeoutMs: delegatePolicy.asyncTimeoutMs, killGraceMs: KILL_GRACE_MS },
     );
     // Two stream files are fed from the --mode json event stream: text_delta
     // tokens go to the reply stream (.out), tool activity (and optionally
@@ -1212,14 +1224,14 @@ async function runDelegate(
       useJsonStream
         ? `Live activity is streaming to \`${activityFile}\` — read it anytime to watch the delegate work (tool calls and their output${args.showThinking ? ", plus thinking" : ""}).`
         : `The reply is streaming to \`${replyFile}\` — read it anytime to see partial output (this host has no json event mode, so tool activity is not visible).`,
-      `A watchdog force-finishes a hung run: no output for ${IDLE_GRACE_MS / 60_000}m, 10s after output ends, or a ${ASYNC_TIMEOUT_MS / 60_000}m hard limit — the result reflects whatever was produced.`,
+      asyncWatchdogDescription(),
       ``,
       `Call acp_delegate_wait({ runId: "${runId}" }) to block for the result (default 10s timeout). If the wait times out, or you skip it, a completion notification (with the result file path) is still injected here automatically when the delegate finishes — so you may also just continue other work now and let the result find you.`,
     ].join("\n");
   }
 
-  // Sync: block until the child finishes (bounded by a timeout).
-  const result = await waitForChild(child, signal);
+  // Sync: block until the child finishes (bounded by the configured timeout).
+  const result = await waitForChild(child, signal, delegatePolicy.syncTimeoutMs);
   void cleanupTmp(tmpDir);
   const body =
     result.timedOut || result.code !== 0
@@ -1298,7 +1310,7 @@ interface ChildResult {
   timedOut: boolean;
 }
 
-function waitForChild(child: ChildProcess, signal: AbortSignal | undefined): Promise<ChildResult> {
+function waitForChild(child: ChildProcess, signal: AbortSignal | undefined, timeoutMs: number | null): Promise<ChildResult> {
   return new Promise((resolve) => {
     const stdoutChunks: Buffer[] = [];
     let stderrText = "";
@@ -1307,19 +1319,22 @@ function waitForChild(child: ChildProcess, signal: AbortSignal | undefined): Pro
       stderrText += c.toString("utf8");
     });
 
-    const timer = setTimeout(() => {
-      child.kill("SIGTERM");
-      finish({ code: null, stdout: "", stderr: stderrText, timedOut: true });
-    }, SYNC_TIMEOUT_MS);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    if (timeoutMs !== null) {
+      timer = setTimeout(() => {
+        child.kill("SIGTERM");
+        finish({ code: null, stdout: "", stderr: stderrText, timedOut: true });
+      }, timeoutMs);
+    }
 
     const onAbort = () => {
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       child.kill("SIGTERM");
     };
     signal?.addEventListener("abort", onAbort, { once: true });
 
     function finish(r: ChildResult) {
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       signal?.removeEventListener("abort", onAbort);
       resolve(r);
     }
@@ -1337,6 +1352,23 @@ function waitForChild(child: ChildProcess, signal: AbortSignal | undefined): Pro
       finish({ code: null, stdout: "", stderr: err.message, timedOut: false });
     });
   });
+}
+
+function fmtMinutes(ms: number): string {
+  const m = ms / 60_000;
+  return Number.isInteger(m) ? `${m}m` : `${m.toFixed(1)}m`;
+}
+
+/** Model-facing summary of the ACTIVE async watchdog limits — built from the
+ *  resolved policy so it stays truthful when timeouts are customized or
+ *  disabled via acp.json/env. */
+export function asyncWatchdogDescription(): string {
+  const parts: string[] = [];
+  if (delegatePolicy.idleMs !== null) parts.push(`no output for ${fmtMinutes(delegatePolicy.idleMs)}`);
+  parts.push(`${EOF_GRACE_MS / 1000}s after output ends`);
+  if (delegatePolicy.asyncTimeoutMs !== null) parts.push(`a ${fmtMinutes(delegatePolicy.asyncTimeoutMs)} hard limit`);
+  const joined = parts.length > 1 ? `${parts.slice(0, -1).join(", ")}, or ${parts[parts.length - 1]}` : parts[0]!;
+  return `A watchdog force-finishes a hung run: ${joined} — the result reflects whatever was produced.`;
 }
 
 function formatSyncResult(agent: string, runId: string, task: string, r: ChildResult, file: string): string {

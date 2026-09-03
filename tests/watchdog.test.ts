@@ -15,7 +15,7 @@ interface Harness {
   watchdog: ReturnType<typeof attachWatchdogs>;
 }
 
-function setup(overrides?: { idleMs?: number; timeoutMs?: number; killGraceMs?: number; eofGraceMs?: number; initiallySettled?: boolean }): Harness {
+function setup(overrides?: { idleMs?: number | null; timeoutMs?: number | null; killGraceMs?: number; eofGraceMs?: number; initiallySettled?: boolean }): Harness {
   const stdout = new EventEmitter();
   const kills: NodeJS.Signals[] = [];
   const reasons: string[] = [];
@@ -38,8 +38,8 @@ function setup(overrides?: { idleMs?: number; timeoutMs?: number; killGraceMs?: 
     },
     {
       eofGraceMs: overrides?.eofGraceMs ?? 1_000,
-      idleMs: overrides?.idleMs ?? 1_000,
-      timeoutMs: overrides?.timeoutMs ?? 60_000,
+      idleMs: overrides?.idleMs !== undefined ? overrides.idleMs : 1_000,
+      timeoutMs: overrides?.timeoutMs !== undefined ? overrides.timeoutMs : 60_000,
       killGraceMs: overrides?.killGraceMs ?? 1_000,
     },
   );
@@ -169,5 +169,36 @@ test("settle before the grace fires stops the kill (normal exit path)", async ()
   h.settle();
   await sleep(220);
   assert.equal(h.kills.length, 0, "no kill once settled before grace");
+  h.watchdog.dispose();
+});
+
+// ─── #279: configurable timeouts — 0/null disables ──────────────────────────
+
+test("idleMs 0 disables the idle watchdog (silence never kills)", async () => {
+  const h = setup({ idleMs: 0, timeoutMs: 60_000 });
+  await sleep(80);
+  assert.equal(h.kills.length, 0, "no idle kill when disabled");
+  assert.equal(h.reasons.length, 0, "no onKill reason");
+  h.watchdog.dispose();
+});
+
+test("timeoutMs 0 disables the hard limit (poked child never killed)", async () => {
+  const h = setup({ idleMs: 400, timeoutMs: 0 });
+  for (let i = 0; i < 7; i++) {
+    await sleep(50);
+    h.watchdog.poke();
+  }
+  assert.equal(h.kills.length, 0, "no hard-limit kill while output keeps flowing");
+  h.settle();
+  h.watchdog.dispose();
+});
+
+test("both idleMs and timeoutMs null: only EOF grace remains", async () => {
+  const h = setup({ idleMs: null, timeoutMs: null, eofGraceMs: 30 });
+  await sleep(80);
+  assert.equal(h.kills.length, 0, "no time-based kill");
+  h.stdout.emit("end");
+  await sleep(60);
+  assert.equal(h.eofGraceCount, 1, "EOF grace still fires");
   h.watchdog.dispose();
 });
