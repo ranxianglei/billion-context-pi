@@ -110,8 +110,9 @@
 | `delegate.syncTimeoutMinutes` | number | `5` | 🟢 ACTIVE | **同步** `acp_delegate` 调用的硬超时（分钟）。`0` / `null` 禁用。 |
 | `delegate.idleTimeoutMinutes` | number | `5` | 🟢 ACTIVE | 异步 delegate 子进程的闲置看门狗——无输出超过该时长即强制结束。`0` / `null` 禁用。 |
 | `delegate.asyncTimeoutMinutes` | number | `30` | 🟢 ACTIVE | 异步 delegate 子进程的绝对硬上限（分钟）。`0` / `null` 禁用。 |
-=======
 | `delegate.maxConcurrent` | number | unlimited | 🟢 ACTIVE | 同时运行的后台（`async`）delegate 上限；超出的启动按 FIFO 排队，有空位时自动开始。`1` = 强制串行。可被 `PI_ACP_DELEGATE_MAX_CONCURRENT` 覆盖。 |
+| `delegate.thinkingLevel` | string | _（未设置）_ | 🟢 ACTIVE | delegate 全局默认 thinking level（per-call > 角色 > 全局 > Pi 默认）。 |
+| `delegate.agents` | object | _（未设置）_ | 🟢 ACTIVE | 按角色配置默认模型 + thinking level，以角色名为键。 |
 
 **provider 限流重试键**
 
@@ -243,7 +244,7 @@
 - **默认值：** `30`
 - **状态：** 🟢 ACTIVE
 - **说明：** **异步** delegate 子进程的绝对硬上限，与是否活跃无关。设为 `0`（或 `null`）可让长任务不受绝对上限约束——闲置看门狗仍然生效（除非另行禁用）。支持小数分钟。非法值回退到默认值并记录警告日志。环境变量覆盖：`PI_ACP_DELEGATE_ASYNC_TIMEOUT_MINUTES`（`0` 禁用）。
-=======
+
 ### `delegate.maxConcurrent`
 
 - **类型：** number（整数 ≥ 1）
@@ -251,6 +252,36 @@
 - **状态：** 🟢 ACTIVE
 - **环境变量覆盖：** `PI_ACP_DELEGATE_MAX_CONCURRENT`（优先于本键）
 - **说明：** 限制**同时运行**的后台（`async: true`）delegate 数量。达到上限后，后续启动进入 FIFO 队列，有空位时自动开始——不会丢弃，只是排队等待。设为 `1` 可强制严格串行执行（适合低性能机器上并行子代理争抢 CPU 而超时的场景）。同步（`async: false`）调用始终立即运行，不受此上限影响。无效值（非整数或 `< 1`）会带警告回退到 unlimited，而不是让会话失败。仅在 `delegate.enabled` 为 `true` 时有意义。
+
+### `delegate.thinkingLevel`
+
+- **类型：** 字符串枚举 `"off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"`
+- **默认值：** _（未设置——每个子进程使用 Pi 自身默认值）_
+- **状态：** 🟢 ACTIVE
+- **说明：** 全局默认 thinking level。当 per-call `thinkingLevel` 与角色自身的 `thinkingLevel`（见 `delegate.agents`）都未设置时生效。所有层级都未设置时不传 `--thinking`，每个子进程使用 Pi 自身默认值。非法值会被忽略并记录警告（不会导致运行失败）。per-call 的 `acp_delegate({ thinkingLevel })` 始终优先于该全局值。
+
+### `delegate.agents`
+
+- **类型：** 对象——角色名 → `{ model?, thinkingLevel? }` 的映射
+- **默认值：** _（未设置——所有角色继承父模型 + Pi 默认值）_
+- **状态：** 🟢 ACTIVE
+- **说明：** 按角色配置默认值，便于长期自动化为不同 delegate 角色固定更便宜或更强的模型与 thinking level，而无需主 Agent 每次调用都填写。键为角色名（`reviewer`、`researcher`、`worker`、`planner`、`oracle`，或任意自定义角色）。每个值可设置：
+  - `model`（`"provider/id"`）——该角色的默认模型。优先级：per-call `model` > 该角色的 `model` > 父 Agent 当前模型。非合法 `"provider/id"` 的值会被忽略。若配置的模型在当前 registry 中不存在，则回退到父模型并记录警告——绝不导致失败。
+  - `thinkingLevel`——该角色的默认 thinking level（枚举同 `delegate.thinkingLevel`）。优先级：per-call > 角色 > 全局。
+
+```jsonc
+{
+  "delegate": {
+    "thinkingLevel": "low",
+    "agents": {
+      "reviewer": { "model": "opencode-go/deepseek-v4-flash", "thinkingLevel": "high" },
+      "worker":   { "model": "anthropic/claude-sonnet-4-5" },
+      "oracle":   { "model": "openai/gpt-5", "thinkingLevel": "xhigh" }
+    }
+  }
+}
+```
+
 
 ---
 
@@ -486,7 +517,7 @@ provider 的 key 是 **Pi provider 名**(如 `"anthropic"`、`"openai"`、`"zhip
 - **默认值：** *(未设置——遵循 `delegate.asyncTimeoutMinutes`，再回退到 30)*
 - **状态：** 🟢 ACTIVE
 - **说明：** 覆盖异步 delegate 子进程的绝对硬上限。设为 `0` 可让长任务不受绝对上限约束（闲置看门狗仍然生效，除非另行禁用）。优先于 `delegate.asyncTimeoutMinutes`。
-=======
+
 ### `PI_ACP_DELEGATE_MAX_CONCURRENT`
 
 - **类型：** integer（≥ 1）

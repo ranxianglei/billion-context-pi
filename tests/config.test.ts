@@ -261,6 +261,35 @@ test("resolveDelegate: maxConcurrent env > acp.json > unlimited, invalid env fal
   );
 });
 
+test("resolveDelegate: object exposes thinkingLevel + per-role agents", () => {
+  const r = resolveDelegate({
+    delegate: {
+      thinkingLevel: "medium",
+      agents: {
+        reviewer: { model: "openai/gpt-5", thinkingLevel: "high" },
+        worker: { model: "anthropic/claude-5" },
+      },
+    },
+  });
+  assert.equal(r.enabled, true);
+  assert.equal(r.thinkingLevel, "medium");
+  assert.deepEqual(r.agents?.reviewer, { model: "openai/gpt-5", thinkingLevel: "high" });
+  assert.deepEqual(r.agents?.worker, { model: "anthropic/claude-5" });
+});
+
+test("resolveDelegate: boolean shorthand leaves thinkingLevel/agents undefined", () => {
+  const r = resolveDelegate({ delegate: true });
+  assert.equal(r.enabled, true);
+  assert.equal(r.thinkingLevel, undefined);
+  assert.equal(r.agents, undefined);
+});
+
+test("resolveDelegate: unset thinkingLevel/agents on object stay undefined", () => {
+  const r = resolveDelegate({ delegate: { enabled: true } });
+  assert.equal(r.thinkingLevel, undefined);
+  assert.equal(r.agents, undefined);
+});
+
 test("resolveCompress returns {} when no compress configured", () => {
   assert.deepEqual(resolveCompress(undefined, "anthropic", "claude"), {});
 });

@@ -2,6 +2,23 @@ import { defaultConfig, type Config, type Prompts } from "acp-kernel";
 import type { ThrottleRetryConfig } from "./throttle-retry.js";
 import { logWarn } from "./log.js";
 
+/** Per-role delegate defaults. Lets long-lived automation pin a cheaper or
+ *  more capable model and a thinking level per delegate role, so the main
+ *  agent doesn't have to fill them in on every `acp_delegate()` call. */
+export interface DelegateRoleConfig {
+  /** Default model for this role, as `"provider/id"`. Resolution priority:
+   *  per-call `model` > this role default > parent agent's current model. A
+   *  value that isn't a valid `"provider/id"` is ignored (treated as unset).
+   *  If the configured model doesn't exist in the live registry, the child
+   *  falls back to the parent model and a warning is logged — it never fails. */
+  model?: string;
+  /** Default thinking level for this role: one of off|minimal|low|medium|
+   *  high|xhigh|max. Resolution priority: per-call `thinkingLevel` > this role
+   *  default > global `delegate.thinkingLevel` > Pi's own default. An invalid
+   *  value is ignored with a warning (never fails). */
+  thinkingLevel?: string;
+}
+
 /** Delegate sub-agent configuration. */
 export interface DelegateConfig {
   /** Enable acp_delegate tools (delegate/wait/cancel) and their system-prompt
@@ -39,6 +56,15 @@ export interface DelegateConfig {
    *  back to unlimited with a warning. Env `PI_ACP_DELEGATE_MAX_CONCURRENT`
    *  overrides this. See #294. */
   maxConcurrent?: number;
+  /** Global default thinking level applied to every delegate when neither the
+   *  per-call `thinkingLevel` nor the role's own `thinkingLevel` is set. One of
+   *  off|minimal|low|medium|high|xhigh|max. When unset at all levels, no
+   *  `--thinking` flag is passed and each child uses Pi's own default. */
+  thinkingLevel?: string;
+  /** Per-role defaults keyed by role name (reviewer/researcher/worker/planner/
+   *  oracle, or any custom role). See DelegateRoleConfig. Only affects roles
+   *  that are named here; other roles inherit the parent model + Pi defaults. */
+  agents?: Record<string, DelegateRoleConfig>;
 }
 
 /** Resolved delegate policy: what actually takes effect after merging acp.json,
@@ -53,6 +79,10 @@ export interface DelegatePolicy {
   asyncTimeoutMs: number | null;
   /** Resolved cap on concurrent background delegates; Infinity = unlimited. */
   maxConcurrent: number;
+  /** Global default thinking level (undefined when unset). */
+  thinkingLevel?: string;
+  /** Per-role defaults keyed by role name (undefined when unset). */
+  agents?: Record<string, DelegateRoleConfig>;
 }
 
 export const DEFAULT_DELEGATE_POLICY: DelegatePolicy = {
@@ -205,7 +235,7 @@ export function resolveDelegate(adapter: AdapterConfig): DelegatePolicy {
       hint: "no-output watchdog is off; hung async runs must be cancelled manually via acp_delegate_cancel",
     });
   }
-  return { enabled, displayUsage, maxDepth, syncTimeoutMs, idleMs, asyncTimeoutMs, maxConcurrent };
+  return { enabled, displayUsage, maxDepth, syncTimeoutMs, idleMs, asyncTimeoutMs, maxConcurrent, thinkingLevel: cfg.thinkingLevel, agents: cfg.agents };
 }
 
 function resolveMaxDepth(value: number | string | undefined): number {

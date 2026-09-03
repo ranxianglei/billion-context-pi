@@ -16,7 +16,7 @@ import type {
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { debug, logError, logInfo, logWarn } from "./log.js";
-import { DEFAULT_DELEGATE_POLICY, type DelegatePolicy } from "./config.js";
+import { DEFAULT_DELEGATE_POLICY, type DelegatePolicy, type DelegateRoleConfig } from "./config.js";
 import { attachWatchdogs } from "./delegate-watchdog.js";
 import { parseEventLine, activityLines, newPortion, ThinkingCollector, type Usage } from "./delegate-events.js";
 import { isPiHost } from "./runtime.js";
@@ -307,6 +307,38 @@ export class ConcurrencyGate {
 }
 
 const delegateGate = new ConcurrencyGate(() => delegatePolicy.maxConcurrent);
+// Per-role / global model + thinking defaults, resolved once at session_start
+// from adapter.delegate. buildChildArgs reads them at spawn time. Kept as module
+// state (mirroring delegateDisplayUsage) so buildChildArgs stays testable without
+// threading config through every call site.
+let delegateDefaults: { thinkingLevel?: string; agents?: Record<string, DelegateRoleConfig> } = {};
+
+export function setDelegateDefaults(d: { thinkingLevel?: string; agents?: Record<string, DelegateRoleConfig> } | undefined): void {
+  delegateDefaults = d ?? {};
+}
+
+export function resetDelegateDefaults(): void {
+  delegateDefaults = {};
+}
+
+const VALID_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+
+export function isValidThinkingLevel(v: unknown): v is (typeof VALID_THINKING_LEVELS)[number] {
+  return typeof v === "string" && (VALID_THINKING_LEVELS as readonly string[]).includes(v);
+}
+
+function pickFirstDefined(values: (string | undefined)[]): string | undefined {
+  for (const v of values) {
+    if (typeof v === "string" && v.trim() !== "") return v;
+  }
+  return undefined;
+}
+
+function normalizeModelRef(m: string | undefined): string | undefined {
+  if (!m) return undefined;
+  const s = m.trim();
+  return s.includes("/") ? s : undefined;
+}
 
 
 /** Snapshot of currently-running delegate runs, for the TUI status widget. */
@@ -509,7 +541,10 @@ const DelegateParams = Type.Object({
     Type.String({ description: "Working directory for the delegate (default: current project dir)." }),
   ),
   model: Type.Optional(
-    Type.String({ description: 'Model override as "provider/id" (default: inherit current model).' }),
+    Type.String({ description: 'Model override as "provider/id". Default: this role\'s configured model (delegate.agents.<role>.model), else inherit the current model.' }),
+  ),
+  thinkingLevel: Type.Optional(
+    Type.String({ description: `Per-call thinking-level override: ${VALID_THINKING_LEVELS.join("|")}. Default: this role's configured level, else the global delegate.thinkingLevel, else Pi's own default.` }),
   ),
   async: Type.Optional(
     Type.Boolean({
@@ -1477,13 +1512,67 @@ export async function buildChildArgs(
     cliArgs.push("--tools", merged.join(","));
   }
 
-  if (args.model && args.model.includes("/")) {
-    const [providerId, ...rest] = args.model.split("/");
-    const modelId = rest.join("/");
-    cliArgs.push("--provider", providerId!, "--model", modelId);
-  } else if (ctx.model) {
-    // Inherit the parent's current model so the delegate runs on the same one.
-    cliArgs.push("--provider", ctx.model.provider, "--model", ctx.model.id);
+  // Model: per-call > role default (delegate.agents.<role>.model) > inherit parent.
+  // A role-configured model is validated against the live registry; a missing one
+  // falls back to the parent model with a warning and never fails (omo lesson).
+  // Per-call and inherited models pass through untouched — a per-call override is a
+  // deliberate choice that may name a custom/non-catalog model pi resolves itself.
+  const roleCfg = delegateDefaults.agents?.[args.agent];
+  const callModel = normalizeModelRef(args.model);
+  const roleModel = normalizeModelRef(roleCfg?.model);
+  const parentProvider = ctx.model?.provider;
+  const parentModelId = ctx.model?.id;
+
+  let provider: string | undefined;
+  let modelId: string | undefined;
+  let source: "call" | "role" | "inherit" = "inherit";
+  if (callModel) {
+    const parts = callModel.split("/");
+    provider = parts[0];
+    modelId = parts.slice(1).join("/");
+    source = "call";
+  } else if (roleModel) {
+    const parts = roleModel.split("/");
+    provider = parts[0];
+    modelId = parts.slice(1).join("/");
+    source = "role";
+  } else if (parentProvider !== undefined && parentModelId !== undefined) {
+    provider = parentProvider;
+    modelId = parentModelId;
+  }
+
+  if (source === "role" && provider !== undefined && modelId !== undefined) {
+    const registry = ctx.modelRegistry;
+    const found = registry ? registry.find(provider, modelId) : undefined;
+    if (!found) {
+      logWarn("delegate", {
+        event: "role-model-missing",
+        agent: args.agent,
+        requested: `${provider}/${modelId}`,
+        fallback: parentProvider !== undefined ? `${parentProvider}/${parentModelId}` : null,
+      });
+      if (parentProvider !== undefined && parentModelId !== undefined) {
+        provider = parentProvider;
+        modelId = parentModelId;
+        source = "inherit";
+      }
+    }
+  }
+
+  if (provider !== undefined && modelId !== undefined) {
+    cliArgs.push("--provider", provider, "--model", modelId);
+  }
+
+  // Thinking level: per-call > role default > global default > (none = Pi default).
+  // Only the highest-priority defined value is used; an invalid value warns and is
+  // dropped rather than cascading to a lower-priority one.
+  const thinkingPick = pickFirstDefined([args.thinkingLevel, roleCfg?.thinkingLevel, delegateDefaults.thinkingLevel]);
+  if (thinkingPick !== undefined) {
+    if (isValidThinkingLevel(thinkingPick)) {
+      cliArgs.push("--thinking", thinkingPick);
+    } else {
+      logWarn("delegate", { event: "invalid-thinking-level", agent: args.agent, value: thinkingPick });
+    }
   }
 
   return { cliArgs, tmpDir, isAsync, useJsonStream, sessionFile };
