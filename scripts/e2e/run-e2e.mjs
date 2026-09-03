@@ -149,11 +149,11 @@ function writePiConfig(home) {
     },
   };
   fs.writeFileSync(path.join(home, ".pi", "agent", "models.json"), JSON.stringify(models, null, 2));
-  fs.writeFileSync(path.join(home, ".pi", "acp.json"), JSON.stringify({ autoUpdate: false, debug: false }, null, 2));
+  fs.writeFileSync(path.join(home, ".pi", "agent", "acp.json"), JSON.stringify({ autoUpdate: false, debug: false }, null, 2));
 }
 
 function applyScenarioAcpConfig(scenarioPath, home) {
-  const acpPath = path.join(home, ".pi", "acp.json");
+  const acpPath = path.join(home, ".pi", "agent", "acp.json");
   const base = JSON.parse(fs.readFileSync(acpPath, "utf8"));
   const scenario = JSON.parse(fs.readFileSync(scenarioPath, "utf8"));
   const merged = Object.assign({}, base, scenario.acpConfig || {});

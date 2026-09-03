@@ -14,18 +14,20 @@ Settings are read from JSON files named `acp.json`. The global file applies to e
 
 | Scope | Path | Applies to |
 |-------|------|------------|
-| **Global** | `~/.pi/acp.json` | All projects on this machine |
-| **Project** | `<project>/.pi/acp.json` | The current project only (overrides global per-field) |
+| **Global** | `~/.pi/agent/acp.json` | All projects on this machine |
+| **Project** | `<project>/.pi/agent/acp.json` | The current project only (overrides global per-field) |
 
-> **Precedence:** Environment variable &gt; Project file &gt; Global file &gt; Built-in default.
+> **Precedence:** Environment variable &gt; Project file &gt; Global file &gt; Built-in default. Within a scope, the new (agent-dir) location wins over the legacy location when both are present.
 
 Files are loaded at session start. Missing files, malformed JSON, and unknown keys are silently ignored — the extension never fails to start because of a config issue. Only the documented keys are read; everything else is discarded.
+
+> **Legacy locations (backward compatible):** `~/.pi/acp.json` (global) and `<project>/.pi/acp.json` (project) are still read when the new location is absent, so existing setups keep working unchanged. To move an existing config, copy the file to the new location (e.g. `cp ~/.pi/acp.json ~/.pi/agent/acp.json`); the new location then takes precedence. No files are written automatically.
 
 ---
 
 ## Quick start
 
-Create `~/.pi/acp.json` (or `<project>/.pi/acp.json`) and drop in whichever keys you want to change. Every field below is optional — omit a key to keep its default.
+Create `~/.pi/agent/acp.json` (or `<project>/.pi/agent/acp.json`) and drop in whichever keys you want to change. Every field below is optional — omit a key to keep its default.
 
 ```json
 {

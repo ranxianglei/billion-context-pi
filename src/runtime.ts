@@ -76,9 +76,10 @@ export interface AcpRuntime {
   clearCompressRetryTracking(): void;
   liveContextLimit(ctx: ExtensionContext): number;
   configFor(ctx: ExtensionContext): Config;
-  /** Re-read ~/.<dir>/acp.json + <cwd>/<dir>/acp.json and re-derive the adapter
-   *  config when the contents change. Cheap no-op when unchanged. Called at
-   *  session_start and on every context event so config edits apply live. */
+  /** Re-read <agentDir>/acp.json + <cwd>/.pi/agent/acp.json (legacy ~/.pi/acp.json
+   *  and <cwd>/.pi/acp.json still honored) and re-derive the adapter config when
+   *  the contents change. Cheap no-op when unchanged. Called at session_start and
+   *  on every context event so config edits apply live. */
   reloadConfig(cwd: string): Promise<void>;
   stateFor(ctx: ExtensionContext, liveMessages?: AgentMessage[]): Promise<{ state: CompressionState; coreMessages: ReturnType<typeof entriesToCoreMessages>; entries: SessionEntry[] }>;
   save(state: CompressionState, ctx: ExtensionContext): Promise<void>;

@@ -111,7 +111,8 @@ export interface AdapterConfig {
   /** Override acp-kernel's load-bearing compression prompt rules (the 4
    *  Prompts fields). Each set field replaces the kernel default verbatim.
    *  Requires acknowledgePromptsRisk: true — without it, overrides are dropped
-   *  (defaults used) and a warning is logged. Set via ~/.pi/acp.json. */
+   *  (defaults used) and a warning is logged. Set via acp.json (see
+   *  CONFIGURATION.md for locations). */
   prompts?: Partial<Prompts>;
   /** Must be true for `prompts` overrides to take effect. Acknowledges that
    *  replacing the kernel's tuned compression rules may reduce summary quality

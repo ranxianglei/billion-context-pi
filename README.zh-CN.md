@@ -166,7 +166,7 @@ billion-context-pi 自带的 `acp_delegate` 工具可独立工作。如果你另
 
 billion-context-pi 开箱即用,无需任何配置——它会自动读取模型的上下文窗口并应用合理的默认值。
 
-行为通过可选的 `acp.json` 配置文件(`~/.pi/acp.json` 为全局默认,`<项目>/.pi/acp.json` 为项目级覆盖)以及若干环境变量来调优。完整参考——每个 key、类型、默认值与优先级顺序——请查阅 **[CONFIGURATION.zh-CN.md](./CONFIGURATION.zh-CN.md)** ([English](./CONFIGURATION.md))。
+行为通过可选的 `acp.json` 配置文件(`~/.pi/agent/acp.json` 为全局默认,`<项目>/.pi/agent/acp.json` 为项目级覆盖)以及若干环境变量来调优。旧位置(`~/.pi/acp.json`、`<项目>/.pi/acp.json`)在新位置不存在时仍会被读取(向后兼容)。完整参考——每个 key、类型、默认值与优先级顺序——请查阅 **[CONFIGURATION.zh-CN.md](./CONFIGURATION.zh-CN.md)** ([English](./CONFIGURATION.md))。
 
 ### 日志
 

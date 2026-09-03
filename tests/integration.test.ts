@@ -733,9 +733,10 @@ test("delegate:false omits the ACP_DELEGATE NOTIFICATIONS section from the syste
   assert.ok(result.systemPrompt.includes("ACP TAGS"), "core ACP prompt still present when delegate disabled");
 });
 
-// ─── ISSUE-9: modelContextLimit changes in <cwd>/.pi/acp.json hot-reload ──
+// ─── ISSUE-9: modelContextLimit hot-reload (legacy <cwd>/.pi/acp.json path,
+// ─── verifying backward compatibility — legacy project config is still read) ─
 
-test("modelContextLimit changes in .pi/acp.json are picked up on the next context event", async () => {
+test("modelContextLimit changes in legacy .pi/acp.json are picked up on the next context event", async () => {
   (globalThis as Record<string, unknown>).CURRENT_VERSION ??= "0.0.0-test";
   const { mkdtempSync, writeFileSync, rmSync, mkdirSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");

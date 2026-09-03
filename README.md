@@ -168,7 +168,7 @@ It discovers the agents and their tool baselines from the installed pi-subagents
 
 billion-context-pi works out of the box with no configuration — it reads your model's context window automatically and applies sensible defaults.
 
-Behavior is tuned via an optional `acp.json` config file (`~/.pi/acp.json` for global defaults, `<project>/.pi/acp.json` for per-project overrides) plus a few environment variables. For the complete reference — every key, type, default, and the precedence order — see **[CONFIGURATION.md](./CONFIGURATION.md)** ([中文](./CONFIGURATION.zh-CN.md)).
+Behavior is tuned via an optional `acp.json` config file (`~/.pi/agent/acp.json` for global defaults, `<project>/.pi/agent/acp.json` for per-project overrides) plus a few environment variables. The legacy locations (`~/.pi/acp.json`, `<project>/.pi/acp.json`) are still read for backward compatibility when the new one is absent. For the complete reference — every key, type, default, and the precedence order — see **[CONFIGURATION.md](./CONFIGURATION.md)** ([中文](./CONFIGURATION.zh-CN.md)).
 
 ### Logging
 
