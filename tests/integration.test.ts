@@ -733,6 +733,15 @@ test("delegate:false omits the ACP_DELEGATE NOTIFICATIONS section from the syste
   assert.ok(result.systemPrompt.includes("ACP TAGS"), "core ACP prompt still present when delegate disabled");
 });
 
+test("delegate:{enabled:false} omits the ACP_DELEGATE NOTIFICATIONS section from the system prompt", () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ delegate: { enabled: false } })(api as any);
+  const result = handlers.get("before_agent_start")![0]!({ systemPrompt: "" }, {});
+  assert.ok(!result.systemPrompt.includes("ACP_DELEGATE NOTIFICATIONS"), "delegate section omitted when delegate:{enabled:false}");
+  // Core ACP prompt is still present — only the delegate section is dropped.
+  assert.ok(result.systemPrompt.includes("ACP TAGS"), "core ACP prompt still present when delegate disabled");
+});
+
 // ─── ISSUE-9: modelContextLimit changes in <cwd>/.pi/acp.json hot-reload ──
 
 test("modelContextLimit changes in .pi/acp.json are picked up on the next context event", async () => {

@@ -410,7 +410,7 @@ function wireSystemPrompt(pi: ExtensionAPI, runtime: AcpRuntime): void {
     // Refused host (OMP): don't inject the ACP system prompt — the model must
     // not learn about compress/decompress on a host where they can't work.
     if (runtime.refused) return;
-    const delegate = runtime.adapter.delegate !== false;
+    const delegate = resolveDelegate(runtime.adapter).enabled;
     const acp = buildAcpSystemPrompt(runtime.prompts);
     const prompt = delegate ? `${acp}\n${ACP_DELEGATE_PROMPT}` : acp;
     return { systemPrompt: formatSystemPromptForEvent(event.systemPrompt, prompt) };
