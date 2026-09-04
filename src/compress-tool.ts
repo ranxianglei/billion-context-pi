@@ -8,7 +8,7 @@ import type { AcpRuntime } from "./runtime.js";
 import { MAX_COMPRESS_ATTEMPTS } from "./runtime.js";
 import { debug, logError, logInfo, logThrow, logWarn } from "./log.js";
 import { estimateTokens, collectCoveredMessageIds, collectImageTokens, modelSupportsImages, lastUserMessageId } from "./tokens.js";
-import { defaultCountTokens, parseCompressArgs, viableRanges, formatRanges, type CompressionBlock, type CompressionState, type CompressParseDiagnostics, type NudgeDecision } from "acp-kernel";
+import { defaultCountTokens, viableRanges, formatRanges, type CompressionBlock, type CompressionState, type NudgeDecision } from "acp-kernel";
 import { getSystemPromptText } from "./compat.js";
 import { OMP_UNSUPPORTED_MESSAGE } from "./omp.js";
 
@@ -25,16 +25,7 @@ const RangeSpec = Type.Object({
 
 const CompressParams = Type.Object({
   topic: Type.Optional(Type.String({ description: "Fallback topic for entries without their own. Omit when each content entry specifies its own topic." })),
-  content: Type.Union([
-    Type.Array(RangeSpec),
-    // Non-strict-tool providers (vLLM openai-completions, supportsStrictTools:
-    // false) sometimes stringify nested array arguments — session
-    // 01a00a38 died on exactly this: pi's typebox validation rejected
-    // "[{\"topic\":...}]" with "content.0: must be object" and the turn's
-    // only compress attempt was lost. Accept the JSON-encoded form and parse
-    // it in normalizeRanges below.
-    Type.String({ description: "JSON-encoded array of ranges — accepted because non-strict-tool providers sometimes stringify array arguments; parsed automatically." }),
-  ], { description: "One or more ranges to compress, each with start/end boundaries and a summary. When compressing multiple unrelated ranges in one call, give each its own topic." }),
+  content: Type.Array(RangeSpec, { description: "One or more ranges to compress, each with start/end boundaries and a summary. When compressing multiple unrelated ranges in one call, give each its own topic." }),
   summaryMaxChars: Type.Optional(Type.Number({ description: "Override max summary length (default max: 20000 chars). Use when content is important and needs more detail — don't lose critical info just to fit the limit." })),
 });
 
@@ -70,84 +61,23 @@ export function makeCompressTool(runtime: AcpRuntime): ToolDefinition<typeof Com
 
 type RangeEntry = Static<typeof RangeSpec>;
 
-// Normalize the compress args via the kernel's lenient parser (fenced /
-// trailing-comma / raw-newline / double-stringified / truncated-salvage).
-// Returns an error string on bad input — handleCompress THROWS it so pi marks
-// the toolResult isError:true, which is what makes the outcome count toward
-// the failure cap (a returned string would land as isError:false and count
-// as neutral). An empty array passes through (the call site returns "No
-// ranges provided.").
+// Array-only (JSON-string form removed per #273). Returns an error string on
+// bad input — handleCompress throws it so pi marks the result isError:true and
+// it counts toward the failure cap. The Array.isArray guard is defensive for
+// direct execute() callers (tests) that bypass pi's typebox validation.
 export function normalizeRanges(args: CompressArgs): RangeEntry[] | string {
-  const effective = repairContentTail(args);
-  const { ranges, diagnostics } = parseCompressArgs(effective);
-  if (ranges.length === 0) {
-    if (Array.isArray(effective.content) && effective.content.length === 0) return [];
-    return describeDiagnostics(diagnostics, effective.content);
+  const content = args.content;
+  if (!Array.isArray(content)) {
+    return `Invalid compress content: content must be an ARRAY of {startId, endId, summary} objects — JSON-encoded string arrays are no longer accepted, pass the array directly. Got ${typeof content}.`;
   }
-  return ranges.map((r) => ({ startId: r.startRef, endId: r.endRef, summary: r.summary, topic: r.topic }));
-}
-
-// Qwen-family models in non-strict tool-call mode sometimes emit the `content`
-// array as a JSON-encoded string whose LAST entry object is missing its closing
-// `}` (tail `"]` instead of `"}]`). The kernel's lenient parser then drops that
-// last range — or every range, when it is the only one — and reports a
-// misleading "truncated"/"no-valid-ranges" diagnostic. Repair the brace before
-// delegating so the whole array parses. Args are returned unchanged when the
-// repair does not apply.
-function repairContentTail(args: CompressArgs): CompressArgs {
-  if (typeof args.content !== "string") return args;
-  const repaired = tailRepair(args.content);
-  return repaired === undefined ? args : { ...args, content: repaired };
-}
-
-// Deterministic tail-repair: if the trimmed string ends with `"]` and the char
-// before it is a closing `"`, retry the parse with `"}]` appended. A valid JSON
-// array never still parses after appending `}`, so this has no false positives.
-export function tailRepair(s: string): string | undefined {
-  const t = s.trimEnd();
-  if (!t.endsWith("]")) return undefined;
-  const body = t.slice(0, -1).trimEnd();
-  if (!body.endsWith('"')) return undefined;
-  const candidate = body + "}]";
-  try {
-    if (Array.isArray(JSON.parse(candidate))) return candidate;
-  } catch {
-    // not the missing-brace case
+  if (content.length === 0) return [];
+  for (let i = 0; i < content.length; i++) {
+    const r = content[i];
+    if (!r || typeof r !== "object" || typeof r.startId !== "string" || typeof r.endId !== "string" || typeof r.summary !== "string") {
+      return `Invalid compress content: entry ${i} is not a valid range. Each range must be an object with string fields startId, endId, summary.`;
+    }
   }
-  return undefined;
-}
-
-function describeDiagnostics(diagnostics: CompressParseDiagnostics, content: CompressArgs["content"]): string {
-  const shape = typeof content === "string"
-    ? "a JSON-encoded string (non-strict-tool providers stringify array arguments)"
-    : content === null ? "null" : `a ${typeof content}`;
-  const base = `Invalid compress content (${diagnostics.kind}): got ${shape}`;
-  if (diagnostics.kind === "truncated") {
-    return `${base}; the input was truncated and no complete ranges could be recovered. Shorten the summary or split into smaller ranges.`;
-  }
-  if (diagnostics.invalidItems > 0) {
-    return `${base}; ${diagnostics.invalidItems} entr${diagnostics.invalidItems === 1 ? "y was" : "ies were"} dropped as invalid. Each range must be an object with string fields startId, endId, summary.`;
-  }
-  const parseErr = jsonParseError(content);
-  if (parseErr !== undefined) {
-    return `${base}; the JSON failed to parse: ${parseErr}. Fix the malformed JSON (e.g. a missing closing brace or quote) and retry.`;
-  }
-  return `${base}. content must be an ARRAY of {startId, endId, summary} objects.`;
-}
-
-// Short diagnostic for why a JSON-shaped string fails to parse, or undefined
-// when it parses fine or is not JSON-shaped. Gives the model a retryable signal
-// (the parser's own position) instead of the misleading "must be an ARRAY".
-function jsonParseError(content: CompressArgs["content"]): string | undefined {
-  if (typeof content !== "string") return undefined;
-  const t = content.trim();
-  if (!t.startsWith("{") && !t.startsWith("[")) return undefined;
-  try {
-    JSON.parse(t);
-    return undefined;
-  } catch (e) {
-    return e instanceof Error ? e.message : String(e);
-  }
+  return content.map((r) => ({ startId: r.startId, endId: r.endId, summary: r.summary, topic: r.topic }));
 }
 
 /** Panel block count ("… (~N reclaimed, B blocks)"), or -1 for non-panels. */

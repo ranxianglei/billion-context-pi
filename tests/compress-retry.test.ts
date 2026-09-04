@@ -11,7 +11,8 @@ import { isCompressSuccessText, isCompressNoopText } from "../src/compress-tool.
 // stringified the array).
 //
 // Behavior under test:
-//  1. compress-tool accepts a JSON-encoded string for content (root cause).
+//  1. compress-tool rejects non-array (JSON-string) content with a thrown
+//     error — the JSON-encoded string form was removed per #273.
 //  2. Argument errors THROW (pi only marks thrown tool errors isError:true —
 //     a returned error string would be isError:false: not counted + counter
 //     reset).
@@ -141,28 +142,7 @@ test("noteCompressOutcomes: counts, caps, resets on success, resets per turn, ne
 
 // ─── unit: normalizeRanges via the tool ─────────────────────────────────────
 
-test("compress tool accepts JSON-encoded string content (non-strict-tool providers)", async () => {
-  const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as any);
-  const stateFile = "/tmp/pai-acp-retry-str.session.json";
-  await rm(`${stateFile}.acp.json`, { force: true });
-  const entries = [userMsg("e1", ZH)];
-  const ctx = fakeCtx(() => entries, stateFile);
-  await fire(handlers, ctx); // assigns refs
-
-  const compressTool = api.tools.find((t: any) => t.name === "compress")!;
-  const out = await compressTool.execute(
-    "tc1",
-    // exactly what session 01a00a38's model sent: a JSON-encoded array string
-    { content: JSON.stringify([{ startId: "m00001", endId: "m00001", summary: "compressed from string form" }]) },
-    undefined, undefined, ctx,
-  );
-  const text = typeof out === "string" ? out : out.content?.[0]?.text ?? String(out);
-  assert.ok(/ACP \|/.test(text), `expected success panel: ${text}`);
-  await rm(`${stateFile}.acp.json`, { force: true });
-});
-
-test("compress tool THROWS on garbage string content (isError:true → counted by the outcome tracker)", async () => {
+test("compress tool THROWS on non-array (JSON-string) content (isError:true → counted by the outcome tracker)", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api as any);
   const stateFile = "/tmp/pai-acp-retry-str2.session.json";
@@ -174,9 +154,11 @@ test("compress tool THROWS on garbage string content (isError:true → counted b
   const compressTool = api.tools.find((t: any) => t.name === "compress")!;
   // pi-agent-core marks only THROWN tool errors isError:true; returning the
   // error string would be isError:false (not counted as a failure + counter
-  // reset), so the tool must reject.
+  // reset), so the tool must reject. The JSON-string form was removed per
+  // #273, so any non-array content (a JSON-encoded array string included) is
+  // rejected with a clear "must be an ARRAY" error.
   await assert.rejects(
-    () => compressTool.execute("tc1", { content: "not json {" }, undefined, undefined, ctx),
+    () => compressTool.execute("tc1", { content: JSON.stringify([{ startId: "m00001", endId: "m00001", summary: "s" }]) }, undefined, undefined, ctx),
     /Invalid compress content[\s\S]*ARRAY/,
   );
   await rm(`${stateFile}.acp.json`, { force: true });
