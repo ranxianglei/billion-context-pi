@@ -22,7 +22,7 @@ The model decides <em>when</em> and <em>what</em> to compress — not a hard lim
 
 ---
 
-> **Host support:** this plugin is for **Pi**. It does **not** support **OMP (oh-my-pi)** — on an OMP host it refuses to run. Which package for which client? See [Which do I need?](#which-do-i-need); OMP details: [docs/omp.md](./docs/omp.md).
+> **Host support:** this plugin is for **Pi**. It does **not** support **OMP (oh-my-pi)** — on an OMP host it refuses to run. OMP users: use [billion-context](https://github.com/ranxianglei/billion-context) instead (`bili omp`, built-in plugin). Full client → package table: see [Which do I need?](#which-do-i-need); OMP details: [docs/omp.md](./docs/omp.md).
 
 ## Why?
 
