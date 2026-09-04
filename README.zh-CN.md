@@ -20,7 +20,7 @@
 
 ---
 
-> **宿主支持:** 本插件面向 **Pi**。它**不支持 OMP(oh-my-pi)** —— 在 OMP 宿主上会拒绝运行。OMP 用户请改用 [billion-context](https://github.com/ranxianglei/billion-context)(`bili omp`)。详细说明:[docs/omp.zh-CN.md](./docs/omp.zh-CN.md)。
+> **宿主支持:** 本插件面向 **Pi**。它**不支持 OMP(oh-my-pi)** —— 在 OMP 宿主上会拒绝运行。各客户端该用哪个包?见[该选哪个?](#该选哪个)。OMP 详细说明:[docs/omp.zh-CN.md](./docs/omp.zh-CN.md)。
 
 ## 为什么选择 billion-context
 
@@ -37,6 +37,19 @@
 
 1. **一个会话即可支撑海量工作。** 根据三级压缩架构的模拟测试(见 [opencode-acp](https://github.com/ranxianglei/opencode-acp)),单会话累计可处理约 100 亿至 600 亿 token —— 同时对遥远的关键信息(路径、决策、签名)保持长久记忆。用户可以在**同一个会话里连续工作几个月**,而无需因为上下文膨胀而开新会话丢上下文。
 2. **上下文长期保持精简。** 实际运行中上下文通常稳定在 15 万 token 以下(opencode-acp 实测维持在 20 万以下),相比传统压缩方案动辄撑到 100 万上下文,**单会话累计可节省近 5 倍的 token 费用**。
+
+## 该选哪个?
+
+按客户端选:
+
+| 客户端 | 用这个 |
+|---|---|
+| **pi** | [`billion-context-pi`](https://github.com/ranxianglei/billion-context-pi)(进程内扩展) |
+| **opencode** | [`opencode-acp`](https://github.com/ranxianglei/opencode-acp)(进程内扩展) |
+| **omp** | [`billion-context`](https://github.com/ranxianglei/billion-context),`bili omp`(内置插件) |
+| **其余所有**(没有上下文 hook) | [`billion-context`](https://github.com/ranxianglei/billion-context) —— `bili <client>`(启动器,优先)或 `/bili/` 前缀 |
+
+> 为什么 OMP 不能用本进程内扩展、以及强行使用的后果:见下文[宿主支持](#宿主支持)与 [docs/omp.zh-CN.md](./docs/omp.zh-CN.md)。
 
 ## 安装
 
@@ -75,7 +88,7 @@ billion-context 通过拦截 Pi 的 `context` 事件接管上下文管理。**Pi
 
 ## 宿主支持
 
-billion-context-pi 面向 **Pi** 编码代理(`@earendil-works/pi-coding-agent`)构建,并在会话开始时检测宿主:
+billion-context-pi 面向 **Pi** 编码代理(`@earendil-works/pi-coding-agent`)构建,并在会话开始时检测宿主——完整的「客户端 → 包」对照表见[该选哪个?](#该选哪个):
 
 - **Pi** — 完全支持。
 - **OMP(`can1357/oh-my-pi`)** — **不支持。** OMP 的进程内会话 API 与 Pi 不同,扩展注入的压缩引用可能与会话的真实引用漂移失步,导致 `compress` 调用失败,报错 `does not exist in this session`(issue [#234](https://github.com/ranxianglei/billion-context-pi/issues/234))。在 OMP 上,扩展现在会**拒绝服务**:打印警告、禁用 ACP 工具,并保持宿主自身的上下文处理不受影响。
