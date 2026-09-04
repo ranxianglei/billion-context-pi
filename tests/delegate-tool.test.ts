@@ -843,7 +843,9 @@ test("delegateChildEnv increments depth and propagates the maxDepth cap", () => 
   const env = delegateChildEnv(1, 3);
   assert.equal(env.PI_ACP_DELEGATE_DEPTH, "2", "child depth = parent + 1");
   assert.equal(env.PI_ACP_DELEGATE_MAX_DEPTH, "3", "cap follows the delegation tree");
-  assert.equal(env.PATH, process.env.PATH, "parent env inherited");
+  for (const [key, value] of Object.entries(process.env)) {
+    assert.equal(env[key], value, `parent env ${key} inherited`);
+  }
 });
 
 test("asyncWatchdogDescription reflects the resolved policy", () => {
