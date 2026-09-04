@@ -20,7 +20,7 @@
 
 ---
 
-> **宿主支持:** 本插件面向 **Pi**。它**不支持 OMP(oh-my-pi)** —— 在 OMP 宿主上会拒绝运行。OMP 用户请直接改用 [billion-context](https://github.com/ranxianglei/billion-context)(`bili omp`,内置插件);其他客户端的完整对照见[该选哪个?](#该选哪个)。OMP 详细说明:[docs/omp.zh-CN.md](./docs/omp.zh-CN.md)。
+> **宿主支持:** 本插件面向 **Pi**。它**不支持 OMP(oh-my-pi)** —— 在 OMP 宿主上会拒绝运行。OMP 用户请直接改用 [billion-context](https://github.com/ranxianglei/billion-context)(启动命令 bili omp);其他客户端的完整对照见[该选哪个?](#该选哪个)。OMP 详细说明:[docs/omp.zh-CN.md](./docs/omp.zh-CN.md)。
 
 ## 为什么选择 billion-context
 
@@ -47,7 +47,7 @@
 | **pi** | [`billion-context-pi`](https://github.com/ranxianglei/billion-context-pi)(进程内扩展) |
 | **opencode** | [`opencode-acp`](https://github.com/ranxianglei/opencode-acp)(进程内扩展) |
 | **omp** | [`billion-context`](https://github.com/ranxianglei/billion-context),`bili omp`(内置插件) |
-| **其余所有**(没有上下文 hook) | [`billion-context`](https://github.com/ranxianglei/billion-context) —— `bili <client>`(启动器,优先)或 `/bili/` 前缀 |
+| **其余所有** | [`billion-context`](https://github.com/ranxianglei/billion-context) —— `bili <client>`(启动器,优先)或 `/bili/` 前缀 |
 
 > 为什么 OMP 不能用本进程内扩展、以及强行使用的后果:见下文[宿主支持](#宿主支持)与 [docs/omp.zh-CN.md](./docs/omp.zh-CN.md)。
 
