@@ -23,7 +23,7 @@ import { buildAcpSystemPrompt, ACP_DELEGATE_PROMPT } from "./system-prompt.js";
 import { delegateStatusWidget } from "./fleet-widget.js";
 import { wireToolGuardrails } from "./tool-guardrails.js";
 import { debug, logError, logInfo, logWarn, logThrow, closeLogStream } from "./log.js";
-import { collectCoveredMessageIds, estimateTokens, lastUserMessageId, collectImageTokens, modelSupportsImages } from "./tokens.js";
+import { collectCoveredMessageIds, estimateTokens, lastUserMessageId, collectImageTokens, modelSupportsImages, sentViewTokenCount } from "./tokens.js";
 import { usageAnchorPredatesCompression } from "./floor-stale.js";
 import { checkForUpdate } from "./update.js";
 import {
@@ -238,30 +238,36 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       const realUsage = ctx.getContextUsage?.();
       const systemPromptText = getSystemPromptText(ctx);
       const systemPromptTokens = systemPromptText ? defaultCountTokens(systemPromptText) : 0;
-      const sentTokens = estimateTokens(coreMessages, coveredIds, collectImageTokens(entries, modelSupportsImages(ctx.model))) + systemPromptTokens;
-      // Usage/emergency arbitration on the sent view, floored at the host's
-      // real context usage (issue #257): the CJK-aware base estimate is still
-      // a heuristic (images, mixed content, per-model tokenizer drift), so
-      // the 0.75/0.95 bands run on the real scale via the floor. realUsage is
-      // anchored on the last assistant's provider-reported usage + trailing
-      // estimate. Only ever raises (never lowers); skipped while the anchor
-      // predates a successful compress (floor-stale.ts). tokenCount only
-      // feeds processTurn.
-      let tokenCount = sentTokens;
-      const realPromptTokens = realUsage?.tokens ?? 0;
-      if (!usageAnchorPredatesCompression(entries) && realPromptTokens > tokenCount) {
-        tokenCount = realPromptTokens;
-      }
-      // Self-heal (armed): after an overflow, force this turn's usage to >=95%
-      // so the kernel's emergency nudge + tool-result truncate fire immediately,
-      // even if the estimate under-reports the sent view. tokenCount only feeds
-      // processTurn (nudge/truncate).
+      const imageTokens = collectImageTokens(entries, modelSupportsImages(ctx.model));
+      const sentTokens = estimateTokens(coreMessages, coveredIds, imageTokens) + systemPromptTokens;
+      // Floors (raise-only, applied to whichever base wins below): the host's
+      // real context usage (issue #257/#258 — anchored on the last assistant's
+      // provider-reported usage + trailing estimate; skipped while the anchor
+      // predates a successful compress, floor-stale.ts) and the armed self-heal
+      // 95% floor after an upstream overflow. Captured once so both bases see
+      // identical floors; ov.armed is consumed exactly once either way.
+      let armedFloor = 0;
       if (ov.armed && config.modelContextLimit > 0) {
         ov.armed = false;
-        const floor = Math.floor(config.modelContextLimit * 0.95);
-        if (floor > tokenCount) {
-          tokenCount = floor;
-          logWarn("overflow-selfheal", { sid, event: "armed-emergency", tokenCount, limit: config.modelContextLimit });
+        armedFloor = Math.floor(config.modelContextLimit * 0.95);
+        logWarn("overflow-selfheal", { sid, event: "armed-emergency", floor: armedFloor, limit: config.modelContextLimit });
+      }
+      const hostFloorActive = !usageAnchorPredatesCompression(entries);
+      const realPromptTokens = realUsage?.tokens ?? 0;
+      const applyFloors = (base: number): number => Math.max(base, hostFloorActive ? realPromptTokens : 0, armedFloor);
+      let tokenCount = applyFloors(sentTokens);
+      // View-based recount (issue #289): the raw-view estimate counts uncovered
+      // messages that prune strips from the sent view every turn (orphaned tool
+      // pairs straddling block boundaries, absorbed/filtered messages) — in long
+      // multi-block sessions that pins tokenCount far above reality, holding
+      // usage in the emergency band and driving low/zero-yield compression loops.
+      // Re-measure on the actual post-processTurn view and adopt it when the two
+      // diverge beyond noise (the probe runs on a clone; see sentViewTokenCount).
+      if (state.blocks.some((b) => b.active && b.effectiveMessageIds.length > 0)) {
+        const view = sentViewTokenCount(runtime.core, coreMessages, state, config, tokenCount, imageTokens, systemPromptTokens);
+        if (view.drifted) {
+          tokenCount = applyFloors(view.viewTokens);
+          logInfo("turn", { sid, event: "view-recount", prelim: sentTokens, viewTokens: view.viewTokens, tokenCount });
         }
       }
       debug.event("context-in", {
@@ -286,12 +292,17 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
         inMsgs: coreMessages.length,
         outMsgs: turn.messages.length,
         tokens: tokenCount,
-        pct: realUsage?.percent ?? (config.modelContextLimit > 0 ? Math.round((tokenCount / config.modelContextLimit) * 100) : null),
+        pct: config.modelContextLimit > 0 ? Number(((tokenCount / config.modelContextLimit) * 100).toFixed(2)) : null,
         limit: config.modelContextLimit,
         nudge: turn.nudge?.shouldInject ? (turn.nudge.breakdown?.emergencyOverride === 1 ? "emergency" : "active") : "idle",
         nudgeReason: turn.nudge?.reason ?? null,
         blocks: turn.state.blocks.length,
         activeBlocks: turn.state.blocks.filter((b) => b.active).length,
+        // #289: host-reported usage (Pi window scale) logged separately so
+        // tokens/pct above stay on one scale; field order after activeBlocks
+        // keeps the pre-existing [turn] layout stable for log consumers.
+        hostTokens: realUsage?.tokens ?? null,
+        hostPct: realUsage?.percent ?? null,
       });
       debug.event("processTurn", {
         modelId,
