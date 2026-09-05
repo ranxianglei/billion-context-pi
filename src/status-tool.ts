@@ -26,7 +26,7 @@ export function makeStatusTool(runtime: AcpRuntime): ToolDefinition<typeof Statu
     label: "ACP Status",
     description:
       "Context status: overview, compressed blocks, or uncompressed ranges/messages. No args = overview + totals + compressible ranges. scope:'uncompressed' + view:'messages' for per-message listing. scope:'compressed' for block drilldown.",
-    promptSnippet: 'acp_status({}) or acp_status({ scope: "uncompressed", view: "messages" })',
+    promptSnippet: 'acp_status({}) or acp_status({ scope: "uncompressed" })',
     promptGuidelines: [
       "Call with no args for a quick overview of context usage.",
       "Use scope:'uncompressed' to find the largest compressible ranges.",
