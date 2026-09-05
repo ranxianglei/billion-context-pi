@@ -1,4 +1,4 @@
-import { defaultCountTokens, type CoreMessage } from "acp-kernel";
+import { defaultCountTokens, type CompressionCore, type CompressionState, type Config, type CoreMessage } from "acp-kernel";
 import type { SessionMessageEntry } from "@earendil-works/pi-coding-agent";
 import { countImageBlocks } from "./messages.js";
 
@@ -44,6 +44,52 @@ export function estimateTokens(messages: CoreMessage[], coveredIds?: Set<string>
     if (img) tokens += img;
   }
   return tokens;
+}
+
+// Re-measure tokenCount on the ACTUAL sent view: run processTurn on a throwaway
+// state clone (processTurn mutates state — survival counters, nudge stamps) and
+// count the pruned result (covered removed + summaries injected + orphaned tool
+// pairs/absorbed/filtered messages stripped). The raw-view estimate over
+// coreMessages minus block coverage diverges from this sent view in long
+// multi-block sessions: uncovered messages that prune strips every turn stay
+// counted forever while never being sent, pinning usage in the emergency band
+// and driving low/zero-yield compression loops (issue #289). Ref-tag overhead
+// is included because tags ride along in the sent text.
+export function sentViewTokenCount(
+  core: CompressionCore,
+  messages: CoreMessage[],
+  state: CompressionState,
+  config: Config,
+  prelim: number,
+  imageTokensById?: Map<string, number>,
+  systemPromptTokens = 0,
+): { viewTokens: number; drifted: boolean } {
+  // Clamp the probe below the emergency-truncate threshold: passing prelim
+  // through would let emergencyTruncateNode fire inside the probe whenever
+  // prelim sits in the truncate band, so viewTokens would measure the
+  // post-truncation view — under-reporting exactly the pathological case this
+  // recount exists for (issue #289). The real pass still truncates when its
+  // own (honest) count crosses the band.
+  const cap = config.modelContextLimit > 0 ? Math.max(0, Math.floor(config.truncate.threshold * config.modelContextLimit) - 1) : Number.MAX_SAFE_INTEGER;
+  const probe = core.processTurn({ messages, state: structuredClone(state), config, tokenCount: Math.min(prelim, cap) });
+  const viewTokens = estimateTokens(probe.messages, collectCoveredMessageIds(probe.state), imageTokensById) + systemPromptTokens;
+  return { viewTokens, drifted: Math.abs(viewTokens - prelim) > Math.max(1000, 0.1 * prelim) };
+}
+
+// Guarded variant for call sites that only need the final count: divergence is
+// impossible without active block coverage, so skip the probe pass entirely then.
+export function adjustedTokenCount(
+  core: CompressionCore,
+  messages: CoreMessage[],
+  state: CompressionState,
+  config: Config,
+  prelim: number,
+  imageTokensById?: Map<string, number>,
+  systemPromptTokens = 0,
+): number {
+  if (!state.blocks.some((b) => b.active && b.effectiveMessageIds.length > 0)) return prelim;
+  const view = sentViewTokenCount(core, messages, state, config, prelim, imageTokensById, systemPromptTokens);
+  return view.drifted ? view.viewTokens : prelim;
 }
 
 /** Id of the last user-role entry — used as a per-turn key so a nudge prints at
