@@ -150,6 +150,15 @@ test("specUpdateTag maps a spec to the dist-tag channel to track", () => {
   assert.equal(specUpdateTag(""), undefined);
 });
 
+test("specUpdateTag tracks latest for exact prerelease pins (npm-resolved tag installs)", () => {
+  // npm records `npm i pkg@pr-293` as the resolved exact version, losing the
+  // channel; freezing those users on a stale PR/dev build serves no one.
+  assert.equal(specUpdateTag("0.1.56-pr.293.4"), "latest");
+  assert.equal(specUpdateTag("0.1.57-beta.1"), "latest");
+  // exact stable pins still never auto-update
+  assert.equal(specUpdateTag("0.1.56"), undefined);
+});
+
 test("isAutoUpdatableSpec classifies specs", () => {
   assert.equal(isAutoUpdatableSpec("latest"), true);
   assert.equal(isAutoUpdatableSpec("*"), true);

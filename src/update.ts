@@ -110,10 +110,16 @@ export function isAutoUpdatableSpec(spec: string): boolean {
  * - `stable`, `dev`, `pr-327`, `latest` → that dist-tag
  * - ranges (`^1.2.3`, `>=1.0.0`, `*`) → `latest`
  * - exact pins / non-registry specs → undefined (never auto-update)
+ * - exact *prerelease* versions → `latest`: npm records tag installs
+ *   (`@pr-N`, `@dev`) as the resolved exact version, so without this
+ *   fallback those users would freeze on a stale PR/dev build forever
  */
 export function specUpdateTag(spec: string): string | undefined {
   const value = spec.trim();
-  if (!isAutoUpdatableSpec(value)) return undefined;
+  if (!isAutoUpdatableSpec(value)) {
+    if (/^\d+\.\d+\.\d+-[0-9A-Za-z-.]+$/.test(value)) return "latest";
+    return undefined;
+  }
   if (value === "*") return "latest";
   if (isDistTag(value)) return value;
   return "latest";
@@ -408,8 +414,9 @@ export async function checkForUpdate(
     const runtimeVersion = await getRuntimeVersion();
     // Follow the channel the user installed from (dist-tag), not the global
     // `latest`: an @stable install tracks `stable`, @dev tracks `dev`, @pr-N
-    // tracks `pr-N`, ranges/latest/* track `latest`, an exact pin never
-    // auto-updates. No recoverable spec (e.g. not under node_modules) → latest.
+    // tracks `pr-N`, ranges/latest/* track `latest`, an exact stable pin never
+    // auto-updates (exact prerelease versions fall back to latest — see
+    // specUpdateTag). No recoverable spec (e.g. not under node_modules) → latest.
     const spec = await getInstalledSpec();
     const tag = spec ? specUpdateTag(spec) : "latest";
     if (!tag) {
