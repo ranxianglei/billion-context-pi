@@ -25,7 +25,7 @@ const EOF_GRACE_MS = 10_000;
 const SETTLED_GRACE_MS = 10_000;
 const KILL_GRACE_MS = 10_000;
 const RESULT_SUMMARY_CHARS = 500;
-const OUT_DIR = join(tmpdir(), "acp-delegate");
+export const OUT_DIR = join(tmpdir(), "acp-delegate");
 // Coalesce completion notifications: each sendUserMessage follow-up costs a
 // full model turn, so N near-simultaneous finishes merge into ONE message
 // (issue #157). The trailing window (NOTIFY_COALESCE_MS) never extends more
@@ -316,6 +316,68 @@ export function runningRunsSnapshot(): { runId: string; agent: string; task: str
     if (r.status === "running") out.push({ runId: r.runId, agent: r.agent, task: r.task, startedAt: r.startedAt });
   }
   return out;
+}
+
+// ─── Fleet inspector (#292) ─────────────────────────────────────────────────
+
+export interface FleetRunView {
+  runId: string;
+  agent: string;
+  task: string;
+  cwd: string;
+  startedAt: number;
+  finishedAt?: number;
+  status: RunStatus;
+  exitLabel: string;
+  timedOut?: string;
+  resumedFrom?: string;
+  /** Streamed reply text (always retained, even for cancelled runs). */
+  replyFile: string;
+  /** Live tool-activity log (async json-stream runs only). */
+  activityFile?: string;
+  sessionFile?: string;
+  usage?: Usage;
+}
+
+const MAX_FLEET_FINISHED = 12;
+
+/** Running first (oldest spawn on top), then recently finished (newest first,
+ *  capped) — the order the fleet inspector list shows. */
+export function orderRunsForFleet(all: DelegateRun[]): DelegateRun[] {
+  const running = all
+    .filter((r) => r.status === "running")
+    .sort((a, b) => a.startedAt - b.startedAt);
+  const finished = all
+    .filter((r) => r.status !== "running")
+    .sort((a, b) => (b.finishedAt ?? 0) - (a.finishedAt ?? 0))
+    .slice(0, MAX_FLEET_FINISHED);
+  return [...running, ...finished];
+}
+
+function toFleetRunView(r: DelegateRun): FleetRunView {
+  return {
+    runId: r.runId,
+    agent: r.agent,
+    task: r.task,
+    cwd: r.cwd,
+    startedAt: r.startedAt,
+    finishedAt: r.finishedAt,
+    status: r.status,
+    exitLabel: exitLabel(r.exitCode ?? null, r.exitSignal),
+    timedOut: r.timedOut,
+    resumedFrom: r.resumedFrom,
+    replyFile: r.result?.file ?? join(OUT_DIR, `${r.runId}.out`),
+    activityFile: r.activityFile,
+    sessionFile: join(OUT_DIR, `${r.runId}${SESSION_EXT}`),
+    usage: r.usage,
+  };
+}
+
+/** Display-safe snapshot of every delegate run known this session, for the
+ *  fleet inspector (/acp-fleet). In-memory only: runs from previous pi
+ *  processes are not listed (their files remain under OUT_DIR). */
+export function fleetRunsSnapshot(): FleetRunView[] {
+  return orderRunsForFleet(Array.from(runs.values())).map(toFleetRunView);
 }
 
 /** Minimal writable surface accepted by makeEventApplier — real WriteStreams
