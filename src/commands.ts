@@ -7,6 +7,8 @@ import { collectCoveredMessageIds, estimateTokens, collectImageTokens, modelSupp
 import { usageAnchorPredatesCompression } from "./floor-stale.js";
 import { buildStatusPanel } from "acp-kernel/panel";
 import { getDelegateUsage } from "./delegate-tool.js";
+import { openFleetInspector } from "./fleet-inspector.js";
+import { resolveDelegate } from "./config.js";
 import { ensureSubagentAcpTools } from "./setup-subagent-tools.js";
 
 declare const CURRENT_VERSION: string;
@@ -119,6 +121,19 @@ export function makeCommands(runtime: AcpRuntime, pi?: ExtensionAPI): Array<{ na
           } else {
             ctx.ui.notify(`Failed to update ${result.path}: ${result.reason ?? "unknown"}`);
           }
+        },
+      },
+    },
+    {
+      name: "acp-fleet",
+      options: {
+        description: "Inspect acp_delegate sub-agent runs: live list + transcript overlay (TUI), text snapshot elsewhere.",
+        handler: async (_args, ctx) => {
+          if (!resolveDelegate(runtime.adapter).enabled) {
+            ctx.ui.notify("acp_delegate is not enabled in this session's config.");
+            return;
+          }
+          await openFleetInspector(ctx);
         },
       },
     },
