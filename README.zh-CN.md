@@ -102,6 +102,8 @@ billion-context-pi 面向 **Pi** 编码代理(`@earendil-works/pi-coding-agent`)
 
   完整说明:[docs/omp.zh-CN.md](./docs/omp.zh-CN.md)。
 
+- **与 [billion-context](https://github.com/ranxianglei/billion-context) 线代理共存** —— 两者同时作用于同一会话会对每个请求双重压缩(token 浪费、嵌套摘要、两套 ref 坐标系)。这会被自动防止:launcher 路径(`bili pi` 等)导出 `BILLION_CONTEXT_PROXY`;模型 `baseUrl` 经代理路由(`…/bili/https://upstream…`)时在会话开始即被检测到 —— 两种情况下 billion-context-pi 都会带警告让位,由代理独占压缩。一个例外:透明模式(流量经 `HTTPS_PROXY` 到达代理、URL 无 `/bili/` 前缀)无法从 URL 识别 —— 此时请在启动 pi 前导出 `BILLION_CONTEXT_PROXY=1`。
+
 ## 模型工具
 
 | 工具 | 作用 |
