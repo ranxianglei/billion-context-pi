@@ -105,6 +105,12 @@ export interface AdapterConfig {
    *  disables) or a ThrottleRetryConfig object. Default: enabled, 10 retries,
    *  60s exponential base capped at 300s per kick. */
   throttleRetry?: boolean | ThrottleRetryConfig;
+  /** Cap on the output-headroom reservation as a fraction of the context
+   *  window: reserved = min(model.maxTokens, pct * window). Accepts a ratio
+   *  (0.25) or percent string ("25%"). Default: 0.25. Set 0 to disable the
+   *  reservation entirely; >= 1 restores the legacy full-capability
+   *  reservation (issue #207). */
+  outputHeadroomMaxPct?: number | string;
   /** Legacy flat alias for `delegate.displayUsage`. Kept for backward
    *  compatibility with existing acp.json files. Prefer `delegate.displayUsage`. */
   displayUsage?: "merged" | "separate";

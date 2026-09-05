@@ -73,16 +73,38 @@ function toTokenNumber(raw: string | undefined): number | undefined {
   return Number.isFinite(n) && n >= 1000 ? n : undefined;
 }
 
+/** Default cap on the output-headroom reservation, as a fraction of the
+ *  context window (issue #207). Reserving the FULL registered max output
+ *  capability halves the effective input budget on models whose maxTokens is a
+ *  large share of the window (e.g. 131072 on a 262144 window → the 75% force-
+ *  compress band fires at ~37% of the full window), while real per-turn
+ *  replies rarely approach that. Capping at 25% keeps the guarantee where it
+ *  matters — any single-turn reply up to the reserved amount still fits at the
+ *  95% emergency threshold — while bounding the budget loss. A reply longer
+ *  than the reservation overflows once; the overflow self-heal (learned window
+ *  + armed emergency) recovers it on the next turn. */
+export const DEFAULT_OUTPUT_HEADROOM_MAX_PCT = 0.25;
+
 /**
  * Reserve the model's output budget from the context window, so the kernel's
- * nudge/truncate bands sit below (window - maxOutput) and the context always
- * leaves room for the model's reply. This prevents the "context + output >
- * window" overflow on a small window (agents routinely set a large max output).
+ * nudge/truncate bands sit below (window - reserved) and the context leaves
+ * room for the model's reply. This prevents the "context + output > window"
+ * overflow on a small window (agents routinely set a large max output).
+ *
+ * `capPct` bounds the reservation as a fraction of the window: reserved =
+ * min(maxOutput, capPct * window). The default (1) preserves the original
+ * full-capability reservation; the adapter passes DEFAULT_OUTPUT_HEADROOM_MAX_PCT
+ * (or the user's `outputHeadroomMaxPct`) so oversized registered capabilities
+ * no longer eat most of the input budget (issue #207). capPct semantics:
+ *   - 0            → no reservation (window returned unchanged)
+ *   - (0, 1)       → reservation capped at capPct * window
+ *   - >= 1         → legacy behavior (full maxOutput reserved)
+ *   - non-finite   → legacy behavior (treated as "not provided")
  * Returns the window unchanged when maxOutput is not usable (non-positive,
  * non-finite, or >= window — a maxOutput >= window request is degenerate and is
  * left to the overflow self-heal).
  */
-export function reserveOutputHeadroom(window: number, maxOutput: number): number {
+export function reserveOutputHeadroom(window: number, maxOutput: number, capPct: number = 1): number {
   if (
     Number.isFinite(window) &&
     window > 0 &&
@@ -90,7 +112,9 @@ export function reserveOutputHeadroom(window: number, maxOutput: number): number
     maxOutput > 0 &&
     maxOutput < window
   ) {
-    return window - maxOutput;
+    const cap = Number.isFinite(capPct) ? Math.max(0, Math.min(capPct, 1)) : 1;
+    const reserved = Math.min(maxOutput, cap * window);
+    return reserved > 0 ? window - reserved : window;
   }
   return window;
 }

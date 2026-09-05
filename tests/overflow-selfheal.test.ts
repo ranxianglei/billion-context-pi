@@ -128,6 +128,30 @@ test("reserveOutputHeadroom: no-op for unusable window", () => {
   assert.equal(reserveOutputHeadroom(Number.NaN, 10_000), Number.NaN);
 });
 
+test("reserveOutputHeadroom: capPct bounds the reservation at capPct * window (issue #207)", () => {
+  // qwen3.8-27b scenario: 262144 window, 131072 registered maxTokens. Legacy
+  // full reservation halved the budget; the 25% default cap keeps 196608.
+  assert.equal(reserveOutputHeadroom(262_144, 131_072, 0.25), 196_608);
+  // A small maxOutput below the cap is reserved in full (unchanged behavior).
+  assert.equal(reserveOutputHeadroom(262_144, 32_768, 0.25), 229_376);
+  assert.equal(reserveOutputHeadroom(100_000, 16_384, 0.25), 83_616);
+});
+
+test("reserveOutputHeadroom: capPct edge semantics", () => {
+  assert.equal(reserveOutputHeadroom(100_000, 50_000, 0), 100_000, "0 disables the reservation");
+  assert.equal(reserveOutputHeadroom(100_000, 50_000, -1), 100_000, "negative clamps to 0 → disabled");
+  assert.equal(reserveOutputHeadroom(100_000, 50_000, 1), 50_000, "1 = legacy full reservation");
+  assert.equal(reserveOutputHeadroom(100_000, 50_000, 2), 50_000, ">= 1 clamps to legacy");
+  assert.equal(reserveOutputHeadroom(100_000, 50_000, Number.NaN), 50_000, "non-finite = not provided → legacy");
+  assert.equal(reserveOutputHeadroom(100_000, 50_000), 50_000, "default arg preserves pre-cap behavior");
+});
+
+test("reserveOutputHeadroom: cap does not resurrect no-op cases", () => {
+  assert.equal(reserveOutputHeadroom(100_000, 0, 0.25), 100_000);
+  assert.equal(reserveOutputHeadroom(100_000, 100_000, 0.25), 100_000, "maxOutput >= window still degenerate");
+  assert.equal(reserveOutputHeadroom(0, 10_000, 0.25), 0);
+});
+
 test("OVERFLOW_MARKER: case-insensitive and matches the shared guard patterns", () => {
   assert.ok(OVERFLOW_MARKER.test("PROMPT IS TOO LONG"));
   assert.ok(OVERFLOW_MARKER.test("Context Length Exceeded"));
