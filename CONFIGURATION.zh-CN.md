@@ -32,6 +32,7 @@
   "debug": false,
   "autoUpdate": true,
   "modelContextLimit": 200000,
+  "outputHeadroomMaxPct": 0.25,
   "toolBashDefaultTimeout": 60,
   "toolOutputMaxBytes": 200000,
 
@@ -96,6 +97,7 @@
 | `debug` | boolean | `false` | 🟢 ACTIVE | 开启日志中的详细调试事件。 |
 | `autoUpdate` | boolean | `true` | 🟢 ACTIVE | 启动时检查 npm 并自动安装更新。 |
 | `modelContextLimit` | number | *(自动)* | 🟢 ACTIVE | 覆盖上下文窗口大小（token 数）。 |
+| `outputHeadroomMaxPct` | number \| string | `0.25` | 🟢 ACTIVE | 输出预留（output headroom）占上下文窗口的比例上限。 |
 | `toolBashDefaultTimeout` | number | `60` | 🟢 ACTIVE | 模型省略 `timeout` 时注入 bash 工具的默认超时秒数。 |
 | `toolOutputMaxBytes` | number | `200000` | 🟢 ACTIVE | 工具返回文本的硬性字节上限。 |
 | `throttleRetry` | boolean \| object | `true` | 🟢 ACTIVE | 自动重试 provider 侧 token 限流错误（递进退避）。 |
@@ -167,6 +169,13 @@
 - **默认值：** *(自动)* —— 每轮实时读取模型的 `contextWindow`
 - **状态：** 🟢 ACTIVE
 - **说明：** 覆盖上下文窗口大小（token 数）。默认每轮从活跃模型的 `ctx.model.contextWindow` 读取，切换模型时自动保持正确。在模型元数据可能不可用的测试或无头/非交互会话中，可设置显式值。环境变量 `ACP_MODEL_CONTEXT_LIMIT` 优先于此值。
+
+### `outputHeadroomMaxPct`
+
+- **类型：** `number | string`（比例或百分比字符串）
+- **默认值：** `0.25`
+- **状态：** 🟢 ACTIVE
+- **说明：** 输出预留（output headroom）占上下文窗口的比例上限：预留量 = min(model.maxTokens, pct × window)。该预留让 kernel 的 nudge/truncate 阈值带位于 (window − 预留量) 之下，使长回复不会把「输入 + 输出」推过窗口——适用于把输出计入窗口的 API（Anthropic Messages 除外：其输入限制独立于 max_tokens 强制执行，故豁免）。不设上限时，注册最大输出占窗口比例大的模型（如 262144 窗口配 131072 maxTokens）会失去大部分输入预算，75% 强制压缩阈值会在完整窗口的约三分之一处触发。0.25 的默认值在控制损失的同时，仍保证单轮回复不超过窗口 25% 时在 95% emergency 阈值下不溢出；更长的回复会溢出一次，由下一轮的 overflow self-heal 恢复。接受比例（`0.25`）或百分比字符串（`"25%"`）。设为 `0` 完全禁用预留；`1`（或更大）恢复旧的全额预留行为。
 
 ### `toolBashDefaultTimeout`
 

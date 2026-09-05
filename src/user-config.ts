@@ -19,6 +19,7 @@ export interface UserAcpConfig {
   toolOutputMaxBytes?: number;
   delegate?: boolean | DelegateConfig;
   compress?: CompressConfig;
+  outputHeadroomMaxPct?: number | string;
   throttleRetry?: boolean | ThrottleRetryConfig;
   displayUsage?: "merged" | "separate";
   prompts?: Partial<Prompts>;
@@ -57,6 +58,7 @@ const KNOWN = new Set([
   "enabled", "debug", "autoUpdate", "modelContextLimit",
   "toolBashDefaultTimeout", "toolOutputMaxBytes",
   "delegate", "compress", "displayUsage", "throttleRetry",
+  "outputHeadroomMaxPct",
   "prompts", "acknowledgePromptsRisk",
 ]);
 

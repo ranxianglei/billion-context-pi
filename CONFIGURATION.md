@@ -32,6 +32,7 @@ Create `~/.pi/acp.json` (or `<project>/.pi/acp.json`) and drop in whichever keys
   "debug": false,
   "autoUpdate": true,
   "modelContextLimit": 200000,
+  "outputHeadroomMaxPct": 0.25,
   "toolBashDefaultTimeout": 60,
   "toolOutputMaxBytes": 200000,
 
@@ -97,6 +98,7 @@ All keys below are currently **ACTIVE**.
 | `debug` | boolean | `false` | 🟢 ACTIVE | Enable verbose debug-level events in the log. |
 | `autoUpdate` | boolean | `true` | 🟢 ACTIVE | Check npm for a newer version on startup and auto-install it. |
 | `modelContextLimit` | number | *(auto)* | 🟢 ACTIVE | Override the context limit (in tokens). |
+| `outputHeadroomMaxPct` | number \| string | `0.25` | 🟢 ACTIVE | Cap on the output-headroom reservation, as a fraction of the context window. |
 | `toolBashDefaultTimeout` | number | `60` | 🟢 ACTIVE | Default `bash` tool timeout in seconds when the model omits it. |
 | `toolOutputMaxBytes` | number | `200000` | 🟢 ACTIVE | Hard byte cap on tool result text. |
 | `throttleRetry` | boolean \| object | `true` | 🟢 ACTIVE | Auto-retry provider token rate-limit errors with progressive backoff. |
@@ -175,6 +177,13 @@ All keys below are currently **ACTIVE**.
 - **Default:** *(auto)* — the model's `contextWindow` read live each turn
 - **Status:** 🟢 ACTIVE
 - **Description:** Override the context limit, in tokens. By default the limit is read from the active model's `ctx.model.contextWindow` on every turn, so it stays correct when you switch models. Set an explicit value for deterministic test runs or headless/non-interactive sessions where the model metadata may be unavailable. The `ACP_MODEL_CONTEXT_LIMIT` environment variable takes precedence over this value.
+
+### `outputHeadroomMaxPct`
+
+- **Type:** `number | string` (ratio or percent string)
+- **Default:** `0.25`
+- **Status:** 🟢 ACTIVE
+- **Description:** Caps the output-headroom reservation as a fraction of the context window: reserved = min(model.maxTokens, pct × window). The reservation keeps the kernel's nudge/truncate bands below (window − reserved) so a long reply cannot push input + output past the window on APIs that count output against the window (all except Anthropic Messages, which enforces its input limit independently and is exempt). Without a cap, models whose registered max output is a large share of the window (e.g. 131072 on a 262144 window) lose most of their input budget — the 75% force-compress band then fires at roughly a third of the full window. The 0.25 default bounds that loss while still guaranteeing any single-turn reply up to 25% of the window fits at the 95% emergency threshold; longer replies overflow once and are recovered by the overflow self-heal on the next turn. Accepts a ratio (`0.25`) or percent string (`"25%"`). Set `0` to disable the reservation entirely; `1` (or greater) restores the legacy full-capability reservation.
 
 ### `toolBashDefaultTimeout`
 

@@ -10,7 +10,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { CoreMessage, NudgeDecision, CompressionBlock, Prompts } from "acp-kernel";
 import { renderNudgeText, resolvePrompts, defaultPrompts, viableRanges } from "acp-kernel";
-import { type AdapterConfig, resolveDelegate } from "./config.js";
+import { type AdapterConfig, resolveDelegate, parsePercent } from "./config.js";
 import { createRuntime, type AcpRuntime } from "./runtime.js";
 import { makeCompressTool, isCompressSuccessText, isCompressNoopText } from "./compress-tool.js";
 import { makeDecompressTool } from "./decompress-tool.js";
@@ -37,7 +37,7 @@ import {
 } from "./throttle-retry.js";
 import { defaultCountTokens } from "acp-kernel";
 import { formatSystemPromptForEvent, getSystemPromptText } from "./compat.js";
-import { inspectOverflowMessage, reserveOutputHeadroom, shouldReserveOutputHeadroom } from "./overflow-selfheal.js";
+import { DEFAULT_OUTPUT_HEADROOM_MAX_PCT, inspectOverflowMessage, reserveOutputHeadroom, shouldReserveOutputHeadroom } from "./overflow-selfheal.js";
 import { isOmpHost, OMP_UNSUPPORTED_MESSAGE } from "./omp.js";
 
 type AgentMessage = SessionMessageEntry["message"];
@@ -211,22 +211,25 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
         config = { ...config, modelContextLimit: learnedWindow };
         logInfo("overflow-selfheal", { sid, modelId, event: "window-recenter", resolved: configBase.modelContextLimit, learned: learnedWindow });
       }
-      // Output headroom: reserve the model's max output budget from the window
-      // so the kernel's nudge/truncate bands sit below (window - maxTokens) —
-      // the context then always leaves room for the model's reply, preventing
-      // the "context + output > window" overflow on a small window. maxTokens is
-      // the model's max output capability (ctx.model.maxTokens). Applied to the
-      // (possibly re-centered) window above; never mutates the shared config.
-      // Anthropic is exempt — its input limit is enforced independently of
-      // max_tokens, so reserving would shift every band down by maxTokens with
-      // no safety gain (see shouldReserveOutputHeadroom).
+      // Output headroom: reserve the model's output budget from the window so
+      // the kernel's nudge/truncate bands sit below (window - reserved) and
+      // the context leaves room for the model's reply. The reservation is
+      // capped at outputHeadroomMaxPct * window (default 25%, issue #207):
+      // reserving the FULL registered maxTokens capability halves the input
+      // budget on models whose maxTokens is a large share of the window.
+      // Applied to the (possibly re-centered) window above; never mutates the
+      // shared config. Anthropic is exempt — its input limit is enforced
+      // independently of max_tokens (see shouldReserveOutputHeadroom).
       const maxOutput = (ctx.model as { maxTokens?: number } | undefined)?.maxTokens ?? 0;
+      const rawHeadroomCap = runtime.adapter.outputHeadroomMaxPct;
+      const headroomCap = rawHeadroomCap === undefined ? DEFAULT_OUTPUT_HEADROOM_MAX_PCT : parsePercent(rawHeadroomCap);
+      let fullWindow = config.modelContextLimit;
       if (shouldReserveOutputHeadroom((ctx.model as { api?: string } | undefined)?.api)) {
-        const reservedWindow = reserveOutputHeadroom(config.modelContextLimit, maxOutput);
+        const reservedWindow = reserveOutputHeadroom(config.modelContextLimit, maxOutput, headroomCap);
         if (reservedWindow !== config.modelContextLimit) {
           const before = config.modelContextLimit;
           config = { ...config, modelContextLimit: reservedWindow };
-          logInfo("overflow-selfheal", { sid, event: "output-headroom", before, after: reservedWindow, maxOutput });
+          logInfo("overflow-selfheal", { sid, event: "output-headroom", before, after: reservedWindow, maxOutput, cap: headroomCap });
         }
       }
       const coveredIds = collectCoveredMessageIds(state);
@@ -288,6 +291,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
         tokens: tokenCount,
         pct: realUsage?.percent ?? (config.modelContextLimit > 0 ? Math.round((tokenCount / config.modelContextLimit) * 100) : null),
         limit: config.modelContextLimit,
+        ...(fullWindow !== config.modelContextLimit ? { fullWindow } : {}),
         nudge: turn.nudge?.shouldInject ? (turn.nudge.breakdown?.emergencyOverride === 1 ? "emergency" : "active") : "idle",
         nudgeReason: turn.nudge?.reason ?? null,
         blocks: turn.state.blocks.length,

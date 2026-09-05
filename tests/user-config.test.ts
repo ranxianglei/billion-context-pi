@@ -106,6 +106,18 @@ test("loadUserConfig project config overrides global config", async () => {
   }
 });
 
+test("loadUserConfig reads outputHeadroomMaxPct (ratio and percent string)", async () => {
+  const tmpDir = path.join(os.tmpdir(), `acp-test-headroom-${Date.now()}`);
+  await fs.mkdir(tmpDir, { recursive: true });
+  await writeConfig(tmpDir, { outputHeadroomMaxPct: "15%" });
+  try {
+    const config = await loadUserConfig(tmpDir);
+    assert.equal(config.outputHeadroomMaxPct, "15%", "percent string kept verbatim for parsePercent");
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
 test("loadUserConfig ignores unknown keys", async () => {
   const tmpDir = path.join(os.tmpdir(), `acp-test-unknown-${Date.now()}`);
   await fs.mkdir(tmpDir, { recursive: true });
@@ -187,6 +199,7 @@ test("applyUserConfig supports all user config keys", () => {
     delegate: false,
     toolBashDefaultTimeout: 120,
     toolOutputMaxBytes: 100_000,
+    outputHeadroomMaxPct: 0.1,
   };
   const result = applyUserConfig(adapter, user);
   assert.equal(result.debug, true);
@@ -195,4 +208,5 @@ test("applyUserConfig supports all user config keys", () => {
   assert.equal(result.delegate, false);
   assert.equal(result.toolBashDefaultTimeout, 120);
   assert.equal(result.toolOutputMaxBytes, 100_000);
+  assert.equal(result.outputHeadroomMaxPct, 0.1);
 });
