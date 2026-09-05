@@ -209,6 +209,37 @@ billion-context 保护三类内容不被压缩:
 2. **软近期区** — 最后 N 条消息(默认 5)和最后约 5K token 被软保护,让模型保留工作集。来自 `decompress`、`search_context`、`read`、`bash` 的工具结果被**排除**出此区:它们体量大、消费后就该能压缩,所以不该占用保护预算。
 3. **最后一条用户消息** — 始终保护(用户意图必须存活)。
 
+## 会话存储与迁移
+
+billion-context-pi 把每个会话的压缩状态持久化在会话转录文件旁边的一个**旁挂(sidecar)文件**里。每个会话在 Pi 的会话目录(`~/.pi/agent/sessions/`)下都有两个文件:
+
+| 文件 | 内容 |
+|------|------|
+| `<id>.jsonl` | 会话转录(消息、工具调用) |
+| `<id>.jsonl.acp.json` | ACP 压缩状态(压缩块、消息引用、nudge 与统计) |
+
+`.acp.json` 旁挂文件承载了你的压缩块。没有它,会话就会以完整原始历史运行,直到 ACP 再次压缩。
+
+### 迁移会话(跨机器拷贝 / 备份恢复)
+
+Pi 内置的导出/导入只搬运**转录**,不搬 ACP 状态。会丢失两样东西:
+
+1. **`.acp.json` 旁挂文件不会被携带。** 因此导入后的会话*没有任何*压缩块:每次 LLM 调用都会重发完整原始历史,直到 nudge 重新压缩 —— 一次性全量重缓存成本 + 上下文膨胀回原始大小。超长会话可能在重新压缩生效前逼近甚至超出模型窗口(本插件激活时 Pi 的原生 compaction 被禁用,ACP 是唯一的上下文管理者)。
+2. **导出会丢弃 `parentSession` 头。** clone/fork 子会话依赖这个头字段来继承父会话的压缩状态;一旦导出,这条链接就断了 —— 即使目标机器上父会话的文件仍然存在。
+
+**要带着完整压缩状态迁移会话,请把两个文件一起拷贝**(它们共享同一基础名):
+
+```bash
+# 成对拷贝
+cp <id>.jsonl <id>.jsonl.acp.json  <目标目录>/
+# ... 或整体备份 / 恢复整个目录
+cp -r ~/.pi/agent/sessions  <备份>/pi-sessions
+```
+
+在目标机器上把它们放回彼此相邻的位置。对 clone/fork 子会话,还要带上父会话的那一对,以便 `parentSession` 能解析。
+
+> 根治方案 —— 让宿主在 import/export 时一并携带旁挂文件并保留 `parentSession` —— 属于上游 pi-coding-agent,已在 issue [#299](https://github.com/ranxianglei/billion-context-pi/issues/299) 跟踪。落地前请手动成对拷贝。
+
 ## 基于 acp-kernel
 
 压缩引擎是 [`acp-kernel`](https://github.com/ranxianglei/acp-kernel) — 平台无关、MIT 许可的库,有 208 个测试。它被内联打包进 `dist/index.js`,因此零运行时依赖。
