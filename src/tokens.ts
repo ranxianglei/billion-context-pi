@@ -64,7 +64,14 @@ export function sentViewTokenCount(
   imageTokensById?: Map<string, number>,
   systemPromptTokens = 0,
 ): { viewTokens: number; drifted: boolean } {
-  const probe = core.processTurn({ messages, state: structuredClone(state), config, tokenCount: prelim });
+  // Clamp the probe below the emergency-truncate threshold: passing prelim
+  // through would let emergencyTruncateNode fire inside the probe whenever
+  // prelim sits in the truncate band, so viewTokens would measure the
+  // post-truncation view — under-reporting exactly the pathological case this
+  // recount exists for (issue #289). The real pass still truncates when its
+  // own (honest) count crosses the band.
+  const cap = config.modelContextLimit > 0 ? Math.max(0, Math.floor(config.truncate.threshold * config.modelContextLimit) - 1) : Number.MAX_SAFE_INTEGER;
+  const probe = core.processTurn({ messages, state: structuredClone(state), config, tokenCount: Math.min(prelim, cap) });
   const viewTokens = estimateTokens(probe.messages, collectCoveredMessageIds(probe.state), imageTokensById) + systemPromptTokens;
   return { viewTokens, drifted: Math.abs(viewTokens - prelim) > Math.max(1000, 0.1 * prelim) };
 }
