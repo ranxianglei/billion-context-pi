@@ -196,6 +196,37 @@ billion-context protects three categories of content from compression:
 2. **Soft recent-zone** — the last N messages (default 5) and last ~5K tokens are soft-protected so the model keeps its working set. Tool results from `decompress`, `search_context`, `read`, and `bash` are **excluded** from this zone: they're large and meant to be compressible once consumed, so they don't eat the protected budget.
 3. **Last user message** — always protected (user intent must survive).
 
+## Session storage & migration
+
+billion-context-pi persists each session's compression state in a **sidecar file** next to the session transcript. Every session lives as two files in Pi's sessions directory (`~/.pi/agent/sessions/`):
+
+| File | Contents |
+|------|----------|
+| `<id>.jsonl` | The conversation transcript (messages, tool calls) |
+| `<id>.jsonl.acp.json` | The ACP compression state (compressed blocks, message refs, nudge + stats) |
+
+The `.acp.json` sidecar is what holds your compressed blocks. Without it, the session runs on its full raw history until ACP compresses again.
+
+### Migrating a session (cross-machine copy / backup-restore)
+
+Pi's built-in export/import moves only the **transcript**, not the ACP state. Two things are lost:
+
+1. **The `.acp.json` sidecar is not carried.** An imported session therefore has *no* compressed blocks: every LLM call resends the entire raw history until the nudge re-compresses it — a one-time full re-cache cost plus context bloat back to original size. Very long sessions can approach or exceed the model window before re-compression kicks in (Pi's native compaction is disabled while this plugin is active, so ACP is the only context manager).
+2. **Export drops the `parentSession` header.** Clone/fork child sessions rely on that header field to inherit their parent's compression state; once exported, the link is gone even if the parent's files still exist on the target machine.
+
+**To migrate a session with its compression state intact, copy both files together** (they share the same base name):
+
+```bash
+# copy the pair
+cp <id>.jsonl <id>.jsonl.acp.json  <dest>/
+# ... or back up / restore the whole directory
+cp -r ~/.pi/agent/sessions  <backup>/pi-sessions
+```
+
+Restore them next to each other on the target machine. For clone/fork children, also bring the parent's pair so `parentSession` resolves.
+
+> A permanent fix — the host carrying the sidecar through import/export and preserving `parentSession` — belongs upstream in pi-coding-agent and is tracked in issue [#299](https://github.com/ranxianglei/billion-context-pi/issues/299). Until it lands, copy the pair manually.
+
 ## Built on acp-kernel
 
 The compression engine is [`acp-kernel`](https://github.com/ranxianglei/acp-kernel) — a platform-agnostic, MIT-licensed library with 208 tests. It's bundled inline into `dist/index.js`, so there are zero runtime dependencies.
