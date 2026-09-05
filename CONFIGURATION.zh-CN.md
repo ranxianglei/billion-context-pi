@@ -110,6 +110,8 @@
 | `delegate.syncTimeoutMinutes` | number | `5` | 🟢 ACTIVE | **同步** `acp_delegate` 调用的硬超时（分钟）。`0` / `null` 禁用。 |
 | `delegate.idleTimeoutMinutes` | number | `5` | 🟢 ACTIVE | 异步 delegate 子进程的闲置看门狗——无输出超过该时长即强制结束。`0` / `null` 禁用。 |
 | `delegate.asyncTimeoutMinutes` | number | `30` | 🟢 ACTIVE | 异步 delegate 子进程的绝对硬上限（分钟）。`0` / `null` 禁用。 |
+=======
+| `delegate.maxConcurrent` | number | unlimited | 🟢 ACTIVE | 同时运行的后台（`async`）delegate 上限；超出的启动按 FIFO 排队，有空位时自动开始。`1` = 强制串行。可被 `PI_ACP_DELEGATE_MAX_CONCURRENT` 覆盖。 |
 
 **provider 限流重试键**
 
@@ -241,6 +243,14 @@
 - **默认值：** `30`
 - **状态：** 🟢 ACTIVE
 - **说明：** **异步** delegate 子进程的绝对硬上限，与是否活跃无关。设为 `0`（或 `null`）可让长任务不受绝对上限约束——闲置看门狗仍然生效（除非另行禁用）。支持小数分钟。非法值回退到默认值并记录警告日志。环境变量覆盖：`PI_ACP_DELEGATE_ASYNC_TIMEOUT_MINUTES`（`0` 禁用）。
+=======
+### `delegate.maxConcurrent`
+
+- **类型：** number（整数 ≥ 1）
+- **默认值：** unlimited（不限制并发）
+- **状态：** 🟢 ACTIVE
+- **环境变量覆盖：** `PI_ACP_DELEGATE_MAX_CONCURRENT`（优先于本键）
+- **说明：** 限制**同时运行**的后台（`async: true`）delegate 数量。达到上限后，后续启动进入 FIFO 队列，有空位时自动开始——不会丢弃，只是排队等待。设为 `1` 可强制严格串行执行（适合低性能机器上并行子代理争抢 CPU 而超时的场景）。同步（`async: false`）调用始终立即运行，不受此上限影响。无效值（非整数或 `< 1`）会带警告回退到 unlimited，而不是让会话失败。仅在 `delegate.enabled` 为 `true` 时有意义。
 
 ---
 
@@ -476,3 +486,10 @@ provider 的 key 是 **Pi provider 名**(如 `"anthropic"`、`"openai"`、`"zhip
 - **默认值：** *(未设置——遵循 `delegate.asyncTimeoutMinutes`，再回退到 30)*
 - **状态：** 🟢 ACTIVE
 - **说明：** 覆盖异步 delegate 子进程的绝对硬上限。设为 `0` 可让长任务不受绝对上限约束（闲置看门狗仍然生效，除非另行禁用）。优先于 `delegate.asyncTimeoutMinutes`。
+=======
+### `PI_ACP_DELEGATE_MAX_CONCURRENT`
+
+- **类型：** integer（≥ 1）
+- **默认值：** *(未设置——上限遵循 `delegate.maxConcurrent`，再否则 unlimited)*
+- **状态：** 🟢 ACTIVE
+- **说明：** 覆盖后台（`async`）delegate 并发上限。**优先于** `delegate.maxConcurrent`。设为 `1` 强制串行执行。无效值会带警告回退到下一个来源（最终 unlimited），而不是让会话失败。

@@ -111,6 +111,8 @@ All keys below are currently **ACTIVE**.
 | `delegate.syncTimeoutMinutes` | number | `5` | 🟢 ACTIVE | Hard timeout for **synchronous** `acp_delegate` calls, in minutes. `0` / `null` disables it. |
 | `delegate.idleTimeoutMinutes` | number | `5` | 🟢 ACTIVE | Idle watchdog for async delegate children — force-finish after this many minutes without output. `0` / `null` disables it. |
 | `delegate.asyncTimeoutMinutes` | number | `30` | 🟢 ACTIVE | Absolute hard limit for async delegate children, in minutes. `0` / `null` disables it. |
+=======
+| `delegate.maxConcurrent` | number | unlimited | 🟢 ACTIVE | Max background (`async`) delegates running at once; extra launches queue FIFO and start as slots free. `1` = forced serial. Overridden by `PI_ACP_DELEGATE_MAX_CONCURRENT`. |
 
 **Provider throttle retry keys**
 
@@ -249,6 +251,14 @@ The `delegate` sub-object controls the `acp_delegate` sub-agent tool family (`ac
 - **Default:** `30`
 - **Status:** 🟢 ACTIVE
 - **Description:** Absolute hard limit for **asynchronous** delegate children, regardless of activity. Set `0` (or `null`) to run long tasks without an absolute cap — the idle watchdog still applies unless separately disabled. Fractional minutes are accepted. Invalid values fall back to the default with a warning log. Environment override: `PI_ACP_DELEGATE_ASYNC_TIMEOUT_MINUTES` (`0` disables).
+=======
+### `delegate.maxConcurrent`
+
+- **Type:** number (integer ≥ 1)
+- **Default:** unlimited (no concurrency cap)
+- **Status:** 🟢 ACTIVE
+- **Environment override:** `PI_ACP_DELEGATE_MAX_CONCURRENT` (takes precedence over this key)
+- **Description:** Caps how many background (`async: true`) delegates run **at the same time**. When the limit is reached, further launches are held in a FIFO queue and start automatically as soon as a slot frees, so nothing is dropped — they just wait their turn. Set `1` to force strictly serial execution (useful on low-power machines where parallel sub-agents contend for CPU and time out). Sync (`async: false`) calls always run immediately and are not affected by this cap. Invalid values (non-integers or `< 1`) fall back to unlimited with a warning rather than failing the session. Only meaningful when `delegate.enabled` is `true`.
 
 ---
 
@@ -484,3 +494,10 @@ Environment variables take precedence over the JSON config files. They are usefu
 - **Default:** *(unset — follows `delegate.asyncTimeoutMinutes`, then 30)*
 - **Status:** 🟢 ACTIVE
 - **Description:** Override the absolute hard limit for async delegate children. Set `0` to run long tasks without an absolute cap (the idle watchdog still applies unless disabled). Takes precedence over `delegate.asyncTimeoutMinutes`.
+=======
+### `PI_ACP_DELEGATE_MAX_CONCURRENT`
+
+- **Type:** integer (≥ 1)
+- **Default:** *(unset — cap follows `delegate.maxConcurrent`, then unlimited)*
+- **Status:** 🟢 ACTIVE
+- **Description:** Override the background (`async`) delegate concurrency cap. **Takes precedence** over `delegate.maxConcurrent`. Set to `1` for forced serial execution. Invalid values fall back to the next source (then unlimited) with a warning rather than failing the session.

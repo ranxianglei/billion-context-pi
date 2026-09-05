@@ -32,6 +32,13 @@ export interface DelegateConfig {
   /** Hard time limit for async delegates, in minutes. Default: 30. 0 or null
    *  disables the limit. */
   asyncTimeoutMinutes?: number | null;
+  /** Cap on how many background (async) delegate processes run at once.
+   *  `1` forces strict serial execution; `N` allows up to N in parallel;
+   *  omitted means unlimited (existing behavior). Extra launches are queued and
+   *  start automatically as slots free. Invalid values (non-integer, <1) fall
+   *  back to unlimited with a warning. Env `PI_ACP_DELEGATE_MAX_CONCURRENT`
+   *  overrides this. See #294. */
+  maxConcurrent?: number;
 }
 
 /** Resolved delegate policy: what actually takes effect after merging acp.json,
@@ -44,6 +51,8 @@ export interface DelegatePolicy {
   syncTimeoutMs: number | null;
   idleMs: number | null;
   asyncTimeoutMs: number | null;
+  /** Resolved cap on concurrent background delegates; Infinity = unlimited. */
+  maxConcurrent: number;
 }
 
 export const DEFAULT_DELEGATE_POLICY: DelegatePolicy = {
@@ -53,6 +62,7 @@ export const DEFAULT_DELEGATE_POLICY: DelegatePolicy = {
   syncTimeoutMs: 5 * 60_000,
   idleMs: 5 * 60_000,
   asyncTimeoutMs: 30 * 60_000,
+  maxConcurrent: Infinity,
 };
 
 /** Compression tuning fields, shared by all three levels (global, provider,
@@ -188,13 +198,14 @@ export function resolveDelegate(adapter: AdapterConfig): DelegatePolicy {
     "asyncTimeoutMinutes",
     DEFAULT_DELEGATE_POLICY.asyncTimeoutMs!,
   );
+  const maxConcurrent = resolveMaxConcurrent(process.env.PI_ACP_DELEGATE_MAX_CONCURRENT, cfg.maxConcurrent);
   if (idleMs === null) {
     logWarn("config", {
       event: "delegate-idle-watchdog-disabled",
       hint: "no-output watchdog is off; hung async runs must be cancelled manually via acp_delegate_cancel",
     });
   }
-  return { enabled, displayUsage, maxDepth, syncTimeoutMs, idleMs, asyncTimeoutMs };
+  return { enabled, displayUsage, maxDepth, syncTimeoutMs, idleMs, asyncTimeoutMs, maxConcurrent };
 }
 
 function resolveMaxDepth(value: number | string | undefined): number {
@@ -217,6 +228,24 @@ function resolveTimeoutMinutes(value: number | string | null | undefined, field:
     return defaultMs;
   }
   return n * 60_000;
+}
+
+function resolveMaxConcurrent(envValue: string | undefined, cfgValue: number | undefined): number {
+  // Two-source resolution (env > acp.json > unlimited). Unlike the timeout/depth
+  // fields (env ?? cfg), an INVALID env value falls through to acp.json rather
+  // than to the default — preserving #294's original setDelegateMaxConcurrent
+  // semantics. Invalid values warn and never fail the session.
+  const sources: Array<[string, string | number | undefined]> = [
+    ["PI_ACP_DELEGATE_MAX_CONCURRENT", envValue],
+    ["acp.json delegate.maxConcurrent", cfgValue],
+  ];
+  for (const [name, raw] of sources) {
+    if (raw === undefined || raw === "") continue;
+    const n = typeof raw === "number" ? raw : Number(raw);
+    if (Number.isInteger(n) && n >= 1) return n;
+    logWarn("config", { event: "delegate-config-invalid", field: "maxConcurrent", source: name, value: String(raw), fallback: "unlimited" });
+  }
+  return DEFAULT_DELEGATE_POLICY.maxConcurrent;
 }
 
 /** Per-field deepest-wins merge of the three compression levels (global →

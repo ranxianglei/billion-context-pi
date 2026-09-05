@@ -4,7 +4,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildChildArgs, delegateSpawnOptions, injectedWaitMessage, buildWaitResult, buildCancelResult, getDelegateUsage, resetDelegateUsage, injectResult, effectiveExitCode, formatRunResult, resolveWaitTimeoutMs, findUndeliveredRuns, undeliveredNoticeFrom, buildRecoveryNotice, makeDelegateTool, exitLabel, cancelledFileNote, delegateStdinText, readActivityTail, scheduleRunNotification, flushDelegateNotifications, formatBatchRunSection, setDelegatePolicy, delegateChildEnv, asyncWatchdogDescription } from "../src/delegate-tool.js";
+import { buildChildArgs, delegateSpawnOptions, injectedWaitMessage, buildWaitResult, buildCancelResult, getDelegateUsage, resetDelegateUsage, injectResult, effectiveExitCode, formatRunResult, resolveWaitTimeoutMs, findUndeliveredRuns, undeliveredNoticeFrom, buildRecoveryNotice, makeDelegateTool, exitLabel, cancelledFileNote, delegateStdinText, readActivityTail, scheduleRunNotification, flushDelegateNotifications, formatBatchRunSection, setDelegatePolicy, delegateChildEnv, asyncWatchdogDescription, ConcurrencyGate } from "../src/delegate-tool.js";
 import { DEFAULT_DELEGATE_POLICY } from "../src/config.js";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
@@ -869,3 +869,61 @@ test("asyncWatchdogDescription reflects the resolved policy", () => {
     setDelegatePolicy(DEFAULT_DELEGATE_POLICY);
   }
 });
+// ─── ConcurrencyGate: bounded / serial background delegation (#294) ────────
+
+test("ConcurrencyGate: unlimited capacity starts every launch immediately", () => {
+  const gate = new ConcurrencyGate(() => Infinity);
+  assert.equal(gate.unlimited, true);
+  let started = 0;
+  assert.equal(gate.launchOrQueue("a", () => started++), true);
+  assert.equal(gate.launchOrQueue("b", () => started++), true);
+  assert.equal(started, 2, "both launch immediately");
+  assert.equal(gate.queuedCount, 0);
+});
+
+test("ConcurrencyGate: capacity 1 serializes launches FIFO", () => {
+  const gate = new ConcurrencyGate(() => 1);
+  const order: string[] = [];
+  assert.equal(gate.launchOrQueue("a", () => order.push("a")), true, "first starts");
+  assert.equal(gate.launchOrQueue("b", () => order.push("b")), false, "second queues");
+  assert.equal(gate.launchOrQueue("c", () => order.push("c")), false, "third queues");
+  assert.deepEqual(order, ["a"]);
+  assert.equal(gate.activeCount, 1);
+  assert.equal(gate.queuedCount, 2);
+  gate.release();
+  assert.deepEqual(order, ["a", "b"], "release advances FIFO");
+  assert.equal(gate.activeCount, 1);
+  assert.equal(gate.queuedCount, 1);
+  gate.release();
+  assert.deepEqual(order, ["a", "b", "c"]);
+  assert.equal(gate.activeCount, 1);
+  assert.equal(gate.queuedCount, 0);
+});
+
+test("ConcurrencyGate: capacity N allows N concurrent before queueing", () => {
+  const gate = new ConcurrencyGate(() => 2);
+  const order: string[] = [];
+  assert.equal(gate.launchOrQueue("a", () => order.push("a")), true);
+  assert.equal(gate.launchOrQueue("b", () => order.push("b")), true);
+  assert.equal(gate.launchOrQueue("c", () => order.push("c")), false);
+  assert.deepEqual(order, ["a", "b"]);
+  assert.equal(gate.activeCount, 2);
+  gate.release();
+  assert.deepEqual(order, ["a", "b", "c"]);
+  assert.equal(gate.activeCount, 2);
+});
+
+test("ConcurrencyGate: cancelling a queued run skips it without leaking a slot", () => {
+  const gate = new ConcurrencyGate(() => 1);
+  const order: string[] = [];
+  assert.equal(gate.launchOrQueue("a", () => order.push("a")), true);
+  assert.equal(gate.launchOrQueue("b", () => order.push("b")), false);
+  assert.equal(gate.launchOrQueue("c", () => order.push("c")), false);
+  assert.equal(gate.cancelQueued("b"), true, "b was queued");
+  assert.equal(gate.cancelQueued("zzz"), false, "unknown id not queued");
+  gate.release();
+  assert.deepEqual(order, ["a", "c"], "cancelled b never launched");
+  assert.equal(gate.activeCount, 1);
+  assert.equal(gate.queuedCount, 0);
+});
+

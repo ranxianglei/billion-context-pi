@@ -121,6 +121,22 @@ test("resolveDelegate: object with only enabled (displayUsage defaults)", () => 
   assert.equal(r.displayUsage, "separate");
 });
 
+test("resolveDelegate: maxConcurrent resolves from object form", () => {
+  const r = resolveDelegate({ delegate: { enabled: true, maxConcurrent: 3 } });
+  assert.equal(r.enabled, true);
+  assert.equal(r.maxConcurrent, 3);
+});
+
+test("resolveDelegate: maxConcurrent absent resolves to unlimited", () => {
+  const r = resolveDelegate({ delegate: { enabled: true } });
+  assert.equal(r.maxConcurrent, Infinity);
+});
+
+test("resolveDelegate: boolean shorthand leaves maxConcurrent unlimited", () => {
+  const r = resolveDelegate({ delegate: true });
+  assert.equal(r.maxConcurrent, Infinity);
+});
+
 test("resolveDelegate: legacy flat displayUsage still works with boolean delegate", () => {
   const r = resolveDelegate({ delegate: true, displayUsage: "merged" });
   assert.equal(r.enabled, true);
@@ -175,6 +191,7 @@ const DELEGATE_ENV_KEYS = [
   "PI_ACP_DELEGATE_SYNC_TIMEOUT_MINUTES",
   "PI_ACP_DELEGATE_IDLE_TIMEOUT_MINUTES",
   "PI_ACP_DELEGATE_ASYNC_TIMEOUT_MINUTES",
+  "PI_ACP_DELEGATE_MAX_CONCURRENT",
 ] as const;
 
 function withDelegateEnv(mutate: (env: NodeJS.ProcessEnv) => void, fn: () => void): void {
@@ -223,6 +240,25 @@ test("resolveDelegate: invalid env values fall back without failing", () => {
   assert.equal(r.maxDepth, 2, "invalid env maxDepth → default");
   assert.equal(r.syncTimeoutMs, 5 * 60_000, "invalid env timeout → default (not config)");
   assert.equal(r.idleMs, 5 * 60_000, "invalid env idle → default");
+});
+
+test("resolveDelegate: maxConcurrent env > acp.json > unlimited, invalid env falls to config", () => {
+  withDelegateEnv(
+    (env) => {
+      delete env.PI_ACP_DELEGATE_MAX_CONCURRENT;
+    },
+    () => {
+      assert.equal(resolveDelegate({ delegate: { maxConcurrent: 3 } }).maxConcurrent, 3, "config when env unset");
+      process.env.PI_ACP_DELEGATE_MAX_CONCURRENT = "5";
+      assert.equal(resolveDelegate({ delegate: { maxConcurrent: 3 } }).maxConcurrent, 5, "env beats config");
+      process.env.PI_ACP_DELEGATE_MAX_CONCURRENT = "not-a-number";
+      assert.equal(resolveDelegate({ delegate: { maxConcurrent: 3 } }).maxConcurrent, 3, "invalid env falls to config");
+      process.env.PI_ACP_DELEGATE_MAX_CONCURRENT = "0";
+      assert.equal(resolveDelegate({ delegate: { maxConcurrent: 2 } }).maxConcurrent, 2, "env < 1 falls to config");
+      delete process.env.PI_ACP_DELEGATE_MAX_CONCURRENT;
+      assert.equal(resolveDelegate({}).maxConcurrent, Infinity, "no source -> unlimited");
+    },
+  );
 });
 
 test("resolveCompress returns {} when no compress configured", () => {
