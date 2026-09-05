@@ -1,5 +1,6 @@
 import { defaultConfig, type Config, type Prompts } from "acp-kernel";
 import type { ThrottleRetryConfig } from "./throttle-retry.js";
+import { logWarn } from "./log.js";
 
 /** Delegate sub-agent configuration. */
 export interface DelegateConfig {
@@ -13,7 +14,46 @@ export interface DelegateConfig {
    *  "merged" — delegate token usage folded into the tool-result usage field,
    *  counted as part of the main session totals. */
   displayUsage?: "merged" | "separate";
+  /** Maximum acp_delegate nesting depth. Default: 2 (main → child → grandchild;
+   *  the grandchild cannot delegate further). Set 1 to forbid nested delegation
+   *  (orchestrator → leaf workers only). The resolved value is propagated to
+   *  child processes via PI_ACP_DELEGATE_MAX_DEPTH so the cap follows the whole
+   *  delegation tree, even when a child loads a different project acp.json. */
+  maxDepth?: number;
+  /** Hard timeout for synchronous delegates (async=false, or async auto-downgraded
+   *  on one-shot hosts), in minutes. Default: 5. 0 or null disables the timeout
+   *  (the run blocks until the child exits or the tool call is cancelled). */
+  syncTimeoutMinutes?: number | null;
+  /** Idle watchdog for async delegates: kill when no output arrives for this many
+   *  minutes. Default: 5. This is the main defense against a stuck child holding
+   *  its stdout fd open, so disabling it (0/null) logs a warning — use
+   *  acp_delegate_cancel as the manual escape hatch. */
+  idleTimeoutMinutes?: number | null;
+  /** Hard time limit for async delegates, in minutes. Default: 30. 0 or null
+   *  disables the limit. */
+  asyncTimeoutMinutes?: number | null;
 }
+
+/** Resolved delegate policy: what actually takes effect after merging acp.json,
+ *  env overrides and defaults. Timeout fields are milliseconds; null means the
+ *  corresponding timeout/watchdog is disabled. */
+export interface DelegatePolicy {
+  enabled: boolean;
+  displayUsage: "merged" | "separate";
+  maxDepth: number;
+  syncTimeoutMs: number | null;
+  idleMs: number | null;
+  asyncTimeoutMs: number | null;
+}
+
+export const DEFAULT_DELEGATE_POLICY: DelegatePolicy = {
+  enabled: true,
+  displayUsage: "separate",
+  maxDepth: 2,
+  syncTimeoutMs: 5 * 60_000,
+  idleMs: 5 * 60_000,
+  asyncTimeoutMs: 30 * 60_000,
+};
 
 /** Compression tuning fields, shared by all three levels (global, provider,
  *  model). Percentage fields accept a ratio (0.75) or percent string ("75%").
@@ -124,19 +164,59 @@ export const DEFAULT_TOOL_BASH_TIMEOUT = 60;
 export const DEFAULT_TOOL_OUTPUT_MAX_BYTES = 200_000;
 
 /** Resolve delegate config from the adapter, handling the boolean shorthand
- *  and the legacy flat `displayUsage` alias. */
-export function resolveDelegate(adapter: AdapterConfig): { enabled: boolean; displayUsage: "merged" | "separate" } {
+ *  and the legacy flat `displayUsage` alias. Precedence: env > acp.json >
+ *  default (same convention as ACP_MODEL_CONTEXT_LIMIT). Invalid values fall
+ *  back to the default with a logged warning — they never fail the session. */
+export function resolveDelegate(adapter: AdapterConfig): DelegatePolicy {
   const d = adapter.delegate;
-  if (typeof d === "object" && d !== null) {
-    return {
-      enabled: d.enabled !== false,
-      displayUsage: d.displayUsage ?? adapter.displayUsage ?? "separate",
-    };
+  const cfg: DelegateConfig = typeof d === "object" && d !== null ? d : {};
+  const enabled = typeof d === "object" && d !== null ? d.enabled !== false : d !== false;
+  const displayUsage = cfg.displayUsage ?? adapter.displayUsage ?? "separate";
+  const maxDepth = resolveMaxDepth(process.env.PI_ACP_DELEGATE_MAX_DEPTH ?? cfg.maxDepth);
+  const syncTimeoutMs = resolveTimeoutMinutes(
+    process.env.PI_ACP_DELEGATE_SYNC_TIMEOUT_MINUTES ?? cfg.syncTimeoutMinutes,
+    "syncTimeoutMinutes",
+    DEFAULT_DELEGATE_POLICY.syncTimeoutMs!,
+  );
+  const idleMs = resolveTimeoutMinutes(
+    process.env.PI_ACP_DELEGATE_IDLE_TIMEOUT_MINUTES ?? cfg.idleTimeoutMinutes,
+    "idleTimeoutMinutes",
+    DEFAULT_DELEGATE_POLICY.idleMs!,
+  );
+  const asyncTimeoutMs = resolveTimeoutMinutes(
+    process.env.PI_ACP_DELEGATE_ASYNC_TIMEOUT_MINUTES ?? cfg.asyncTimeoutMinutes,
+    "asyncTimeoutMinutes",
+    DEFAULT_DELEGATE_POLICY.asyncTimeoutMs!,
+  );
+  if (idleMs === null) {
+    logWarn("config", {
+      event: "delegate-idle-watchdog-disabled",
+      hint: "no-output watchdog is off; hung async runs must be cancelled manually via acp_delegate_cancel",
+    });
   }
-  return {
-    enabled: d !== false,
-    displayUsage: adapter.displayUsage ?? "separate",
-  };
+  return { enabled, displayUsage, maxDepth, syncTimeoutMs, idleMs, asyncTimeoutMs };
+}
+
+function resolveMaxDepth(value: number | string | undefined): number {
+  if (value === undefined) return DEFAULT_DELEGATE_POLICY.maxDepth;
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 1) {
+    logWarn("config", { event: "delegate-config-invalid", field: "maxDepth", value, fallback: DEFAULT_DELEGATE_POLICY.maxDepth });
+    return DEFAULT_DELEGATE_POLICY.maxDepth;
+  }
+  return n;
+}
+
+function resolveTimeoutMinutes(value: number | string | null | undefined, field: string, defaultMs: number): number | null {
+  if (value === undefined) return defaultMs;
+  if (value === null) return null;
+  const n = Number(value);
+  if (n === 0) return null;
+  if (!Number.isFinite(n) || n < 0) {
+    logWarn("config", { event: "delegate-config-invalid", field, value, fallback: `${defaultMs / 60_000}m` });
+    return defaultMs;
+  }
+  return n * 60_000;
 }
 
 /** Per-field deepest-wins merge of the three compression levels (global →

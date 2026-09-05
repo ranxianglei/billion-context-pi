@@ -138,6 +138,93 @@ test("resolveDelegate: object displayUsage takes priority over legacy flat", () 
   assert.equal(r.displayUsage, "separate");
 });
 
+// ─── #279: configurable maxDepth + timeouts ─────────────────────────────────
+
+test("resolveDelegate: maxDepth + timeouts default to 2 / 5m / 5m / 30m", () => {
+  const r = resolveDelegate({});
+  assert.equal(r.maxDepth, 2);
+  assert.equal(r.syncTimeoutMs, 5 * 60_000);
+  assert.equal(r.idleMs, 5 * 60_000);
+  assert.equal(r.asyncTimeoutMs, 30 * 60_000);
+});
+
+test("resolveDelegate: custom maxDepth + timeouts (minutes → ms)", () => {
+  const r = resolveDelegate({ delegate: { maxDepth: 1, syncTimeoutMinutes: 10, idleTimeoutMinutes: 7.5, asyncTimeoutMinutes: 120 } });
+  assert.equal(r.maxDepth, 1);
+  assert.equal(r.syncTimeoutMs, 10 * 60_000);
+  assert.equal(r.idleMs, 450_000);
+  assert.equal(r.asyncTimeoutMs, 120 * 60_000);
+});
+
+test("resolveDelegate: 0/null disables a timeout, others keep defaults", () => {
+  const r = resolveDelegate({ delegate: { syncTimeoutMinutes: 0, idleTimeoutMinutes: null, asyncTimeoutMinutes: 90 } });
+  assert.equal(r.syncTimeoutMs, null);
+  assert.equal(r.idleMs, null);
+  assert.equal(r.asyncTimeoutMs, 90 * 60_000);
+});
+
+test("resolveDelegate: invalid numeric values fall back to defaults", () => {
+  const r = resolveDelegate({ delegate: { maxDepth: 0, syncTimeoutMinutes: -5, idleTimeoutMinutes: Number.NaN } });
+  assert.equal(r.maxDepth, 2);
+  assert.equal(r.syncTimeoutMs, 5 * 60_000);
+  assert.equal(r.idleMs, 5 * 60_000);
+});
+
+const DELEGATE_ENV_KEYS = [
+  "PI_ACP_DELEGATE_MAX_DEPTH",
+  "PI_ACP_DELEGATE_SYNC_TIMEOUT_MINUTES",
+  "PI_ACP_DELEGATE_IDLE_TIMEOUT_MINUTES",
+  "PI_ACP_DELEGATE_ASYNC_TIMEOUT_MINUTES",
+] as const;
+
+function withDelegateEnv(mutate: (env: NodeJS.ProcessEnv) => void, fn: () => void): void {
+  const saved: Record<string, string | undefined> = {};
+  for (const k of DELEGATE_ENV_KEYS) saved[k] = process.env[k];
+  try {
+    mutate(process.env);
+    fn();
+  } finally {
+    for (const k of DELEGATE_ENV_KEYS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k]!;
+    }
+  }
+}
+
+test("resolveDelegate: env overrides acp.json; unset env falls back to config", () => {
+  withDelegateEnv(
+    (env) => {
+      env.PI_ACP_DELEGATE_MAX_DEPTH = "1";
+      env.PI_ACP_DELEGATE_ASYNC_TIMEOUT_MINUTES = "0";
+    },
+    () => {
+      const r = resolveDelegate({ delegate: { maxDepth: 5, asyncTimeoutMinutes: 120 } });
+      assert.equal(r.maxDepth, 1, "env beats config");
+      assert.equal(r.asyncTimeoutMs, null, "env 0 disables");
+    },
+  );
+  const r2 = resolveDelegate({ delegate: { maxDepth: 5, asyncTimeoutMinutes: 120 } });
+  assert.equal(r2.maxDepth, 5, "config used when env unset");
+  assert.equal(r2.asyncTimeoutMs, 120 * 60_000);
+});
+
+test("resolveDelegate: invalid env values fall back without failing", () => {
+  let r!: ReturnType<typeof resolveDelegate>;
+  withDelegateEnv(
+    (env) => {
+      env.PI_ACP_DELEGATE_MAX_DEPTH = "abc";
+      env.PI_ACP_DELEGATE_SYNC_TIMEOUT_MINUTES = "-3";
+      env.PI_ACP_DELEGATE_IDLE_TIMEOUT_MINUTES = "1.5x";
+    },
+    () => {
+      r = resolveDelegate({ delegate: { syncTimeoutMinutes: 8 } });
+    },
+  );
+  assert.equal(r.maxDepth, 2, "invalid env maxDepth → default");
+  assert.equal(r.syncTimeoutMs, 5 * 60_000, "invalid env timeout → default (not config)");
+  assert.equal(r.idleMs, 5 * 60_000, "invalid env idle → default");
+});
+
 test("resolveCompress returns {} when no compress configured", () => {
   assert.deepEqual(resolveCompress(undefined, "anthropic", "claude"), {});
 });
