@@ -444,7 +444,8 @@
 - **类型：** `number`
 - **默认值：** `50000`
 - **状态：** 🟢 ACTIVE
-- **说明：** 控制**软**压缩 nudge 频率的 token 增长阈值。每当积累约这么多新可压缩内容时，触发一次软 nudge。值越低模型被 nudge 压缩的频率越高；值越低频率越低。此设置只控制*基于增长的* nudge——用量越过 `compress.maxContextLimit` 后，强制 nudge 接管，不受此设置影响。映射到内核设置 `nudge.growthFloor` 和 `nudge.growthCap`。
+- **说明：** 控制**软**压缩 nudge 频率的 token 增长阈值。每当积累约这么多新可压缩内容时，触发一次软 nudge。值越低模型被 nudge 压缩的频率越高；值越高频率越低。此设置只控制*基于增长的* nudge——用量越过 `compress.maxContextLimit` 后，强制 nudge 接管，不受此设置影响。映射到内核设置 `nudge.growthFloor` 和 `nudge.growthCap`。
+- **同轮重注入：** 同一用户轮内 nudge 至多注入一次，但上下文自上次注入后又增长满一个增长门槛（镜像内核防抖 cadence：`max(minGrowthFloor, minGrowthRatio × adaptiveGrowth)`，默认 22.5K token）时，会在同轮重新注入新提醒（issue #269：模型忽略 78% nudge 后，原来会一直沉默到 95% emergency 机械截断）。成功 compress 后增长基线重锚到新（更小）刻度，压缩后重新长回压力带不会被压缩前峰值压制。
 
 ### `compress.providers` —— 按 provider / 按 model 覆盖
 

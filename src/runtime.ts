@@ -59,8 +59,10 @@ export interface AcpRuntime {
   setAdapter(adapter: AdapterConfig): void;
   prompts: Prompts;
   setPrompts(prompts: Prompts): void;
-  markNudgeShown(turnKey: string): void;
+  markNudgeShown(turnKey: string, tokenCount?: number): void;
   nudgeShownFor(turnKey: string): boolean;
+  /** tokenCount at the last actual nudge injection for this turn, for growth-aware re-inject (issue #269). */
+  nudgeShownTokensFor(turnKey: string): number | undefined;
   /** Process compress toolResults for the CURRENT user turn only (the caller
    *  scopes the list — see collectCompressOutcomes in src/index.ts); idempotent
    *  per toolCallId. Outcome classes: isError or noop (0-block panel) →
@@ -252,6 +254,7 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   let lastUserConfigKey: string | undefined;
   let promptsRef: Prompts = defaultPrompts;
   const nudgeShownTurns = new Set<string>();
+  const nudgeShownTokens = new Map<string, number>();
   // Per-session overflow self-heal state (learned window + armed emergency).
   const overflowEpisodes = new Map<string, OverflowEpisode>();
   function overflowFor(sid: string): OverflowEpisode {
@@ -405,4 +408,4 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   }
 
   let refused = false;
-  return { core, store, get refused() { return refused; }, set refused(v: boolean) { refused = v; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reloadConfig, stateFor, save, acquireLock, overflowFor, overflowDrop, noteDeadCompress, clearDeadCompress, throttleFor, throttleDrop };}
+  return { core, store, get refused() { return refused; }, set refused(v: boolean) { refused = v; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k, t) => { nudgeShownTurns.add(k); if (t !== undefined) nudgeShownTokens.set(k, t); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), nudgeShownTokensFor: (k) => nudgeShownTokens.get(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); nudgeShownTokens.clear(); }, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reloadConfig, stateFor, save, acquireLock, overflowFor, overflowDrop, noteDeadCompress, clearDeadCompress, throttleFor, throttleDrop };}
