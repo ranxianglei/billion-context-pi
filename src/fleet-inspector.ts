@@ -1,6 +1,6 @@
 import { openSync, fstatSync, readSync, closeSync } from "node:fs";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Key, matchesKey, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { Key, Markdown, matchesKey, truncateToWidth, wrapTextWithAnsi, type MarkdownTheme } from "@earendil-works/pi-tui";
 import type { Component } from "@earendil-works/pi-tui";
 import { OUT_DIR, fleetRunsSnapshot, type FleetRunView } from "./delegate-tool.js";
 
@@ -15,6 +15,9 @@ export interface InspectorTheme {
   fg(color: string, text: string): string;
   bold(text: string): string;
   bg(color: string, text: string): string;
+  italic?(text: string): string;
+  underline?(text: string): string;
+  strikethrough?(text: string): string;
 }
 
 interface TuiLike {
@@ -245,6 +248,25 @@ export function renderListBody(rows: ListRow[], selIdx: number, theme: Inspector
   });
 }
 
+function buildMarkdownTheme(theme: InspectorTheme): MarkdownTheme {
+  return {
+    heading: (t) => theme.bold(theme.fg("accent", t)),
+    link: (t) => theme.fg("accent", t),
+    linkUrl: (t) => theme.fg("dim", t),
+    code: (t) => theme.fg("text", t),
+    codeBlock: (t) => theme.fg("dim", t),
+    codeBlockBorder: (t) => theme.fg("borderMuted", t),
+    quote: (t) => theme.fg("dim", t),
+    quoteBorder: (t) => theme.fg("borderMuted", t),
+    hr: (t) => theme.fg("borderMuted", t),
+    listBullet: (t) => theme.fg("accent", t),
+    bold: (t) => theme.bold(t),
+    italic: (t) => (theme.italic ? theme.italic(t) : theme.fg("dim", t)),
+    strikethrough: (t) => (theme.strikethrough ? theme.strikethrough(t) : t),
+    underline: (t) => (theme.underline ? theme.underline(t) : t),
+  };
+}
+
 export function renderTranscriptBlocks(blocks: TranscriptBlock[], theme: InspectorTheme, innerW: number): string[] {
   const out: string[] = [];
   const wrapW = Math.max(10, innerW - 2);
@@ -260,9 +282,15 @@ export function renderTranscriptBlocks(blocks: TranscriptBlock[], theme: Inspect
       case "thinking":
         for (const l of wrapTextWithAnsi(b.text, wrapW)) out.push(theme.fg("thinkingText", `  ⌥ ${l}`));
         break;
-      case "text":
-        for (const l of wrapTextWithAnsi(b.text, wrapW)) out.push(theme.fg("text", `  ${l}`));
+      case "text": {
+        try {
+          const md = new Markdown(b.text, 0, 0, buildMarkdownTheme(theme));
+          for (const l of md.render(wrapW)) out.push(truncateToWidth(`  ${l}`, innerW));
+        } catch {
+          for (const l of wrapTextWithAnsi(b.text, wrapW)) out.push(theme.fg("text", `  ${l}`));
+        }
         break;
+      }
       case "toolCall": {
         out.push(truncateToWidth(theme.fg("toolTitle", theme.bold(`  ⚙ ${b.name ?? "?"}`)), innerW));
         const label = formatToolLabel(b.name ?? "", b.args);

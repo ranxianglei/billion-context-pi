@@ -294,3 +294,12 @@ test("renderTranscriptBlocks renders tool call (name + label) and multi-line res
   assert.ok(lines.some((l) => l.includes("✓ bash: line1")), "result header line");
   assert.ok(lines.some((l) => l.trim() === "line2"), "multi-line result body");
 });
+
+test("renderTranscriptBlocks renders assistant text as markdown (heading/list)", () => {
+  const blocks: TranscriptBlock[] = [{ kind: "text", text: "# Summary\n\n- first point\n- second point" }];
+  const lines = renderTranscriptBlocks(blocks, plainTheme, 40);
+  assertWidthSafe(lines, 40);
+  assert.ok(lines.some((l) => l.includes("Summary")), "heading text present");
+  assert.ok(!lines.some((l) => l.trim().startsWith("#")), "markdown heading marker stripped");
+  assert.ok(lines.some((l) => l.includes("first point")), "list item present");
+});
