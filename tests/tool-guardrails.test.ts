@@ -7,8 +7,11 @@ import {
   appendTimeoutNotice,
   isBashToolResult,
   wireToolGuardrails,
+  canonicalStringify,
+  repetitionFingerprint,
+  RepetitionTracker,
 } from "../src/tool-guardrails.js";
-import type { ExtensionAPI, ToolResultEvent } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ToolCallEvent, ToolResultEvent } from "@earendil-works/pi-coding-agent";
 import type { AcpRuntime } from "../src/runtime.js";
 
 type Content = ToolResultEvent["content"];
@@ -181,4 +184,182 @@ test("wireToolGuardrails honors an explicit smaller cap", () => {
   assert.ok(ret && typeof ret === "object" && "content" in ret && Array.isArray(ret.content));
   const t = textOf(ret.content[0]);
   assert.ok(Buffer.byteLength(t, "utf8") < 2000, "payload must be truncated to the explicit cap");
+});
+
+// --- generic tool-call repetition guard (issue #308) ---
+
+test("canonicalStringify is key-order independent for objects", () => {
+  assert.equal(canonicalStringify({ a: 1, b: 2 }), canonicalStringify({ b: 2, a: 1 }));
+});
+
+test("canonicalStringify preserves array order (arrays are ordered)", () => {
+  assert.notEqual(canonicalStringify([1, 2]), canonicalStringify([2, 1]));
+});
+
+test("canonicalStringify recurses into nested objects and drops undefined values", () => {
+  assert.equal(
+    canonicalStringify({ x: { p: 1, q: 2 }, y: 3 }),
+    canonicalStringify({ y: 3, x: { q: 2, p: 1 } }),
+  );
+  assert.equal(canonicalStringify({ a: 1, b: undefined }), canonicalStringify({ a: 1 }));
+});
+
+test("repetitionFingerprint is stable across argument key order", () => {
+  assert.equal(
+    repetitionFingerprint("acp_status", { scope: "uncompressed", view: "ranges" }),
+    repetitionFingerprint("acp_status", { view: "ranges", scope: "uncompressed" }),
+  );
+});
+
+test("repetitionFingerprint changes when any argument differs", () => {
+  const base = repetitionFingerprint("acp_status", { scope: "uncompressed", view: "ranges" });
+  assert.notEqual(base, repetitionFingerprint("acp_status", { scope: "uncompressed", view: "messages" }));
+  assert.notEqual(base, repetitionFingerprint("acp_status", {}));
+});
+
+test("repetitionFingerprint distinguishes different tools with identical args", () => {
+  assert.notEqual(repetitionFingerprint("read", { path: "/x" }), repetitionFingerprint("bash", { path: "/x" }));
+});
+
+test("RepetitionTracker escalates none -> warn -> abort by consecutive count", () => {
+  const t = new RepetitionTracker({ warn: 3, abort: 5 });
+  assert.equal(t.note("x", {}).action, "none");
+  assert.equal(t.note("x", {}).action, "none");
+  assert.equal(t.note("x", {}).action, "warn");
+  assert.equal(t.note("x", {}).action, "warn");
+  assert.equal(t.note("x", {}).action, "abort");
+  assert.equal(t.note("x", {}).action, "abort");
+});
+
+test("RepetitionTracker resets on a different fingerprint (args or tool name)", () => {
+  const t = new RepetitionTracker({ warn: 2, abort: 99 });
+  t.note("x", { a: 1 });
+  t.note("x", { a: 1 });
+  assert.equal(t.note("x", { a: 2 }).action, "none");
+  assert.equal(t.note("y", { a: 1 }).action, "none");
+});
+
+test("RepetitionTracker.reset() clears the run", () => {
+  const t = new RepetitionTracker({ warn: 2, abort: 3 });
+  t.note("x", {});
+  t.note("x", {});
+  t.reset();
+  assert.equal(t.note("x", {}).action, "none");
+});
+
+function makeRepCtx(sid = "sess-rep") {
+  const ctx = {
+    hasUI: false,
+    ui: { notify: () => {} },
+    abortCalls: 0,
+    sessionManager: { getSessionId: () => sid },
+    abort: () => {
+      ctx.abortCalls += 1;
+    },
+  };
+  return ctx;
+}
+
+function wireRepetition(adapter: Record<string, unknown>) {
+  const handlers: Record<string, (...a: unknown[]) => unknown> = {};
+  const pi = {
+    on: (name: string, fn: (...a: never[]) => unknown) => {
+      handlers[name] = fn as (...a: unknown[]) => unknown;
+    },
+  } as unknown as ExtensionAPI;
+  const runtime = { adapter } as AcpRuntime;
+  const ctx = makeRepCtx();
+  wireToolGuardrails(pi, runtime);
+  return {
+    call: (event: ToolCallEvent) => handlers["tool_call"]!(event, ctx),
+    result: (event: ToolResultEvent) => handlers["tool_result"]!(event),
+    input: (source: string) => handlers["input"]!({ source }, ctx),
+    shutdown: () => handlers["session_shutdown"]!({}, ctx),
+    ctx,
+  };
+}
+
+const statusCall = (id: string): ToolCallEvent =>
+  ({ type: "tool_call", toolName: "acp_status", toolCallId: id, input: { scope: "uncompressed", view: "ranges" } }) as unknown as ToolCallEvent;
+
+const statusResult = (id: string): ToolResultEvent =>
+  ({ toolName: "acp_status", toolCallId: id, content: text("status ok"), isError: false }) as unknown as ToolResultEvent;
+
+const hasContent = (ret: unknown): ret is { content: Content } =>
+  !!ret && typeof ret === "object" && "content" in ret;
+
+test("repetition guard queues a warning at warn=3 (default) without blocking", () => {
+  const w = wireRepetition({});
+  assert.equal(w.call(statusCall("c1")), undefined);
+  assert.equal(w.call(statusCall("c2")), undefined);
+  assert.equal(w.call(statusCall("c3")), undefined, "warn threshold must not block");
+  const res = w.result(statusResult("c3"));
+  assert.ok(hasContent(res), "warned result must be modified");
+  const t = textOf(res.content[0]);
+  assert.match(t, /CONSECUTIVE identical/);
+  assert.match(t, /acp_status/);
+});
+
+test("repetition guard blocks and aborts at abort=5 (default)", () => {
+  const w = wireRepetition({});
+  for (const id of ["k1", "k2", "k3", "k4"]) {
+    assert.equal(w.call(statusCall(id)), undefined, "below abort must not block");
+  }
+  const fifth = w.call(statusCall("k5")) as { block?: boolean; reason?: string };
+  assert.equal(fifth?.block, true, "5th identical call must be blocked");
+  assert.match(fifth?.reason ?? "", /BLOCKED/);
+  assert.equal(w.ctx.abortCalls, 1, "turn must be aborted exactly once");
+  const sixth = w.call(statusCall("k6")) as { block?: boolean };
+  assert.equal(sixth?.block, true, "still blocked after abort");
+});
+
+test("repetition guard resets the run when arguments change", () => {
+  const w = wireRepetition({});
+  const other: ToolCallEvent = {
+    type: "tool_call",
+    toolName: "acp_status",
+    toolCallId: "x",
+    input: { scope: "compressed" },
+  } as unknown as ToolCallEvent;
+  w.call(statusCall("r1"));
+  w.call(statusCall("r2"));
+  w.call(other);
+  w.call(statusCall("r3"));
+  w.call(statusCall("r4"));
+  assert.equal(w.result(statusResult("r4")), undefined, "only 2 consecutive identical -> no warning yet");
+  w.call(statusCall("r5"));
+  const res5 = w.result(statusResult("r5"));
+  assert.ok(hasContent(res5), "3rd consecutive identical -> warning");
+});
+
+test("repetition guard run resets on real user input but not extension-sent input", () => {
+  const w = wireRepetition({});
+  w.call(statusCall("u1"));
+  w.call(statusCall("u2"));
+  w.input("interactive");
+  w.call(statusCall("u3"));
+  w.call(statusCall("u4"));
+  assert.equal(w.result(statusResult("u4")), undefined, "after user-input reset, only 2 consecutive -> no warning");
+  w.input("extension");
+  w.call(statusCall("u5"));
+  const res5 = w.result(statusResult("u5"));
+  assert.ok(hasContent(res5), "extension-sent input must not reset the run");
+});
+
+test("repetition guard is fully inert when repetitionGuard: false", () => {
+  const w = wireRepetition({ repetitionGuard: false });
+  for (let i = 1; i <= 6; i++) {
+    assert.equal(w.call(statusCall(`d${i}`)), undefined, `identical call ${i} must not be blocked when disabled`);
+  }
+  assert.equal(w.ctx.abortCalls, 0, "never aborts when disabled");
+});
+
+test("repetition guard honors custom warn/abort thresholds", () => {
+  const w = wireRepetition({ repetitionGuard: { warn: 2, abort: 3 } });
+  assert.equal(w.call(statusCall("t1")), undefined);
+  assert.equal(w.call(statusCall("t2")), undefined);
+  const res2 = w.result(statusResult("t2"));
+  assert.ok(hasContent(res2), "warn fires at custom warn=2");
+  const third = w.call(statusCall("t3")) as { block?: boolean };
+  assert.equal(third?.block, true, "abort fires at custom abort=3");
 });

@@ -100,6 +100,7 @@ All keys below are currently **ACTIVE**.
 | `toolBashDefaultTimeout` | number | `60` | 🟢 ACTIVE | Default `bash` tool timeout in seconds when the model omits it. |
 | `toolOutputMaxBytes` | number | `200000` | 🟢 ACTIVE | Hard byte cap on tool result text. |
 | `throttleRetry` | boolean \| object | `true` | 🟢 ACTIVE | Auto-retry provider token rate-limit errors with progressive backoff. |
+| `repetitionGuard` | boolean \| object | `true` | 🟢 ACTIVE | Break infinite loops of byte-identical tool calls (warn at 3 consecutive, block + abort at 5). |
 
 **Delegate keys**
 
@@ -124,6 +125,14 @@ All keys below are currently **ACTIVE**.
 | `throttleRetry.baseDelayMs` | number | `60000` | 🟢 ACTIVE | Delay before the first paced kick. |
 | `throttleRetry.maxDelayMs` | number | `300000` | 🟢 ACTIVE | Cap for paced kick delays. |
 | `throttleRetry.backoffMode` | string | `"exponential"` | 🟢 ACTIVE | Delay progression: `"exponential"` (×2 per kick) or `"fixed"`. |
+
+**Repetition guard keys**
+
+| Key | Type | Default | Status | Description |
+|-----|------|---------|--------|-------------|
+| `repetitionGuard.enabled` | boolean | `true` | 🟢 ACTIVE | Enable the repetition breaker. `false` disables it entirely. |
+| `repetitionGuard.warn` | number | `3` | 🟢 ACTIVE | Consecutive byte-identical calls before a strong warning is appended to the tool result. |
+| `repetitionGuard.abort` | number | `5` | 🟢 ACTIVE | Consecutive byte-identical calls before the call is blocked (not executed) and the turn is aborted. Must exceed `warn`. |
 
 **Compression keys**
 
@@ -360,6 +369,57 @@ How it works:
 - **Default:** `"exponential"`
 - **Status:** 🟢 ACTIVE
 - **Description:** Delay progression between paced kicks: `"exponential"` doubles the delay per kick (capped at `maxDelayMs`); `"fixed"` repeats `baseDelayMs` every kick.
+
+---
+
+## Tool Call Repetition Guard
+
+The `repetitionGuard` key breaks **infinite loops of byte-identical tool calls**. Small greedy-decoding models can get stuck re-emitting the exact same `(tool call → tool result)` pair turn after turn — e.g. calling `acp_status {"scope":"uncompressed","view":"ranges"}` dozens of times with identical arguments while context grows each round. Token-level penalties cannot break this, because it is a *sequence-level* attractor (the repetition crosses turn boundaries), not a within-sequence token repetition.
+
+The guard fingerprints each tool call as `sha1(toolName + canonical-JSON(args))`, where the JSON serialization sorts object keys so that only the *arguments* matter — key order and result content are ignored. It tracks the length of the current run of consecutive identical calls per session:
+
+- At **`warn`** consecutive identical calls, a strong warning is appended to the matching tool result telling the model to stop repeating the call.
+- At **`abort`** consecutive identical calls, the call is **blocked** (not executed), the turn is aborted, and a terminal notification is shown.
+
+Any change to the arguments (or a switch to a different tool) resets the counter, as does a real user message (extension-sent messages do not reset it).
+
+### `repetitionGuard`
+
+- **Type:** boolean \| object
+- **Default:** `true`
+- **Status:** 🟢 ACTIVE
+- **Description:** Enable/disable the repetition breaker and tune its thresholds. `repetitionGuard: false` disables it entirely. Object form (any subset):
+
+  ```json
+  {
+    "repetitionGuard": {
+      "enabled": true,
+      "warn": 3,
+      "abort": 5
+    }
+  }
+  ```
+
+### `repetitionGuard.enabled`
+
+- **Type:** boolean
+- **Default:** `true`
+- **Status:** 🟢 ACTIVE
+- **Description:** Turn the feature on/off. `false` (or top-level `repetitionGuard: false`) disables all repetition detection.
+
+### `repetitionGuard.warn`
+
+- **Type:** number
+- **Default:** `3`
+- **Status:** 🟢 ACTIVE
+- **Description:** Number of consecutive byte-identical calls before a warning is appended to the tool result. Must be at least 1.
+
+### `repetitionGuard.abort`
+
+- **Type:** number
+- **Default:** `5`
+- **Status:** 🟢 ACTIVE
+- **Description:** Number of consecutive byte-identical calls before the call is blocked and the turn is aborted. Must be greater than `warn`; if misconfigured lower, it is clamped up to `warn + 1`.
 
 ---
 

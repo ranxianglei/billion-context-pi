@@ -99,6 +99,7 @@
 | `toolBashDefaultTimeout` | number | `60` | 🟢 ACTIVE | 模型省略 `timeout` 时注入 bash 工具的默认超时秒数。 |
 | `toolOutputMaxBytes` | number | `200000` | 🟢 ACTIVE | 工具返回文本的硬性字节上限。 |
 | `throttleRetry` | boolean \| object | `true` | 🟢 ACTIVE | 自动重试 provider 侧 token 限流错误（递进退避）。 |
+| `repetitionGuard` | boolean \| object | `true` | 🟢 ACTIVE | 打断字节级完全相同的工具调用死循环（连续 3 次告警，连续 5 次拦截并中止本轮）。 |
 
 **delegate 键**
 
@@ -123,6 +124,14 @@
 | `throttleRetry.baseDelayMs` | number | `60000` | 🟢 ACTIVE | 首次递进 kick 前的等待毫秒数。 |
 | `throttleRetry.maxDelayMs` | number | `300000` | 🟢 ACTIVE | 递进 kick 延迟上限。 |
 | `throttleRetry.backoffMode` | string | `"exponential"` | 🟢 ACTIVE | 延迟递进方式：`"exponential"`（每次 kick ×2）或 `"fixed"`。 |
+
+**重复熔断键**
+
+| 键 | 类型 | 默认值 | 状态 | 说明 |
+|----|------|--------|------|------|
+| `repetitionGuard.enabled` | boolean | `true` | 🟢 ACTIVE | 启用重复熔断。`false` 完全关闭。 |
+| `repetitionGuard.warn` | number | `3` | 🟢 ACTIVE | 连续字节级相同调用达到该次数后，在工具返回尾部追加强警告。 |
+| `repetitionGuard.abort` | number | `5` | 🟢 ACTIVE | 连续字节级相同调用达到该次数后，拦截该调用（不执行）并中止本轮。必须大于 `warn`。 |
 
 **compress 键**
 
@@ -352,6 +361,57 @@
 - **默认值：** `"exponential"`
 - **状态：** 🟢 ACTIVE
 - **说明：** 递进 kick 之间的延迟递进方式：`"exponential"` 每次 kick 延迟翻倍（上限 `maxDelayMs`）；`"fixed"` 每次 kick 固定 `baseDelayMs`。
+
+---
+
+## 工具调用重复熔断
+
+`repetitionGuard` 键用于打断**字节级完全相同的工具调用死循环**。小模型在贪心解码下可能卡住，逐轮重复发出完全一致的 `(工具调用 → 工具返回)` 对——例如带着相同参数几十次调用 `acp_status {"scope":"uncompressed","view":"ranges"}`，而上下文每轮都在增长。token 级惩罚无法打破这种循环，因为它是**序列级吸引子**（重复跨越轮次边界），而非序列内的 token 重复。
+
+该熔断器把每次工具调用指纹化为 `sha1(toolName + canonical-JSON(args))`，其中 JSON 序列化会对对象键排序，因此只比较*参数*本身——键顺序与返回内容都不影响判定。它在会话内跟踪当前连续相同调用的长度：
+
+- 连续相同调用达到 **`warn`** 次时，在对应工具返回尾部追加一条强警告，提示模型停止重复该调用；
+- 连续相同调用达到 **`abort`** 次时，**拦截**该调用（不执行）、中止本轮，并在终端弹出通知。
+
+任何参数变化（或切换到另一个工具）都会重置计数；一条真实用户消息也会重置（扩展自己发送的消息不会重置）。
+
+### `repetitionGuard`
+
+- **类型：** boolean \| object
+- **默认值：** `true`
+- **状态：** 🟢 ACTIVE
+- **说明：** 启用/禁用重复熔断并调整阈值。`repetitionGuard: false` 完全关闭该功能。object 形式（任意子集）：
+
+  ```json
+  {
+    "repetitionGuard": {
+      "enabled": true,
+      "warn": 3,
+      "abort": 5
+    }
+  }
+  ```
+
+### `repetitionGuard.enabled`
+
+- **类型：** boolean
+- **默认值：** `true`
+- **状态：** 🟢 ACTIVE
+- **说明：** 开关。`false`（或顶层 `repetitionGuard: false`）禁用所有重复检测。
+
+### `repetitionGuard.warn`
+
+- **类型：** number
+- **默认值：** `3`
+- **状态：** 🟢 ACTIVE
+- **说明：** 连续字节级相同调用达到该次数后，在工具返回尾部追加警告。最小为 1。
+
+### `repetitionGuard.abort`
+
+- **类型：** number
+- **默认值：** `5`
+- **状态：** 🟢 ACTIVE
+- **说明：** 连续字节级相同调用达到该次数后，拦截该调用并中止本轮。必须大于 `warn`；若误配成更小值会被向上钳制到 `warn + 1`。
 
 ---
 

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { resolveConfig, resolveCompress, mergeCompress, resolveDelegate, type AdapterConfig } from "../src/config.js";
+import { resolveConfig, resolveCompress, mergeCompress, resolveDelegate, resolveRepetitionGuard, REPETITION_GUARD_DEFAULTS, type AdapterConfig } from "../src/config.js";
 
 const EMPTY: AdapterConfig = {};
 
@@ -370,4 +370,48 @@ test("resolveConfig applies provider/model cascade to kernel config", () => {
 test("resolveConfig without provider/modelId behaves as before (global only)", () => {
   const cfg = resolveConfig({ compress: { maxContextLimit: "80%" } }, 1_000_000);
   assert.equal(cfg.nudge.maxContextLimitPct, 0.8);
+});
+
+test("resolveRepetitionGuard defaults to enabled with warn=3 abort=5", () => {
+  const r = resolveRepetitionGuard(EMPTY);
+  assert.equal(r.enabled, true);
+  assert.equal(r.warn, 3);
+  assert.equal(r.abort, 5);
+});
+
+test("resolveRepetitionGuard defaults match the exported defaults constant", () => {
+  const r = resolveRepetitionGuard(EMPTY);
+  assert.equal(r.warn, REPETITION_GUARD_DEFAULTS.warn);
+  assert.equal(r.abort, REPETITION_GUARD_DEFAULTS.abort);
+});
+
+test("resolveRepetitionGuard boolean false shorthand disables the guard", () => {
+  const r = resolveRepetitionGuard({ repetitionGuard: false });
+  assert.equal(r.enabled, false);
+});
+
+test("resolveRepetitionGuard object with explicit warn/abort", () => {
+  const r = resolveRepetitionGuard({ repetitionGuard: { warn: 4, abort: 8 } });
+  assert.equal(r.enabled, true);
+  assert.equal(r.warn, 4);
+  assert.equal(r.abort, 8);
+});
+
+test("resolveRepetitionGuard clamps abort to at least warn+1 when misconfigured", () => {
+  const r = resolveRepetitionGuard({ repetitionGuard: { warn: 5, abort: 2 } });
+  assert.ok(r.abort > r.warn, "abort must be strictly greater than warn");
+  assert.equal(r.abort, 6);
+});
+
+test("resolveRepetitionGuard falls back for non-positive thresholds", () => {
+  const r = resolveRepetitionGuard({ repetitionGuard: { warn: 0, abort: -1 } });
+  assert.equal(r.warn, 3);
+  assert.equal(r.abort, 5);
+});
+
+test("resolveRepetitionGuard keeps custom thresholds while honoring enabled:false", () => {
+  const r = resolveRepetitionGuard({ repetitionGuard: { enabled: false, warn: 4, abort: 9 } });
+  assert.equal(r.enabled, false);
+  assert.equal(r.warn, 4);
+  assert.equal(r.abort, 9);
 });
