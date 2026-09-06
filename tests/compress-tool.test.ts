@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { rm } from "node:fs/promises";
+import { readFile, rm } from "node:fs/promises";
 import { createAcpExtension } from "../src/index.js";
 
 // ─── helpers (mirror decompress-tool.test.ts) ──────────────────────────────
@@ -118,4 +118,41 @@ test("compress afterTokens is measured on the same sent-view scale as beforeToke
   // afterTokens would over-claim by block-1 summary + tags (~220).
   assert.ok(reclaimed <= 180, `reclaimed ${reclaimed} over-claimed (raw afterTokens would be ~220): ${text}`);
   assert.equal(before - after, reclaimed, "reclaimed consistent with the arrow");
+});
+
+// issue #309: a model that emits double-escaped summaries (literal \uXXXX runs
+// in the parsed string) must not have that corruption stored — the kernel
+// renders summaries verbatim into every future prompt.
+test("compress normalizes double-escaped \\uXXXX summaries before storage", async () => {
+  const { api, handlers } = captureApi();
+  // minCompressRange gate needs ≥5000 chars in the range; the kernel's
+  // unconfigurable preserveRecentTokens (5000) protects any trailing window,
+  // so e2 carries ≥5000 tokens of its own and preserveRecentMessages:1 makes
+  // e1 (the compress target) fall outside every protected zone.
+  createAcpExtension({ modelContextLimit: 200_000, preserveRecentMessages: 1 })(api as any);
+  const stateFile = "/tmp/pai-acp-compress-unescape.session.json";
+  await rm(`${stateFile}.acp.json`, { force: true });
+  const entries = [userMsg("e1", "中".repeat(6000)), userMsg("e2", "中".repeat(6000))];
+  const ctx = fakeCtx(entries, stateFile);
+  ctx.__setUsage(100_000);
+  await runContextRound(handlers, ctx); // prime the context round
+
+  const compressTool = api.tools.find((t: any) => t.name === "compress")!;
+  // Padded so the DECODED form clears minSummaryLength (50): 4 + 25 + 25.
+  const escapedSummary = "摘要: " + "\\u5408".repeat(25) + " 结束。" + "尾".repeat(25);
+  assert.ok(escapedSummary.includes("\\u5408"), "precondition: literal escape runs in input");
+  const out = await compressTool.execute(
+    "tc1",
+    { content: [{ startId: "m00001", endId: "m00001", summary: escapedSummary }] },
+    undefined, undefined, ctx,
+  );
+  const text = typeof out === "string" ? out : out.content?.[0]?.text ?? String(out);
+  assert.ok(text.includes("▣ ACP"), `compress failed: ${text}`);
+  assert.ok(!text.includes("Errors:"), `compress was rejected: ${text}`);
+
+  const raw = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
+  const block = (raw.blocks as any[]).find((b) => typeof b.summary === "string" && b.summary.length > 0);
+  assert.ok(block, "no block stored in acp state");
+  assert.ok(block.summary.includes("合".repeat(25)), "stored summary must contain decoded CJK");
+  assert.ok(!block.summary.includes("\\u5408"), "stored summary must not contain literal \\uXXXX runs");
 });

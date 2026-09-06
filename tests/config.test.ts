@@ -82,6 +82,18 @@ test("resolveConfig leaves growthFloor/growthCap at kernel defaults when compres
   assert.equal(cfg.nudge.growthCap, 50000);
 });
 
+test("resolveConfig maps compress.minPressureBenefitTokens to kernel nudge (0 = legacy any-pending)", () => {
+  const cfg = resolveConfig({ compress: { minPressureBenefitTokens: 0 } }, 1_000_000);
+  assert.equal(cfg.nudge.minPressureBenefitTokens, 0);
+  const cfg2 = resolveConfig({ compress: { minPressureBenefitTokens: 8000 } }, 1_000_000);
+  assert.equal(cfg2.nudge.minPressureBenefitTokens, 8000);
+});
+
+test("resolveConfig leaves minPressureBenefitTokens undefined (kernel default max(5000, limit×1%)) when omitted", () => {
+  const cfg = resolveConfig(EMPTY, 1_000_000);
+  assert.equal(cfg.nudge.minPressureBenefitTokens, undefined);
+});
+
 test("resolveConfig handles all three compress fields together", () => {
   const cfg = resolveConfig({ compress: { maxContextLimit: "70%", emergencyThresholdPercent: 0.9, nudgeGrowthTokens: 40000 } }, 1_000_000);
   assert.equal(cfg.nudge.maxContextLimitPct, 0.7);

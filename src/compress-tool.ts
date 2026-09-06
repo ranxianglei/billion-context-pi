@@ -9,6 +9,7 @@ import { MAX_COMPRESS_ATTEMPTS } from "./runtime.js";
 import { debug, logError, logInfo, logThrow, logWarn } from "./log.js";
 import { estimateTokens, collectCoveredMessageIds, collectImageTokens, modelSupportsImages, lastUserMessageId, adjustedTokenCount } from "./tokens.js";
 import { defaultCountTokens, parseCompressArgs, viableRanges, formatRanges, type CompressionBlock, type CompressionState, type CompressParseDiagnostics, type NudgeDecision } from "acp-kernel";
+import { countUnicodeEscapes, findUnverifiableUserQuote, sanitizeSummary } from "./summary-sanitize.js";
 import { getSystemPromptText } from "./compat.js";
 import { OMP_UNSUPPORTED_MESSAGE } from "./omp.js";
 
@@ -303,6 +304,21 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
   const state = turn.state;
   const messages = turn.messages;
   const sid = ctx.sessionManager.getSessionId();
+  // Issue #309: normalize at ingest — the kernel stores/renders summaries
+  // verbatim, so double-escaped \uXXXX runs would persist into every future
+  // prompt. Unverifiable user-quote claims are logged as evidence only.
+  const sanitizedRanges = ranges.map((r) => {
+    const span = `${r.startId}..${r.endId}`;
+    const s = sanitizeSummary(r.summary);
+    if (s.unescaped) {
+      debug.event("compress", { sid, event: "summary-unescaped", span, escapes: countUnicodeEscapes(r.summary), beforeLen: r.summary.length, afterLen: s.text.length });
+    }
+    const unverifiedQuote = findUnverifiableUserQuote(s.text);
+    if (unverifiedQuote !== null) {
+      logWarn("compress", { sid, event: "summary-unverifiable-quote", span, claim: unverifiedQuote });
+    }
+    return s.text === r.summary ? r : { ...r, summary: s.text };
+  });
   const turnKey = lastUserMessageId(entries) ?? sid;
   const snapshot = compressibleSnapshotText(turn.nudge);
   if (runtime.compressRetryCappedFor(turnKey)) {
@@ -331,7 +347,7 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
     beforeTokens,
   });
   const applied = runtime.core.applyCompression({
-    ranges: ranges.map((r) => ({ startRef: r.startId, endRef: r.endId, summary: r.summary, topic: r.topic ?? topLevelTopic, summaryMaxChars, compressCallId: toolCallId })),
+    ranges: sanitizedRanges.map((r) => ({ startRef: r.startId, endRef: r.endId, summary: r.summary, topic: r.topic ?? topLevelTopic, summaryMaxChars, compressCallId: toolCallId })),
     messages,
     state,
     config,

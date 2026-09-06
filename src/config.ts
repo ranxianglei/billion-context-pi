@@ -122,6 +122,13 @@ export interface CompressSettings {
   /** Token growth threshold for soft compression nudges. Default: 50000.
    *  Maps to kernel nudge.growthFloor + nudge.growthCap. */
   nudgeGrowthTokens?: number;
+  /** Minimum reclaimable tokens for a pressure-band nudge (kernel #198).
+   *  Default: max(5000, round(limit×0.01)). Explicit 0 restores the legacy
+   *  any-pending behavior — useful for tiny windows (e.g. e2e scenarios with
+   *  modelContextLimit 1500) where a fixed 5000-token floor exceeds the whole
+   *  window and would suppress every nudge. Maps to kernel
+   *  nudge.minPressureBenefitTokens. */
+  minPressureBenefitTokens?: number;
 }
 
 /** Per-provider compression overrides. Carries the same tuning fields as the
@@ -300,6 +307,7 @@ export function mergeCompress(
     maxContextLimit: model?.maxContextLimit ?? provider?.maxContextLimit ?? global?.maxContextLimit,
     emergencyThresholdPercent: model?.emergencyThresholdPercent ?? provider?.emergencyThresholdPercent ?? global?.emergencyThresholdPercent,
     nudgeGrowthTokens: model?.nudgeGrowthTokens ?? provider?.nudgeGrowthTokens ?? global?.nudgeGrowthTokens,
+    minPressureBenefitTokens: model?.minPressureBenefitTokens ?? provider?.minPressureBenefitTokens ?? global?.minPressureBenefitTokens,
   };
 }
 
@@ -346,6 +354,9 @@ export function resolveConfig(adapter: AdapterConfig, liveContextLimit: number, 
   if (c.nudgeGrowthTokens !== undefined) {
     config.nudge.growthFloor = c.nudgeGrowthTokens;
     config.nudge.growthCap = c.nudgeGrowthTokens;
+  }
+  if (c.minPressureBenefitTokens !== undefined) {
+    config.nudge.minPressureBenefitTokens = c.minPressureBenefitTokens;
   }
   return config;
 }

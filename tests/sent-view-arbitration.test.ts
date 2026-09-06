@@ -31,6 +31,12 @@ function msg(id: string, role: string, text: string) {
 }
 
 const MID = "lorem ".repeat(3000);
+// Small bulk for idle-control tests: ~1.8K chars × 20 msgs ≈ 9K tokens ≈ 5%
+// usage at a 180K window — below kernel #194's first-sight bypass floor
+// (usage ≥ minContextLimitPct 45% with ready mass ≥ growth tokens), so the
+// control scenarios stay idle for the reason they were written to isolate
+// (the usage floor), not because a bypass is masking the difference.
+const SMALL = "lorem ".repeat(300);
 
 let branchEntries: any[] = [];
 
@@ -103,9 +109,9 @@ test("context transform stays idle when there is no provider usage to floor from
   createAcpExtension({ modelContextLimit: 180_000 })(api as any);
 
   const ctx = fakeCtx(500);
-  const entries = [msg("e0", "user", "start " + MID)];
-  for (let i = 1; i <= 18; i++) entries.push(msg(`e${i}`, i % 2 ? "assistant" : "user", `f${i} ` + MID));
-  entries.push(msg("e19", "assistant", "f19 " + MID));
+  const entries = [msg("e0", "user", "start " + SMALL)];
+  for (let i = 1; i <= 18; i++) entries.push(msg(`e${i}`, i % 2 ? "assistant" : "user", `f${i} ` + SMALL));
+  entries.push(msg("e19", "assistant", "f19 " + SMALL));
   branchEntries = entries;
   const r = await fire(handlers, entries, ctx);
   assert.equal(nudgeCount(r), 0, "no nudge: 42% estimate and no provider usage to floor from");
@@ -123,9 +129,9 @@ test("context transform skips the provider-usage floor while the anchor predates
   createAcpExtension({ modelContextLimit: 180_000 })(api as any);
 
   const ctx = fakeCtx(175_000);
-  const entries = [msg("e0", "user", "start " + MID)];
-  for (let i = 1; i <= 18; i++) entries.push(msg(`e${i}`, i % 2 ? "assistant" : "user", `f${i} ` + MID));
-  entries.push({ type: "message", id: "e19", parentId: null, timestamp: "", message: { role: "assistant", content: "f19 " + MID, timestamp: Date.now(), usage: { input: 175_000, cacheRead: 0, cacheWrite: 0 } } });
+  const entries = [msg("e0", "user", "start " + SMALL)];
+  for (let i = 1; i <= 18; i++) entries.push(msg(`e${i}`, i % 2 ? "assistant" : "user", `f${i} ` + SMALL));
+  entries.push({ type: "message", id: "e19", parentId: null, timestamp: "", message: { role: "assistant", content: "f19 " + SMALL, timestamp: Date.now(), usage: { input: 175_000, cacheRead: 0, cacheWrite: 0 } } });
   entries.push({ type: "message", id: "e20", parentId: null, timestamp: "", message: { role: "toolResult", toolName: "compress", toolCallId: "c1", content: [{ type: "text", text: "▣ ACP | 42.3K → 18.9K tokens (~23.4K reclaimed, 3 blocks)" }], timestamp: Date.now() } });
   branchEntries = entries;
   const r = await fire(handlers, entries, ctx);
