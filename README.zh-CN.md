@@ -225,7 +225,7 @@ cp -r ~/.pi/agent/sessions  <备份>/pi-sessions
 
 在目标机器上把它们放回彼此相邻的位置。对 clone/fork 子会话,还要带上父会话的那一对,以便 `parentSession` 能解析。
 
-> 根治方案 —— 让宿主在 import/export 时一并携带旁挂文件并保留 `parentSession` —— 属于上游 pi-coding-agent,已在 issue [#299](https://github.com/ranxianglei/billion-context-pi/issues/299) 跟踪。落地前请手动成对拷贝。
+> 根治方案 —— 让宿主在 import/export 时一并携带旁挂文件并保留 `parentSession` —— 已在上游 pi-coding-agent 提交（[ranxianglei/pi#1](https://github.com/ranxianglei/pi/pull/1)，本仓库由 issue [#299](https://github.com/ranxianglei/billion-context-pi/issues/299) 跟踪）。该版本发布并被你的 Pi 拾取之前,请手动成对拷贝。
 
 ## 基于 acp-kernel
 

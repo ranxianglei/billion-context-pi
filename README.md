@@ -225,7 +225,7 @@ cp -r ~/.pi/agent/sessions  <backup>/pi-sessions
 
 Restore them next to each other on the target machine. For clone/fork children, also bring the parent's pair so `parentSession` resolves.
 
-> A permanent fix — the host carrying the sidecar through import/export and preserving `parentSession` — belongs upstream in pi-coding-agent and is tracked in issue [#299](https://github.com/ranxianglei/billion-context-pi/issues/299). Until it lands, copy the pair manually.
+> A permanent fix — the host carrying the sidecar through import/export and preserving `parentSession` — has been submitted upstream in pi-coding-agent ([ranxianglei/pi#1](https://github.com/ranxianglei/pi/pull/1); tracked here by [#299](https://github.com/ranxianglei/billion-context-pi/issues/299)). Until that release ships and your Pi picks it up, copy the pair manually.
 
 ## Built on acp-kernel
 
