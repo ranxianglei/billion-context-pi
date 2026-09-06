@@ -2,8 +2,10 @@ import type { Readable } from "node:stream";
 
 export interface WatchdogOptions {
   eofGraceMs: number;
-  idleMs: number;
-  timeoutMs: number;
+  /** Kill when no output for this long. 0/null disables the idle timer. */
+  idleMs?: number | null;
+  /** Hard time limit. 0/null disables the limit timer. */
+  timeoutMs?: number | null;
   killGraceMs: number;
 }
 
@@ -89,15 +91,21 @@ export function attachWatchdogs(
     settledGraceTimer.unref?.();
   };
 
+  const idleMs = opts.idleMs ?? 0;
+  const timeoutMs = opts.timeoutMs ?? 0;
+
   const poke = (): void => {
+    if (idleMs <= 0) return;
     if (idleTimer) clearTimeout(idleTimer);
-    idleTimer = setTimeout(() => killByWatchdog(`no output for ${opts.idleMs / 60_000}m`), opts.idleMs);
+    idleTimer = setTimeout(() => killByWatchdog(`no output for ${idleMs / 60_000}m`), idleMs);
     idleTimer.unref?.();
   };
 
   poke();
-  timeoutTimer = setTimeout(() => killByWatchdog(`${opts.timeoutMs / 60_000}m limit`), opts.timeoutMs);
-  timeoutTimer.unref?.();
+  if (timeoutMs > 0) {
+    timeoutTimer = setTimeout(() => killByWatchdog(`${timeoutMs / 60_000}m limit`), timeoutMs);
+    timeoutTimer.unref?.();
+  }
 
   const onStdoutEnd = (): void => {
     if (hooks.isSettled()) return;

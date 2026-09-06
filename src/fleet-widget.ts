@@ -35,7 +35,7 @@ function renderLines(runs: WidgetRun[]): string[] | undefined {
     const elapsed = Math.max(0, Math.round((now - r.startedAt) / 1000));
     return `  ● ${r.agent} (${elapsed}s) — ${truncateTask(r.task)}`;
   });
-  return [header, ...rows];
+  return [header, ...rows, "  /acp-fleet · Ctrl+Alt+F — inspect"];
 }
 
 function renderKeyFor(runs: WidgetRun[]): string {

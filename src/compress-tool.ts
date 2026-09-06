@@ -7,7 +7,7 @@ import type {
 import type { AcpRuntime } from "./runtime.js";
 import { MAX_COMPRESS_ATTEMPTS } from "./runtime.js";
 import { debug, logError, logInfo, logThrow, logWarn } from "./log.js";
-import { estimateTokens, collectCoveredMessageIds, collectImageTokens, modelSupportsImages, lastUserMessageId } from "./tokens.js";
+import { estimateTokens, collectCoveredMessageIds, collectImageTokens, modelSupportsImages, lastUserMessageId, adjustedTokenCount } from "./tokens.js";
 import { defaultCountTokens, parseCompressArgs, viableRanges, formatRanges, type CompressionBlock, type CompressionState, type CompressParseDiagnostics, type NudgeDecision } from "acp-kernel";
 import { countUnicodeEscapes, findUnverifiableUserQuote, sanitizeSummary } from "./summary-sanitize.js";
 import { getSystemPromptText } from "./compat.js";
@@ -291,11 +291,15 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
   const systemPromptTokens = systemPromptText ? defaultCountTokens(systemPromptText) : 0;
   const imageTokens = collectImageTokens(entries, modelSupportsImages(ctx.model));
   const sentTokens = estimateTokens(coreMessages, collectCoveredMessageIds(initialState), imageTokens) + systemPromptTokens;
+  // Same view-based recount as the context transform (issue #289): with blocks
+  // present, the raw-view count can sit far above the sent view and mis-scale
+  // this pass's emergency-truncate band before boundary resolution.
+  const firstTokenCount = adjustedTokenCount(runtime.core, coreMessages, initialState, config, sentTokens, imageTokens, systemPromptTokens);
   const turn = runtime.core.processTurn({
     messages: coreMessages,
     state: initialState,
     config,
-    tokenCount: sentTokens,
+    tokenCount: firstTokenCount,
   });
   const state = turn.state;
   const messages = turn.messages;
@@ -379,11 +383,15 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
   // (post-processTurn view: visible text + every active block's summary anchor
   // + ref-tag overhead), so "X → Y (~Z reclaimed)" compares like-for-like —
   // including the new block's own summary, which the model will pay for next.
+  // Post-compression count: feeding the stale pre-compression sentTokens would
+  // mis-scale this pass's emergency-truncate band (threshold 0.95) and skew
+  // afterTokens (issue #289).
+  const postSentTokens = adjustedTokenCount(runtime.core, coreMessages, applied.state, config, estimateTokens(coreMessages, collectCoveredMessageIds(applied.state), imageTokens) + systemPromptTokens, imageTokens, systemPromptTokens);
   const afterTurn = runtime.core.processTurn({
     messages: coreMessages,
     state: applied.state,
     config,
-    tokenCount: sentTokens,
+    tokenCount: postSentTokens,
   });
   const afterTokens = estimateTokens(afterTurn.messages, collectCoveredMessageIds(applied.state), imageTokens);
   const reclaimed = Math.max(0, beforeTokens - afterTokens);

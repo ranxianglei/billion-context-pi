@@ -59,12 +59,12 @@ function userMsg(id: string, text: string) {
   return { type: "message", id, parentId: null, timestamp: "", message: { role: "user", content: text, timestamp: Date.now() } };
 }
 
-test("factory registers the compress tool and 5 flat commands", () => {
+ test("factory registers the compress tool and 6 flat commands", () => {
   const { api, handlers } = captureApi();
   createAcpExtension()(api as any);
 
   assert.ok(api.tools.some((t) => t.name === "compress"), "compress tool registered");
-  assert.deepEqual([...api.commands.keys()].sort(), ["acp", "acp-decompress", "acp-search", "acp-status", "acp-subagents"]);
+  assert.deepEqual([...api.commands.keys()].sort(), ["acp", "acp-decompress", "acp-fleet", "acp-search", "acp-status", "acp-subagents"]);
   assert.ok(handlers.has("context"), "context event wired");
   assert.ok(handlers.has("session_before_compact"), "compaction-disable wired");
   assert.ok(handlers.has("before_agent_start"), "system-prompt wired");
@@ -729,6 +729,15 @@ test("delegate:false omits the ACP_DELEGATE NOTIFICATIONS section from the syste
   createAcpExtension({ delegate: false })(api as any);
   const result = handlers.get("before_agent_start")![0]!({ systemPrompt: "" }, {});
   assert.ok(!result.systemPrompt.includes("ACP_DELEGATE NOTIFICATIONS"), "delegate section omitted when delegate:false");
+  // Core ACP prompt is still present — only the delegate section is dropped.
+  assert.ok(result.systemPrompt.includes("ACP TAGS"), "core ACP prompt still present when delegate disabled");
+});
+
+test("delegate:{enabled:false} omits the ACP_DELEGATE NOTIFICATIONS section from the system prompt", () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ delegate: { enabled: false } })(api as any);
+  const result = handlers.get("before_agent_start")![0]!({ systemPrompt: "" }, {});
+  assert.ok(!result.systemPrompt.includes("ACP_DELEGATE NOTIFICATIONS"), "delegate section omitted when delegate:{enabled:false}");
   // Core ACP prompt is still present — only the delegate section is dropped.
   assert.ok(result.systemPrompt.includes("ACP TAGS"), "core ACP prompt still present when delegate disabled");
 });
