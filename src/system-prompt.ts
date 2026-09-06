@@ -46,13 +46,6 @@ WHEN NOT TO COMPRESS
 
 ${prompts.howToCompressRules}
 
-SUMMARY FIDELITY RULES
-
-- A summary records the PAST as of block creation time. When recording task state, label it "TASK AS OF BLOCK CREATION" — never "CURRENT TASK": a later reader treats "CURRENT TASK" as a live instruction and re-executes it. Recorded state is history, not a directive.
-- Quote a user message verbatim ONLY WITH its message ref (mNNNNN) attached, e.g. user 'merge done, next issue' (m00012). Without a ref the quote is unverifiable — paraphrase instead ("user previously said (paraphrased): ..."). Never present a reconstructed or half-remembered phrase as a user verbatim quote.
-- Never write user quotes in the present tense as current directives ("user said X = do X now"). Act on user intent only from CURRENT user messages.
-- Write summaries as plain text. Never copy \\uXXXX escape sequences or JSON-escaped fragments out of tool output — write unicode characters directly.
-
 MULTI-TIER COMPRESSION
 
 Summaries accumulate as the session grows. When tier-1 summaries pile up, the system injects a nudge prompting you to DISTILL old blocks into a single tier-2 summary. If tier-2 summaries also accumulate, a further nudge asks you to CONDENSE them into tier-3.
