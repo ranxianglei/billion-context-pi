@@ -1,23 +1,32 @@
 import { openSync, fstatSync, readSync, closeSync } from "node:fs";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
+import { Key, Markdown, matchesKey, truncateToWidth, wrapTextWithAnsi, type MarkdownTheme } from "@earendil-works/pi-tui";
 import type { Component } from "@earendil-works/pi-tui";
 import { OUT_DIR, fleetRunsSnapshot, type FleetRunView } from "./delegate-tool.js";
 
 const REFRESH_MS = 500;
-const TRANSCRIPT_TAIL_BYTES = 8192;
-const SNAPSHOT_TAIL_BYTES = 4096;
 const MAX_TASK_LEN = 48;
-const MAX_CONTENT_LINES = 30;
+const SNAPSHOT_TAIL_BYTES = 4096;
+const MAX_RESULT_LINES = 8;
+const PANEL_MAX_H = 40;
+const PANEL_MIN_H = 12;
 
 export interface InspectorTheme {
   fg(color: string, text: string): string;
   bold(text: string): string;
+  bg(color: string, text: string): string;
+  italic?(text: string): string;
+  underline?(text: string): string;
+  strikethrough?(text: string): string;
 }
 
 interface TuiLike {
   requestRender(force?: boolean): void;
   terminal: { rows: number };
+}
+
+function clamp(n: number, lo: number, hi: number): number {
+  return Math.max(lo, Math.min(hi, n));
 }
 
 function truncateText(s: string, max: number): string {
@@ -93,49 +102,238 @@ export function readTailSync(file: string | undefined, maxBytes: number): string
   }
 }
 
-export function renderListView(rows: ListRow[], selIdx: number, theme: InspectorTheme, width: number): string[] {
-  if (rows.length === 0) {
-    return [
-      truncateToWidth(theme.bold(theme.fg("accent", "acp_delegate")), width),
-      truncateToWidth(theme.fg("dim", "no delegate runs yet — dispatch one with acp_delegate"), width),
-      "",
-      truncateToWidth(theme.fg("dim", "esc close"), width),
-    ];
+/** First maxBytes of a file as utf8. Missing/unreadable → "". */
+export function readHeadSync(file: string | undefined, maxBytes: number): string {
+  if (!file) return "";
+  try {
+    const fd = openSync(file, "r");
+    try {
+      const size = fstatSync(fd).size;
+      if (size === 0) return "";
+      const len = Math.min(size, maxBytes);
+      const buf = Buffer.alloc(len);
+      readSync(fd, buf, 0, len, 0);
+      return buf.toString("utf8");
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return "";
   }
-  const lines: string[] = [
-    truncateToWidth(theme.bold(theme.fg("accent", `acp_delegate · ${rows.length} run${rows.length === 1 ? "" : "s"} (live)`)), width),
-  ];
-  rows.forEach((row, i) => {
-    const color = row.run.status === "running" ? "warning" : row.run.status === "completed" ? "success" : row.run.status === "failed" ? "error" : "muted";
-    const prefix = i === selIdx ? "> " : "  ";
-    lines.push(truncateToWidth(`${prefix}${theme.fg(color, row.label)}  ${theme.fg("dim", row.detail)}`, width));
-  });
-  lines.push("");
-  lines.push(truncateToWidth(theme.fg("dim", "↑↓ select · enter inspect · esc close"), width));
-  return lines;
 }
 
-export function renderTranscriptView(run: FleetRunView, tail: string, now: number, theme: InspectorTheme, width: number): string[] {
-  const dur = formatDuration((run.finishedAt ?? now) - run.startedAt);
-  const head = `${statusIcon(run.status)} ${run.agent} · ${run.runId} · ${run.status === "running" ? `running ${dur}` : `${run.status} ${run.exitLabel} after ${dur}`}`;
-  const metaBits = [run.cwd];
-  const tokens = usageSummary(run.usage);
-  if (tokens) metaBits.push(tokens);
-  if (run.resumedFrom) metaBits.push(`resumed from ${run.resumedFrom}`);
-  const lines: string[] = [
-    truncateToWidth(theme.bold(theme.fg("accent", head)), width),
-    truncateToWidth(theme.fg("dim", metaBits.join(" · ")), width),
-    "",
-  ];
-  const body = tail.trimEnd();
-  if (body) {
-    for (const l of body.split("\n")) lines.push(truncateToWidth(l, width));
-  } else {
-    lines.push(theme.fg("dim", "(no output yet)"));
+interface SessionContentBlock {
+  type: string;
+  text?: string;
+  thinking?: string;
+  name?: string;
+  arguments?: unknown;
+}
+
+interface SessionMessage {
+  role: string;
+  content?: SessionContentBlock[];
+  toolName?: string;
+  isError?: boolean;
+}
+
+interface SessionLine {
+  type: string;
+  provider?: string;
+  modelId?: string;
+  message?: SessionMessage;
+}
+
+export interface TranscriptBlock {
+  kind: "user" | "thinking" | "text" | "toolCall" | "toolResult" | "meta";
+  name?: string;
+  text: string;
+  isError?: boolean;
+  args?: unknown;
+}
+
+/** Pi-style one-line summary of a tool call (mirrors pi's formatToolCall). */
+export function formatToolLabel(name: string, args: unknown): string {
+  const a: Record<string, unknown> = args && typeof args === "object" ? (args as Record<string, unknown>) : {};
+  const s = (v: unknown): string => String(v ?? "");
+  switch (name) {
+    case "read": {
+      const path = s(a.path ?? a.file_path);
+      const offset = typeof a.offset === "number" ? a.offset : undefined;
+      const limit = typeof a.limit === "number" ? a.limit : undefined;
+      let display = path;
+      if (offset !== undefined || limit !== undefined) {
+        const start = offset ?? 1;
+        const end = limit !== undefined ? start + limit - 1 : "";
+        display += `:${start}${end ? `-${end}` : ""}`;
+      }
+      return `read ${display}`;
+    }
+    case "write": return `write ${s(a.path ?? a.file_path)}`;
+    case "edit": return `edit ${s(a.path ?? a.file_path)}`;
+    case "bash": {
+      const cmd = s(a.command).replace(/[\n\t]/g, " ").trim();
+      return `bash ${cmd.length > 60 ? `${cmd.slice(0, 60)}…` : cmd}`;
+    }
+    case "grep": return `grep /${s(a.pattern)}/ in ${s(a.path ?? ".")}`;
+    case "find": return `find ${s(a.pattern)} in ${s(a.path ?? ".")}`;
+    case "ls": return `ls ${s(a.path ?? ".")}`;
+    default: {
+      let j = "";
+      try { j = JSON.stringify(args ?? {}); } catch { j = String(args); }
+      return `${name} ${j.length > 60 ? `${j.slice(0, 60)}…` : j}`;
+    }
   }
-  lines.push("");
-  lines.push(truncateToWidth(theme.fg("dim", "pgup/pgdn scroll · esc back"), width));
-  return lines;
+}
+
+/** Parse a pi session .jsonl into display blocks (conversation + thinking + tools). */
+export function parseSessionJsonl(raw: string): TranscriptBlock[] {
+  const blocks: TranscriptBlock[] = [];
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    let obj: SessionLine;
+    try {
+      obj = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (obj.type === "model_change") {
+      blocks.push({ kind: "meta", text: `model → ${obj.provider}/${obj.modelId}` });
+      continue;
+    }
+    if (obj.type !== "message") continue;
+    const m = obj.message;
+    if (!m) continue;
+    if (m.role === "user") {
+      for (const c of m.content ?? []) {
+        if (c.type === "text" && c.text?.trim()) blocks.push({ kind: "user", text: c.text });
+      }
+    } else if (m.role === "assistant") {
+      for (const c of m.content ?? []) {
+        if (c.type === "thinking" && c.thinking?.trim()) blocks.push({ kind: "thinking", text: c.thinking });
+        else if (c.type === "text" && c.text?.trim()) blocks.push({ kind: "text", text: c.text });
+        else if (c.type === "toolCall") blocks.push({ kind: "toolCall", name: c.name, text: "", args: c.arguments });
+      }
+    } else if (m.role === "toolResult") {
+      const text = (m.content ?? []).map((c) => c.text ?? "").join("");
+      blocks.push({ kind: "toolResult", name: m.toolName, text, isError: !!m.isError });
+    }
+  }
+  return blocks;
+}
+
+function padTo(line: string, w: number): string {
+  return truncateToWidth(line, w, undefined, true);
+}
+
+function frame(body: string[], width: number, theme: InspectorTheme): string[] {
+  const innerW = Math.max(0, width - 4);
+  const bar = "─".repeat(Math.max(0, width - 2));
+  const top = theme.fg("border", `┌${bar}┐`);
+  const bottom = theme.fg("border", `└${bar}┘`);
+  const mid = body.map((l) => `${theme.fg("border", "│")} ${padTo(l, innerW)} ${theme.fg("border", "│")}`);
+  return [top, ...mid, bottom];
+}
+
+export function renderListBody(rows: ListRow[], selIdx: number, theme: InspectorTheme, innerW: number): string[] {
+  if (rows.length === 0) {
+    return [truncateToWidth(theme.fg("dim", "no delegate runs yet — dispatch one with acp_delegate"), innerW)];
+  }
+  return rows.map((row, i) => {
+    const color = row.run.status === "running" ? "warning" : row.run.status === "completed" ? "success" : row.run.status === "failed" ? "error" : "muted";
+    const prefix = i === selIdx ? "> " : "  ";
+    const line = `${prefix}${theme.fg(color, row.label)}  ${theme.fg("dim", row.detail)}`;
+    const filled = padTo(line, innerW);
+    return i === selIdx ? theme.bg("selectedBg", filled) : filled;
+  });
+}
+
+function buildMarkdownTheme(theme: InspectorTheme): MarkdownTheme {
+  return {
+    heading: (t) => theme.fg("mdHeading", t),
+    link: (t) => theme.fg("mdLink", t),
+    linkUrl: (t) => theme.fg("mdLinkUrl", t),
+    code: (t) => theme.fg("mdCode", t),
+    codeBlock: (t) => theme.fg("mdCodeBlock", t),
+    codeBlockBorder: (t) => theme.fg("mdCodeBlockBorder", t),
+    quote: (t) => theme.fg("mdQuote", t),
+    quoteBorder: (t) => theme.fg("mdQuoteBorder", t),
+    hr: (t) => theme.fg("mdHr", t),
+    listBullet: (t) => theme.fg("mdListBullet", t),
+    bold: (t) => theme.bold(t),
+    italic: (t) => (theme.italic ? theme.italic(t) : theme.fg("dim", t)),
+    strikethrough: (t) => (theme.strikethrough ? theme.strikethrough(t) : t),
+    underline: (t) => (theme.underline ? theme.underline(t) : t),
+  };
+}
+
+export function renderTranscriptBlocks(blocks: TranscriptBlock[], theme: InspectorTheme, innerW: number): string[] {
+  const out: string[] = [];
+  const wrapW = Math.max(10, innerW);
+  // Full-width background bar; truncateToWidth pads to innerW (ANSI + CJK aware) so the bg spans the row.
+  const bar = (bgColor: string, content: string): string => theme.bg(bgColor, truncateToWidth(content, innerW, undefined, true));
+  let i = 0;
+  while (i < blocks.length) {
+    const b = blocks[i];
+    if (!b) break;
+    switch (b.kind) {
+      case "meta":
+        out.push(truncateToWidth(theme.fg("dim", `· ${b.text}`), innerW));
+        i++;
+        break;
+      case "user":
+        for (const l of wrapTextWithAnsi(b.text, wrapW)) out.push(bar("userMessageBg", theme.fg("userMessageText", l)));
+        i++;
+        break;
+      case "thinking": {
+        try {
+          const md = new Markdown(b.text, 0, 0, buildMarkdownTheme(theme), { color: (t) => theme.fg("thinkingText", t), italic: true });
+          for (const l of md.render(wrapW)) out.push(truncateToWidth(l, innerW));
+        } catch {
+          for (const l of wrapTextWithAnsi(b.text, wrapW)) out.push(truncateToWidth(theme.fg("thinkingText", l), innerW));
+        }
+        i++;
+        break;
+      }
+      case "text": {
+        try {
+          const md = new Markdown(b.text.trim(), 0, 0, buildMarkdownTheme(theme));
+          for (const l of md.render(wrapW)) out.push(truncateToWidth(l, innerW));
+        } catch {
+          for (const l of wrapTextWithAnsi(b.text, wrapW)) out.push(truncateToWidth(theme.fg("text", l), innerW));
+        }
+        i++;
+        break;
+      }
+      case "toolCall": {
+        const res = blocks[i + 1]?.kind === "toolResult" ? blocks[i + 1] : undefined;
+        pushToolGroup(out, bar, theme, b.name ?? "?", b.args, res);
+        i += res ? 2 : 1;
+        break;
+      }
+      case "toolResult":
+        pushToolGroup(out, bar, theme, b.name ?? "?", undefined, b);
+        i++;
+        break;
+    }
+  }
+  if (out.length === 0) out.push(theme.fg("dim", "(no session content yet)"));
+  return out;
+}
+
+function pushToolGroup(out: string[], bar: (bg: string, c: string) => string, theme: InspectorTheme, name: string, args: unknown, result?: TranscriptBlock): void {
+  const isError = result?.isError ?? false;
+  const bgc = result ? (isError ? "toolErrorBg" : "toolSuccessBg") : "toolPendingBg";
+  const icon = result ? (isError ? "✗" : "✓") : "●";
+  out.push(bar(bgc, theme.fg("toolTitle", `${icon} ${theme.bold(name)}`)));
+  const label = formatToolLabel(name, args);
+  if (label) out.push(bar(bgc, theme.fg("dim", label)));
+  if (result) {
+    const rawLines = result.text.replace(/\n+$/, "").split("\n");
+    const shown = rawLines.slice(0, MAX_RESULT_LINES);
+    for (const l of shown) out.push(bar(bgc, theme.fg("toolOutput", l)));
+    if (rawLines.length > shown.length) out.push(bar(bgc, theme.fg("dim", `… +${rawLines.length - shown.length} more`)));
+  }
 }
 
 /** Plain-text snapshot for non-TUI hosts (rpc/print/json). */
@@ -162,8 +360,12 @@ class FleetInspectorComponent implements Component {
   private selIdx = 0;
   private selRunId: string | undefined;
   private follow = true;
-  private scrollLines = 0;
-  private tailText = "";
+  private viewTop = 0;
+  private blocks: TranscriptBlock[] = [];
+  private loadedFile = "";
+  private loadedBytes = 0;
+  private transcriptLines: string[] = [];
+  private lastWidth = 80;
   private timer: ReturnType<typeof setInterval> | undefined;
   private closed = false;
 
@@ -187,7 +389,59 @@ class FleetInspectorComponent implements Component {
   }
 
   invalidate(): void {
-    // no cache — render() recomputes rows and tails from scratch
+    // no cache — render() recomputes from rows/blocks each frame
+  }
+
+  private panelHeight(): number {
+    return clamp(this.tui.terminal.rows - 2, PANEL_MIN_H, PANEL_MAX_H);
+  }
+
+  private pageSize(): number {
+    return Math.max(1, this.panelHeight() - 2 - 2 - 1);
+  }
+
+  /** Incrementally append newly-written session.jsonl bytes (waterfall load).
+   *  Only reads the delta past loadedBytes; holds back a trailing partial line
+   *  while the run is still writing. */
+  private loadTranscript(file: string | undefined, isRunning: boolean): void {
+    if (!file) return;
+    if (file !== this.loadedFile) {
+      this.loadedFile = file;
+      this.loadedBytes = 0;
+      this.blocks = [];
+    }
+    let size = 0;
+    try {
+      const fd = openSync(file, "r");
+      try { size = fstatSync(fd).size; } finally { closeSync(fd); }
+    } catch {
+      return;
+    }
+    if (size < this.loadedBytes) {
+      this.loadedBytes = 0;
+      this.blocks = [];
+    }
+    if (size <= this.loadedBytes) return;
+    const len = size - this.loadedBytes;
+    const buf = Buffer.alloc(len);
+    let got = 0;
+    try {
+      const fd = openSync(file, "r");
+      try { got = readSync(fd, buf, 0, len, this.loadedBytes); } finally { closeSync(fd); }
+    } catch {
+      return;
+    }
+    const text = buf.subarray(0, got).toString("utf8");
+    let complete: string;
+    if (isRunning && !text.endsWith("\n")) {
+      const nl = text.lastIndexOf("\n");
+      if (nl < 0) return;
+      complete = text.slice(0, nl + 1);
+    } else {
+      complete = text;
+    }
+    this.blocks.push(...parseSessionJsonl(complete));
+    this.loadedBytes += Buffer.byteLength(complete, "utf8");
   }
 
   private tick(): void {
@@ -201,8 +455,9 @@ class FleetInspectorComponent implements Component {
       this.selIdx = Math.max(0, this.rows.length - 1);
     }
     const sel = this.rows[this.selIdx]?.run;
-    if (sel && this.mode === "transcript") {
-      this.tailText = readTailSync(sel.activityFile ?? sel.replyFile, TRANSCRIPT_TAIL_BYTES);
+    if (this.mode === "transcript" && sel) {
+      this.loadTranscript(sel.sessionFile, sel.status === "running");
+      this.transcriptLines = renderTranscriptBlocks(this.blocks, this.theme, Math.max(20, this.lastWidth - 4));
     }
     this.tui.requestRender();
   }
@@ -212,7 +467,7 @@ class FleetInspectorComponent implements Component {
       if (this.mode === "transcript") {
         this.mode = "list";
         this.follow = true;
-        this.scrollLines = 0;
+        this.viewTop = 0;
         this.tui.requestRender();
       } else {
         this.close();
@@ -223,17 +478,15 @@ class FleetInspectorComponent implements Component {
       if (matchesKey(data, Key.up) || matchesKey(data, "k")) this.move(-1);
       else if (matchesKey(data, Key.down) || matchesKey(data, "j")) this.move(1);
       else if (matchesKey(data, Key.enter) || matchesKey(data, "x")) this.openTranscript();
-    } else if (matchesKey(data, Key.pageUp)) {
-      this.follow = false;
-      this.scrollLines += 10;
-      this.tui.requestRender();
-    } else if (matchesKey(data, Key.pageDown)) {
-      this.scrollLines = Math.max(0, this.scrollLines - 10);
-      if (this.scrollLines === 0) this.follow = true;
-      this.tui.requestRender();
-    } else if (matchesKey(data, Key.enter)) {
-      this.mode = "list";
-      this.tui.requestRender();
+    } else {
+      if (matchesKey(data, Key.up) || matchesKey(data, "k")) this.scrollTranscript(-1);
+      else if (matchesKey(data, Key.down) || matchesKey(data, "j")) this.scrollTranscript(1);
+      else if (matchesKey(data, Key.left) || matchesKey(data, Key.pageUp)) this.scrollTranscript(-this.pageSize());
+      else if (matchesKey(data, Key.right) || matchesKey(data, Key.pageDown)) this.scrollTranscript(this.pageSize());
+      else if (matchesKey(data, Key.enter)) {
+        this.mode = "list";
+        this.tui.requestRender();
+      }
     }
   }
 
@@ -247,13 +500,20 @@ class FleetInspectorComponent implements Component {
     }
   }
 
+  private scrollTranscript(delta: number): void {
+    const maxTop = Math.max(0, this.transcriptLines.length - this.pageSize());
+    this.viewTop = clamp(this.viewTop + delta, 0, maxTop);
+    this.follow = this.viewTop >= maxTop;
+    this.tui.requestRender();
+  }
+
   private openTranscript(): void {
     const sel = this.rows[this.selIdx];
     if (!sel) return;
     this.selRunId = sel.run.runId;
     this.mode = "transcript";
     this.follow = true;
-    this.scrollLines = 0;
+    this.viewTop = 0;
     this.tick();
   }
 
@@ -264,25 +524,56 @@ class FleetInspectorComponent implements Component {
     this.doneCb();
   }
 
+  private transcriptHeader(sel: FleetRunView, innerW: number): string[] {
+    const now = Date.now();
+    const dur = formatDuration((sel.finishedAt ?? now) - sel.startedAt);
+    const state = sel.status === "running" ? `running ${dur}` : `${sel.status} ${sel.exitLabel} after ${dur}`;
+    const head = `${statusIcon(sel.status)} ${sel.agent} · ${sel.runId} · ${state}`;
+    const bits = [sel.cwd];
+    const tok = usageSummary(sel.usage);
+    if (tok) bits.push(tok);
+    if (sel.resumedFrom) bits.push(`resumed ${sel.resumedFrom}`);
+    return [
+      truncateToWidth(this.theme.bold(this.theme.fg("accent", head)), innerW),
+      truncateToWidth(this.theme.fg("dim", bits.join(" · ")), innerW),
+    ];
+  }
+
   render(width: number): string[] {
-    if (this.mode !== "transcript") return renderListView(this.rows, this.selIdx, this.theme, width);
+    this.lastWidth = width;
+    const innerW = Math.max(20, width - 4);
     const sel = this.rows[this.selIdx]?.run;
-    if (!sel) return renderListView(this.rows, this.selIdx, this.theme, width);
-    const full = renderTranscriptView(sel, this.tailText, Date.now(), this.theme, width);
-    // Header = first 3 lines, footer = last 2; window the body so the view
-    // never outgrows the overlay even on short terminals.
-    const header = full.slice(0, 3);
-    const footer = full.slice(-2);
-    const body = full.slice(3, -2);
-    const contentBudget = Math.max(4, Math.min(MAX_CONTENT_LINES, Math.floor(this.tui.terminal.rows * 0.7) - 5));
-    const start = this.follow ? Math.max(0, body.length - contentBudget) : Math.max(0, Math.min(body.length - contentBudget, body.length - this.scrollLines - contentBudget));
-    const visible = body.slice(start, start + contentBudget);
-    return [...header, ...visible, ...footer];
+    const useList = this.mode === "list" || !sel;
+    const headerN = useList ? 1 : 2;
+    const midH = Math.max(1, this.panelHeight() - 2 - headerN - 1);
+
+    let header: string[];
+    let middle: string[];
+    let footer: string;
+    if (useList) {
+      header = [truncateToWidth(this.theme.bold(this.theme.fg("accent", `acp_delegate · ${this.rows.length} run${this.rows.length === 1 ? "" : "s"} (live)`)), innerW)];
+      middle = renderListBody(this.rows, this.selIdx, this.theme, innerW);
+      let top = this.viewTop;
+      if (this.selIdx < top) top = this.selIdx;
+      else if (this.selIdx >= top + midH) top = this.selIdx - midH + 1;
+      top = Math.max(0, top);
+      middle = middle.slice(top, top + midH);
+      footer = this.theme.fg("dim", "↑↓ select · enter inspect · esc close");
+    } else {
+      header = this.transcriptHeader(sel, innerW);
+      middle = this.transcriptLines;
+      const maxTop = Math.max(0, middle.length - midH);
+      const top = clamp(this.follow ? maxTop : this.viewTop, 0, maxTop);
+      middle = middle.slice(top, top + midH);
+      footer = this.theme.fg("dim", "↑↓/←→/pg scroll · enter back · esc close");
+    }
+    while (middle.length < midH) middle.push("");
+    return frame([...header, ...middle, footer], width, this.theme);
   }
 }
 
-/** Open the live fleet inspector: TUI overlay in interactive mode, plain-text
- *  snapshot notification elsewhere. Resolves when the user closes it. */
+/** Open the live fleet inspector: bordered TUI overlay in interactive mode,
+ *  plain-text snapshot notification elsewhere. Resolves when the user closes it. */
 export async function openFleetInspector(ctx: ExtensionContext): Promise<void> {
   if (ctx.mode !== "tui") {
     const text = buildSnapshotText(fleetRunsSnapshot(), Date.now());
@@ -297,9 +588,8 @@ export async function openFleetInspector(ctx: ExtensionContext): Promise<void> {
   }, {
     overlay: true,
     overlayOptions: {
-      width: "72%",
-      minWidth: 64,
-      maxHeight: 38,
+      width: "100%",
+      minWidth: 80,
       anchor: "center",
     },
   });
