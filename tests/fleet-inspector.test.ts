@@ -126,11 +126,10 @@ test("renderTranscriptBlocks renders conversation+thinking+tools and is width-sa
   ].join("\n"));
   const lines = renderTranscriptBlocks(blocks, plainTheme, 40);
   assertWidthSafe(lines, 40);
-  assert.ok(lines.some((l) => l.includes("you ›")), "user marker present");
-  assert.ok(lines.some((l) => l.includes("hello world")));
-  assert.ok(lines.some((l) => l.includes("⌥") && l.includes("reasoning here")), "thinking shown");
+  assert.ok(lines.some((l) => l.trim() === "hello world"), "user message rendered as its own line");
+  assert.ok(lines.some((l) => l.includes("reasoning here")), "thinking shown");
   assert.ok(lines.some((l) => l.includes("the answer")));
-  assert.ok(lines.some((l) => l.includes("✗ read:")), "error tool result marked");
+  assert.ok(lines.some((l) => l.includes("✗ read")), "error tool marked");
 });
 
 test("renderTranscriptBlocks shows placeholder when empty", () => {
@@ -289,9 +288,9 @@ test("renderTranscriptBlocks renders tool call (name + label) and multi-line res
   ];
   const lines = renderTranscriptBlocks(blocks, plainTheme, 40);
   assertWidthSafe(lines, 40);
-  assert.ok(lines.some((l) => l.includes("⚙ bash")), "tool name shown");
+  assert.ok(lines.some((l) => l.includes("✓ bash")), "tool name shown");
   assert.ok(lines.some((l) => l.includes("bash ls -la")), "pi-style arg label");
-  assert.ok(lines.some((l) => l.includes("✓ bash: line1")), "result header line");
+  assert.ok(lines.some((l) => l.trim() === "line1"), "result body line");
   assert.ok(lines.some((l) => l.trim() === "line2"), "multi-line result body");
 });
 

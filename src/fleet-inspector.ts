@@ -250,7 +250,7 @@ export function renderListBody(rows: ListRow[], selIdx: number, theme: Inspector
 
 function buildMarkdownTheme(theme: InspectorTheme): MarkdownTheme {
   return {
-    heading: (t) => theme.bold(theme.fg("mdHeading", t)),
+    heading: (t) => theme.fg("mdHeading", t),
     link: (t) => theme.fg("mdLink", t),
     linkUrl: (t) => theme.fg("mdLinkUrl", t),
     code: (t) => theme.fg("mdCode", t),
@@ -269,47 +269,71 @@ function buildMarkdownTheme(theme: InspectorTheme): MarkdownTheme {
 
 export function renderTranscriptBlocks(blocks: TranscriptBlock[], theme: InspectorTheme, innerW: number): string[] {
   const out: string[] = [];
-  const wrapW = Math.max(10, innerW - 2);
-  for (const b of blocks) {
+  const wrapW = Math.max(10, innerW);
+  // Full-width background bar; truncateToWidth pads to innerW (ANSI + CJK aware) so the bg spans the row.
+  const bar = (bgColor: string, content: string): string => theme.bg(bgColor, truncateToWidth(content, innerW, undefined, true));
+  let i = 0;
+  while (i < blocks.length) {
+    const b = blocks[i];
+    if (!b) break;
     switch (b.kind) {
       case "meta":
         out.push(truncateToWidth(theme.fg("dim", `· ${b.text}`), innerW));
+        i++;
         break;
       case "user":
-        out.push(theme.bold(theme.fg("userMessageText", "you ›")));
-        for (const l of wrapTextWithAnsi(b.text, wrapW)) out.push(theme.fg("userMessageText", `  ${l}`));
+        for (const l of wrapTextWithAnsi(b.text, wrapW)) out.push(bar("userMessageBg", theme.fg("userMessageText", l)));
+        i++;
         break;
-      case "thinking":
-        for (const l of wrapTextWithAnsi(b.text, wrapW)) out.push(theme.fg("thinkingText", `  ⌥ ${l}`));
+      case "thinking": {
+        try {
+          const md = new Markdown(b.text, 0, 0, buildMarkdownTheme(theme), { color: (t) => theme.fg("thinkingText", t), italic: true });
+          for (const l of md.render(wrapW)) out.push(truncateToWidth(l, innerW));
+        } catch {
+          for (const l of wrapTextWithAnsi(b.text, wrapW)) out.push(truncateToWidth(theme.fg("thinkingText", l), innerW));
+        }
+        i++;
         break;
+      }
       case "text": {
         try {
-          const md = new Markdown(b.text, 0, 0, buildMarkdownTheme(theme));
-          for (const l of md.render(wrapW)) out.push(truncateToWidth(`  ${l}`, innerW));
+          const md = new Markdown(b.text.trim(), 0, 0, buildMarkdownTheme(theme));
+          for (const l of md.render(wrapW)) out.push(truncateToWidth(l, innerW));
         } catch {
-          for (const l of wrapTextWithAnsi(b.text, wrapW)) out.push(theme.fg("text", `  ${l}`));
+          for (const l of wrapTextWithAnsi(b.text, wrapW)) out.push(truncateToWidth(theme.fg("text", l), innerW));
         }
+        i++;
         break;
       }
       case "toolCall": {
-        out.push(truncateToWidth(theme.fg("toolTitle", theme.bold(`  ⚙ ${b.name ?? "?"}`)), innerW));
-        const label = formatToolLabel(b.name ?? "", b.args);
-        if (label) out.push(truncateToWidth(theme.fg("dim", `     ${label}`), innerW));
+        const res = blocks[i + 1]?.kind === "toolResult" ? blocks[i + 1] : undefined;
+        pushToolGroup(out, bar, theme, b.name ?? "?", b.args, res);
+        i += res ? 2 : 1;
         break;
       }
-      case "toolResult": {
-        const icon = b.isError ? "✗" : "✓";
-        const color = b.isError ? "error" : "toolOutput";
-        const rawLines = b.text.replace(/\n+$/, "").split("\n");
-        const shown = rawLines.slice(0, MAX_RESULT_LINES);
-        shown.forEach((l, i) => out.push(truncateToWidth(theme.fg(color, `  ${i === 0 ? `${icon} ${b.name ?? "?"}: ` : ""}${l}`), innerW)));
-        if (rawLines.length > shown.length) out.push(truncateToWidth(theme.fg("dim", `      … +${rawLines.length - shown.length} more`), innerW));
+      case "toolResult":
+        pushToolGroup(out, bar, theme, b.name ?? "?", undefined, b);
+        i++;
         break;
-      }
     }
   }
   if (out.length === 0) out.push(theme.fg("dim", "(no session content yet)"));
   return out;
+}
+
+function pushToolGroup(out: string[], bar: (bg: string, c: string) => string, theme: InspectorTheme, name: string, args: unknown, result?: TranscriptBlock): void {
+  const isError = result?.isError ?? false;
+  const bgc = result ? (isError ? "toolErrorBg" : "toolSuccessBg") : "toolPendingBg";
+  const icon = result ? (isError ? "✗" : "✓") : "●";
+  out.push(bar(bgc, theme.fg("toolTitle", `${icon} ${theme.bold(name)}`)));
+  const label = formatToolLabel(name, args);
+  if (label) out.push(bar(bgc, theme.fg("dim", label)));
+  if (result) {
+    const rawLines = result.text.replace(/\n+$/, "").split("\n");
+    const shown = rawLines.slice(0, MAX_RESULT_LINES);
+    for (const l of shown) out.push(bar(bgc, theme.fg("toolOutput", l)));
+    if (rawLines.length > shown.length) out.push(bar(bgc, theme.fg("dim", `… +${rawLines.length - shown.length} more`)));
+  }
 }
 
 /** Plain-text snapshot for non-TUI hosts (rpc/print/json). */
