@@ -576,6 +576,19 @@ export function resolveWaitTimeoutMs(raw: number | undefined): number {
   return Math.min(Math.max(ms, 1_000), WAIT_TIMEOUT_MS_MAX);
 }
 
+/** Ceiling for a per-call timeout override (#286): a bad model value must not
+ *  hold a concurrency slot forever. 1440m = 24h — generous enough that no real
+ *  task hits it, tight enough to stop absurd values. */
+const MAX_PER_CALL_TIMEOUT_MINUTES = 1440;
+
+/** Resolve a per-call timeout override (minutes) to ms. Absent/invalid values
+ *  fall back to the configured default (fallbackMs); valid values are clamped
+ *  to MAX_PER_CALL_TIMEOUT_MINUTES. */
+export function resolvePerCallTimeoutMs(raw: number | undefined, fallbackMs: number | null): number | null {
+  if (raw === undefined || !Number.isFinite(raw) || raw <= 0) return fallbackMs;
+  return Math.round(Math.min(raw, MAX_PER_CALL_TIMEOUT_MINUTES) * 60_000);
+}
+
 const DelegateParams = Type.Object({
   agent: Type.String({
     description: `Role of the delegate. One of: ${AGENT_NAMES.join(", ")}. See tool description for what each does.`,
@@ -607,6 +620,11 @@ const DelegateParams = Type.Object({
   showThinking: Type.Optional(
     Type.Boolean({
       description: "If true, the delegate's thinking deltas are also written to the live activity file (default: false — only tool activity is shown).",
+    }),
+  ),
+  timeoutMinutes: Type.Optional(
+    Type.Number({
+      description: `Per-call override for this run's hard wall-clock timeout, in minutes (e.g. 90). When async=true it overrides the async hard limit; when async=false it overrides the sync limit. Omit to use the configured default (delegate.asyncTimeoutMinutes / syncTimeoutMinutes via acp.json or env). Capped at ${MAX_PER_CALL_TIMEOUT_MINUTES}m (24h); the no-output (idle) watchdog is unaffected.`,
     }),
   ),
 });
@@ -691,6 +709,7 @@ ${AGENT_NAMES.map(agentListLine).join("\n")}
 Behavior:
 • async=true (default): returns immediately with a runId. The delegate runs in the background. Call acp_delegate_wait({ runId }) to block for its result (up to a timeout); if you let the timeout lapse, or never call wait, a short completion notification (status + file path) is still injected into this chat when it finishes — unless you already read the result file after it finished, in which case the notification is skipped (you have the result). In one-shot sessions (print/json) async auto-downgrades to sync so the result is returned inline within the same turn. Call acp_delegate again to launch more runs in parallel.${concurrencyNote}
 • async=false: blocks until the delegate finishes. The full output is saved to a file; the tool result contains the path. Use the \`read\` tool to open the file for the complete content.
+• timeoutMinutes: optionally set a per-task hard timeout (minutes) for this run when you know roughly how long it needs — overrides the configured default (capped at 24h).
 
 There is NO non-blocking status tool. To get a delegate's result, call acp_delegate_wait with the runId — it blocks until the run finishes or the timeout elapses. Use acp_delegate_cancel only to stop a run you no longer want.
 
@@ -1235,6 +1254,12 @@ async function runDelegate(
     debug.event("delegate-async-downgraded", { reason: `mode=${ctx.mode}` });
     logInfo("delegate", { event: "async-downgraded", reason: `mode=${ctx.mode}` });
   }
+  // Per-call hard-timeout override (#286): the model sizes a specific run's
+  // wall-clock budget instead of relying on the global acp.json/env default.
+  // Applies to the async hard limit or the sync limit depending on mode; the
+  // no-output (idle) watchdog is intentionally left at its global value.
+  const effectiveAsyncMs = resolvePerCallTimeoutMs(args.timeoutMinutes, delegatePolicy.asyncTimeoutMs);
+  const effectiveSyncMs = resolvePerCallTimeoutMs(args.timeoutMinutes, delegatePolicy.syncTimeoutMs);
   debug.event("delegate-spawn", { agent: args.agent, runId, cwd, async: isAsync, useJsonStream, cliArgs, resumedFrom: args.resumeFrom, sessionFile });
   logInfo("delegate", { event: "spawn", agent: args.agent, runId, cwd, async: isAsync, useJsonStream, mode: ctx.mode, parentDepth, resumedFrom: args.resumeFrom, sessionFile });
 
@@ -1298,7 +1323,7 @@ async function runDelegate(
             debug.event("delegate-eof-grace", { runId, ms: EOF_GRACE_MS });
           },
         },
-        { eofGraceMs: EOF_GRACE_MS, idleMs: delegatePolicy.idleMs, timeoutMs: delegatePolicy.asyncTimeoutMs, killGraceMs: KILL_GRACE_MS },
+        { eofGraceMs: EOF_GRACE_MS, idleMs: delegatePolicy.idleMs, timeoutMs: effectiveAsyncMs, killGraceMs: KILL_GRACE_MS },
       );
       // Two stream files are fed from the --mode json event stream: text_delta
       // tokens go to the reply stream (.out), tool activity (and optionally
@@ -1499,7 +1524,7 @@ async function runDelegate(
         useJsonStream
           ? `Live activity is streaming to \`${activityFile}\` — read it anytime to watch the delegate work (tool calls and their output${args.showThinking ? ", plus thinking" : ""}).`
           : `The reply is streaming to \`${replyFile}\` — read it anytime to see partial output (this host has no json event mode, so tool activity is not visible).`,
-        asyncWatchdogDescription(),
+        asyncWatchdogDescription(effectiveAsyncMs),
         ``,
         `Call acp_delegate_wait({ runId: "${runId}" }) to block for the result (default 10s timeout). If the wait times out, or you skip it, a completion notification (with the result file path) is still injected here automatically when the delegate finishes — so you may also just continue other work now and let the result find you.`,
       ].join("\n");
@@ -1524,7 +1549,7 @@ async function runDelegate(
     resumeFrom: Boolean(args.resumeFrom),
     task: args.task,
   });
-  const result = await waitForChild(child, signal, delegatePolicy.syncTimeoutMs);
+  const result = await waitForChild(child, signal, effectiveSyncMs);
   void cleanupTmp(tmpDir);
   const body =
     result.timedOut || result.code !== 0
@@ -1709,11 +1734,12 @@ function fmtMinutes(ms: number): string {
 /** Model-facing summary of the ACTIVE async watchdog limits — built from the
  *  resolved policy so it stays truthful when timeouts are customized or
  *  disabled via acp.json/env. */
-export function asyncWatchdogDescription(): string {
+export function asyncWatchdogDescription(overrideAsyncMs?: number | null): string {
   const parts: string[] = [];
   if (delegatePolicy.idleMs !== null) parts.push(`no output for ${fmtMinutes(delegatePolicy.idleMs)}`);
   parts.push(`${EOF_GRACE_MS / 1000}s after output ends`);
-  if (delegatePolicy.asyncTimeoutMs !== null) parts.push(`a ${fmtMinutes(delegatePolicy.asyncTimeoutMs)} hard limit`);
+  const hardMs = overrideAsyncMs ?? delegatePolicy.asyncTimeoutMs;
+  if (hardMs !== null) parts.push(`a ${fmtMinutes(hardMs)} hard limit`);
   const joined = parts.length > 1 ? `${parts.slice(0, -1).join(", ")}, or ${parts[parts.length - 1]}` : parts[0]!;
   return `A watchdog force-finishes a hung run: ${joined} — the result reflects whatever was produced.`;
 }

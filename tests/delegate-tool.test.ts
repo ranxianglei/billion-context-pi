@@ -4,7 +4,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildChildArgs, delegateSpawnOptions, injectedWaitMessage, buildWaitResult, buildCancelResult, getDelegateUsage, resetDelegateUsage, injectResult, effectiveExitCode, formatRunResult, resolveWaitTimeoutMs, findUndeliveredRuns, undeliveredNoticeFrom, buildRecoveryNotice, makeDelegateTool, exitLabel, cancelledFileNote, delegateStdinText, readActivityTail, scheduleRunNotification, flushDelegateNotifications, formatBatchRunSection, setDelegatePolicy, delegateChildEnv, asyncWatchdogDescription, ConcurrencyGate, setDelegateDefaults, resetDelegateDefaults, isValidThinkingLevel } from "../src/delegate-tool.js";
+import { buildChildArgs, delegateSpawnOptions, injectedWaitMessage, buildWaitResult, buildCancelResult, getDelegateUsage, resetDelegateUsage, injectResult, effectiveExitCode, formatRunResult, resolveWaitTimeoutMs, findUndeliveredRuns, undeliveredNoticeFrom, buildRecoveryNotice, makeDelegateTool, exitLabel, cancelledFileNote, delegateStdinText, readActivityTail, scheduleRunNotification, flushDelegateNotifications, formatBatchRunSection, setDelegatePolicy, delegateChildEnv, asyncWatchdogDescription, ConcurrencyGate, setDelegateDefaults, resetDelegateDefaults, isValidThinkingLevel, resolvePerCallTimeoutMs } from "../src/delegate-tool.js";
 import { DEFAULT_DELEGATE_POLICY } from "../src/config.js";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
@@ -1024,6 +1024,42 @@ test("asyncWatchdogDescription reflects the resolved policy", () => {
     assert.equal(
       asyncWatchdogDescription(),
       "A watchdog force-finishes a hung run: 10s after output ends — the result reflects whatever was produced.",
+    );
+  } finally {
+    setDelegatePolicy(DEFAULT_DELEGATE_POLICY);
+  }
+});
+
+test("resolvePerCallTimeoutMs: valid minutes → ms, clamped to cap", () => {
+  assert.equal(resolvePerCallTimeoutMs(90, 30 * 60_000), 90 * 60_000);
+  assert.equal(resolvePerCallTimeoutMs(0.5, 30 * 60_000), 30_000);
+  assert.equal(resolvePerCallTimeoutMs(1440, 30 * 60_000), 1440 * 60_000, "at cap");
+  assert.equal(resolvePerCallTimeoutMs(999_999, 30 * 60_000), 1440 * 60_000, "above cap clamps");
+});
+
+test("resolvePerCallTimeoutMs: absent/invalid → fallback default", () => {
+  assert.equal(resolvePerCallTimeoutMs(undefined, 30 * 60_000), 30 * 60_000);
+  assert.equal(resolvePerCallTimeoutMs(NaN, 30 * 60_000), 30 * 60_000);
+  assert.equal(resolvePerCallTimeoutMs(-5, 30 * 60_000), 30 * 60_000);
+  assert.equal(resolvePerCallTimeoutMs(0, 30 * 60_000), 30 * 60_000);
+  assert.equal(resolvePerCallTimeoutMs(undefined, null), null, "null fallback preserved");
+});
+
+test("asyncWatchdogDescription honors a per-run hard-limit override", () => {
+  try {
+    setDelegatePolicy(DEFAULT_DELEGATE_POLICY);
+    assert.equal(
+      asyncWatchdogDescription(90 * 60_000),
+      "A watchdog force-finishes a hung run: no output for 5m, 10s after output ends, or a 90m hard limit — the result reflects whatever was produced.",
+    );
+    assert.equal(
+      asyncWatchdogDescription(null),
+      "A watchdog force-finishes a hung run: no output for 5m, 10s after output ends, or a 30m hard limit — the result reflects whatever was produced.",
+    );
+    setDelegatePolicy({ ...DEFAULT_DELEGATE_POLICY, asyncTimeoutMs: null });
+    assert.equal(
+      asyncWatchdogDescription(45 * 60_000),
+      "A watchdog force-finishes a hung run: no output for 5m, 10s after output ends, or a 45m hard limit — the result reflects whatever was produced.",
     );
   } finally {
     setDelegatePolicy(DEFAULT_DELEGATE_POLICY);
