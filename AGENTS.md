@@ -92,6 +92,13 @@ Same as acp-kernel. See [acp-kernel AGENTS.md §4](https://github.com/ranxiangle
 
 PR merges are **human-only**. The Agent MUST NEVER merge any PR.
 
+### Problem Discovery & Fix Reporting (MANDATORY)
+
+Problems discovered or fixed while working MUST leave a trace in the issue tracker — never fixed silently and moved on.
+
+1. **Discovered a problem** (bug, defect, wrong behavior, spec violation) — whether while working on this project or any sibling project — file an issue in the project the problem belongs to: repro/steps, impact, root cause (if known), suggested fix.
+2. **Fixed a problem** — after the fix, submit an issue to the owning project recording the problem and how it was fixed. For problems in this project: https://github.com/ranxianglei/billion-context-pi/issues . If the fix ships as a PR, the PR MUST reference its issue (`Fixes #N`); a bare PR without an issue is not acceptable — file the issue first, then link it. An existing PR for the fix counts, but it should carry an accompanying issue.
+
 ## 5. Release Workflow
 
 Same baseline as acp-kernel (branch naming, CI auto-publish, PR-merge-is-human-only, pre-flight checks, release-commit convention). See [acp-kernel AGENTS.md §5](https://github.com/ranxianglei/acp-kernel/blob/master/AGENTS.md). Release branches: `YYYY-MM-DD_release-v{VERSION}`.
