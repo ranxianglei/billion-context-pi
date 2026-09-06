@@ -22,7 +22,7 @@ The model decides <em>when</em> and <em>what</em> to compress — not a hard lim
 
 ---
 
-> **Host support:** this plugin is for **Pi**. It does **not** support **OMP (oh-my-pi)** — on an OMP host it refuses to run. OMP users: use [billion-context](https://github.com/ranxianglei/billion-context) instead (`bili omp`). Details: [docs/omp.md](./docs/omp.md).
+> **Host support:** this plugin is for **Pi**. It does **not** support **OMP (oh-my-pi)** — on an OMP host it refuses to run. OMP users: use [billion-context](https://github.com/ranxianglei/billion-context) instead (`bili omp`, built-in plugin). Full client → package table: see [Which do I need?](#which-do-i-need); OMP details: [docs/omp.md](./docs/omp.md).
 
 ## Why?
 
@@ -38,6 +38,19 @@ This means:
 
 1. **A single session handles enormous workloads.** Per simulation tests of the three-tier architecture (see [opencode-acp](https://github.com/ranxianglei/opencode-acp)), one session can process on the order of 10–60 billion cumulative tokens — while retaining long-term memory of distant key information (paths, decisions, signatures). You can work in the **same session for months** without outgrowing the context.
 2. **Context stays lean over the long run.** In practice context typically holds under ~150K tokens (opencode-acp keeps it under ~200K), so compared to traditional compaction that lets context balloon toward 1M, **a single session costs roughly 5× less in tokens**.
+
+## Which do I need?
+
+Pick by your client:
+
+| Client | Use |
+|---|---|
+| **pi** | [`billion-context-pi`](https://github.com/ranxianglei/billion-context-pi) (in-process extension) |
+| **opencode** | [`opencode-acp`](https://github.com/ranxianglei/opencode-acp) (in-process extension) |
+| **omp** | [`billion-context`](https://github.com/ranxianglei/billion-context) via `bili omp` (built-in plugin) |
+| **everything else** | [`billion-context`](https://github.com/ranxianglei/billion-context) — `bili <client>` (launcher, preferred) or `/bili/` prefix |
+
+> Why OMP can't use this in-process extension, and what happens if you try anyway: see [Host support](#host-support) and [docs/omp.md](./docs/omp.md).
 
 ## Install
 
@@ -76,7 +89,7 @@ This has two practical implications:
 
 ## Host support
 
-billion-context-pi is built for the **Pi** coding agent (`@earendil-works/pi-coding-agent`) and detects the host at session start:
+billion-context-pi is built for the **Pi** coding agent (`@earendil-works/pi-coding-agent`) and detects the host at session start — the full client → package table lives in [Which do I need?](#which-do-i-need):
 
 - **Pi** — fully supported.
 - **OMP (`can1357/oh-my-pi`)** — **not supported.** OMP's in-process session API diverges from Pi's, so the compression refs the extension injects can drift out of sync with the session's real refs and `compress` calls fail with `does not exist in this session` (issue [#234](https://github.com/ranxianglei/billion-context-pi/issues/234)). On OMP the extension now **refuses service**: it prints a warning, disables the ACP tools, and leaves the host's own context handling untouched.
@@ -120,7 +133,7 @@ Worker runs on Pi's full default toolset - no `--tools` allowlist is applied, so
 
 The full delegate result is saved to a file (`/tmp/acp-delegate/<runId>.out`); the tool result and injected notification carry only the **task title + file path** (no preview) - use `read` for the details. This keeps the parent context lean.
 
-- **Interactive (TUI) & RPC modes**: `async:true` (default) runs the child in the background; a short completion notification is injected into the chat when it finishes.
+- **Interactive (TUI) & RPC modes**: `async:true` (default) runs the child in the background; a short completion notification is injected into the chat when it finishes — **unless the model already read the result file after the run finished** (detected via the `read` tool or a bash command referencing the file), in which case the notification is skipped: the model already has the result, so re-injecting it would only waste context. Set `delegate: { notifyIfRead: "always" }` in `acp.json` to restore the always-inject behavior.
 - **Print / JSON modes** (`pi -p`, SDK): `async:true` auto-downgrades to **synchronous** — the result returns as the tool result in the same turn (the parent exits after one turn, so background injection would be lost).
 - **Failures are loud, never silent.** A run that fails (nonzero exit, spawn error, watchdog timeout) injects a `FAILED ⚠️` notification carrying a short error excerpt, so a failed delegate cannot hide among sibling completions. If a notification cannot be delivered at all, a recovery notice is attached to the next delegate notification or the next `acp_delegate` / `acp_delegate_wait` / `acp_delegate_cancel` tool result — a dispatched run's failure always reaches the model before it wraps up.
 
@@ -195,6 +208,37 @@ billion-context protects three categories of content from compression:
 1. **Always-protected tools** — `compress` calls are hard-protected (they're load-bearing metadata; compressing them breaks decompress and the "summary is historical" contract).
 2. **Soft recent-zone** — the last N messages (default 5) and last ~5K tokens are soft-protected so the model keeps its working set. Tool results from `decompress`, `search_context`, `read`, and `bash` are **excluded** from this zone: they're large and meant to be compressible once consumed, so they don't eat the protected budget.
 3. **Last user message** — always protected (user intent must survive).
+
+## Session storage & migration
+
+billion-context-pi persists each session's compression state in a **sidecar file** next to the session transcript. Every session lives as two files in Pi's sessions directory (`~/.pi/agent/sessions/`):
+
+| File | Contents |
+|------|----------|
+| `<id>.jsonl` | The conversation transcript (messages, tool calls) |
+| `<id>.jsonl.acp.json` | The ACP compression state (compressed blocks, message refs, nudge + stats) |
+
+The `.acp.json` sidecar is what holds your compressed blocks. Without it, the session runs on its full raw history until ACP compresses again.
+
+### Migrating a session (cross-machine copy / backup-restore)
+
+Pi's built-in export/import moves only the **transcript**, not the ACP state. Two things are lost:
+
+1. **The `.acp.json` sidecar is not carried.** An imported session therefore has *no* compressed blocks: every LLM call resends the entire raw history until the nudge re-compresses it — a one-time full re-cache cost plus context bloat back to original size. Very long sessions can approach or exceed the model window before re-compression kicks in (Pi's native compaction is disabled while this plugin is active, so ACP is the only context manager).
+2. **Export drops the `parentSession` header.** Clone/fork child sessions rely on that header field to inherit their parent's compression state; once exported, the link is gone even if the parent's files still exist on the target machine.
+
+**To migrate a session with its compression state intact, copy both files together** (they share the same base name):
+
+```bash
+# copy the pair
+cp <id>.jsonl <id>.jsonl.acp.json  <dest>/
+# ... or back up / restore the whole directory
+cp -r ~/.pi/agent/sessions  <backup>/pi-sessions
+```
+
+Restore them next to each other on the target machine. For clone/fork children, also bring the parent's pair so `parentSession` resolves.
+
+> A permanent fix — the host carrying the sidecar through import/export and preserving `parentSession` — belongs upstream in pi-coding-agent and is tracked in issue [#299](https://github.com/ranxianglei/billion-context-pi/issues/299). Until it lands, copy the pair manually.
 
 ## Built on acp-kernel
 

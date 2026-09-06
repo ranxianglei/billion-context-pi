@@ -108,6 +108,13 @@ All keys below are currently **ACTIVE**.
 |-----|------|---------|--------|-------------|
 | `delegate.enabled` | boolean | `true` | 🟢 ACTIVE | Enable the `acp_delegate` tools and their system-prompt section. |
 | `delegate.displayUsage` | string | `"separate"` | 🟢 ACTIVE | Controls how delegate sub-agent token usage is reported. |
+| `delegate.maxDepth` | number | `2` | 🟢 ACTIVE | Max nesting depth for `acp_delegate` (main session = depth 0; a session *at* this depth is a leaf and cannot delegate again). Set `1` so delegates never nest. |
+| `delegate.syncTimeoutMinutes` | number | `5` | 🟢 ACTIVE | Hard timeout for **synchronous** `acp_delegate` calls, in minutes. `0` / `null` disables it. |
+| `delegate.idleTimeoutMinutes` | number | `5` | 🟢 ACTIVE | Idle watchdog for async delegate children — force-finish after this many minutes without output. `0` / `null` disables it. |
+| `delegate.asyncTimeoutMinutes` | number | `30` | 🟢 ACTIVE | Absolute hard limit for async delegate children, in minutes. `0` / `null` disables it. |
+| `delegate.maxConcurrent` | number | unlimited | 🟢 ACTIVE | Max background (`async`) delegates running at once; extra launches queue FIFO and start as slots free. `1` = forced serial. Overridden by `PI_ACP_DELEGATE_MAX_CONCURRENT`. |
+| `delegate.thinkingLevel` | string | _(unset)_ | 🟢 ACTIVE | Global default thinking level for delegates (per-call > role > global > Pi default). |
+| `delegate.agents` | object | _(unset)_ | 🟢 ACTIVE | Per-role default model + thinking level, keyed by role name. |
 
 **Provider throttle retry keys**
 
@@ -150,6 +157,10 @@ All keys below are currently **ACTIVE**.
 | `ACP_MODEL_CONTEXT_LIMIT` | Override the context limit (takes highest precedence). |
 | `ACP_DEBUG` | Set to `1` / `true` to enable debug logging. |
 | `ACP_LOG_FILE` | Override the log file path (default `~/.pi/acp.log`). |
+| `PI_ACP_DELEGATE_MAX_DEPTH` | Override `delegate.maxDepth`. |
+| `PI_ACP_DELEGATE_SYNC_TIMEOUT_MINUTES` | Override `delegate.syncTimeoutMinutes`; `0` disables the sync hard timeout. |
+| `PI_ACP_DELEGATE_IDLE_TIMEOUT_MINUTES` | Override `delegate.idleTimeoutMinutes`; `0` disables the idle watchdog. |
+| `PI_ACP_DELEGATE_ASYNC_TIMEOUT_MINUTES` | Override `delegate.asyncTimeoutMinutes`; `0` disables the async hard limit. |
 
 > **Only the documented keys are read from `acp.json`.** Other tuning knobs (`preserveRecentMessages`, `protectedTools`) are code-level and not user-overridable. The three compression thresholds form a three-tier escalation: growth-driven soft nudges → forced nudges at `compress.maxContextLimit` → emergency truncation at `compress.emergencyThresholdPercent`.
 
@@ -222,6 +233,72 @@ The `delegate` sub-object controls the `acp_delegate` sub-agent tool family (`ac
 - **Default:** `"separate"`
 - **Status:** 🟢 ACTIVE
 - **Description:** Controls how delegate sub-agent token usage is reported back to the main session. `"separate"` (default) tracks delegate tokens in a separate accumulator — the main session totals stay clean and delegate usage shows as its own block in `acp_status` (excluded from main totals). `"merged"` folds delegate token usage into the tool-result `usage` field so it is counted as part of the main session totals. Only meaningful when `delegate.enabled` is `true`.
+
+### `delegate.maxDepth`
+
+- **Type:** integer ≥ 1
+- **Default:** `2`
+- **Status:** 🟢 ACTIVE
+- **Description:** Maximum nesting depth for `acp_delegate`. Depth counts how far a session sits below the main session (main = 0); a session may only spawn a delegate while its own depth is **below** this limit, so a session *at* the limit becomes a leaf and cannot delegate again. The default `2` allows main → delegate → sub-delegate; set `1` for an orchestrator / leaf-worker pattern where delegates never nest further. The resolved limit is propagated to children via the internal `PI_ACP_DELEGATE_MAX_DEPTH` environment variable, so it binds the whole delegation tree even if a child loads a different project `acp.json`. Invalid values (non-integer, `< 1`) fall back to the default with a warning log. Environment override: `PI_ACP_DELEGATE_MAX_DEPTH` (takes precedence over this key).
+
+### `delegate.syncTimeoutMinutes`
+
+- **Type:** number (minutes, fractional allowed) or `0` / `null`
+- **Default:** `5`
+- **Status:** 🟢 ACTIVE
+- **Description:** Hard timeout for **synchronous** `acp_delegate` calls — the child process is killed (SIGTERM) if it has not finished within this window. Set `0` (or `null`) to run synchronous delegates without a hard timeout. Fractional minutes are accepted (e.g. `0.5` = 30s). Invalid values fall back to the default with a warning log. Environment override: `PI_ACP_DELEGATE_SYNC_TIMEOUT_MINUTES` (`0` disables).
+
+### `delegate.idleTimeoutMinutes`
+
+- **Type:** number (minutes, fractional allowed) or `0` / `null`
+- **Default:** `5`
+- **Status:** 🟢 ACTIVE
+- **Description:** Idle watchdog for async delegate children: if a child produces **no output** for this long, it is considered hung and force-finished. This is the primary defense against a stuck child holding its stdout pipe open. Set `0` (or `null`) to disable it — ACP logs a prominent warning when you do; `acp_delegate_cancel` remains available as a manual escape hatch. Fractional minutes are accepted. Invalid values fall back to the default with a warning log. Environment override: `PI_ACP_DELEGATE_IDLE_TIMEOUT_MINUTES` (`0` disables).
+
+### `delegate.asyncTimeoutMinutes`
+
+- **Type:** number (minutes, fractional allowed) or `0` / `null`
+- **Default:** `30`
+- **Status:** 🟢 ACTIVE
+- **Description:** Absolute hard limit for **asynchronous** delegate children, regardless of activity. Set `0` (or `null`) to run long tasks without an absolute cap — the idle watchdog still applies unless separately disabled. Fractional minutes are accepted. Invalid values fall back to the default with a warning log. Environment override: `PI_ACP_DELEGATE_ASYNC_TIMEOUT_MINUTES` (`0` disables).
+
+### `delegate.maxConcurrent`
+
+- **Type:** number (integer ≥ 1)
+- **Default:** unlimited (no concurrency cap)
+- **Status:** 🟢 ACTIVE
+- **Environment override:** `PI_ACP_DELEGATE_MAX_CONCURRENT` (takes precedence over this key)
+- **Description:** Caps how many background (`async: true`) delegates run **at the same time**. When the limit is reached, further launches are held in a FIFO queue and start automatically as soon as a slot frees, so nothing is dropped — they just wait their turn. Set `1` to force strictly serial execution (useful on low-power machines where parallel sub-agents contend for CPU and time out). Sync (`async: false`) calls always run immediately and are not affected by this cap. Invalid values (non-integers or `< 1`) fall back to unlimited with a warning rather than failing the session. Only meaningful when `delegate.enabled` is `true`.
+
+### `delegate.thinkingLevel`
+
+- **Type:** string enum `"off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"`
+- **Default:** _(unset — each child uses Pi's own default)_
+- **Status:** 🟢 ACTIVE
+- **Description:** Global default thinking level applied to every delegate when neither the per-call `thinkingLevel` nor the role's own `thinkingLevel` (see `delegate.agents`) is set. Without any value at all levels, no `--thinking` flag is passed and each child runs on Pi's own default. An invalid value is ignored with a warning logged (it never fails the run). A per-call `acp_delegate({ thinkingLevel })` always wins over this global.
+
+### `delegate.agents`
+
+- **Type:** object — map of role name → `{ model?, thinkingLevel? }`
+- **Default:** _(unset — all roles inherit the parent model + Pi defaults)_
+- **Status:** 🟢 ACTIVE
+- **Description:** Per-role defaults so long-lived automation can pin a cheaper or more capable model and thinking level per delegate role without the main agent having to fill them in on every call. Keys are role names (`reviewer`, `researcher`, `worker`, `planner`, `oracle`, or any custom role). Each value may set:
+  - `model` (`"provider/id"`) — this role's default model. Resolution priority: per-call `model` > this role's `model` > parent agent's current model. A value that isn't a valid `"provider/id"` is ignored. If the configured model doesn't exist in the live registry, the child falls back to the parent model and a warning is logged — it never fails.
+  - `thinkingLevel` — this role's default thinking level (same enum as `delegate.thinkingLevel`). Priority: per-call > role > global.
+
+```jsonc
+{
+  "delegate": {
+    "thinkingLevel": "low",
+    "agents": {
+      "reviewer": { "model": "opencode-go/deepseek-v4-flash", "thinkingLevel": "high" },
+      "worker":   { "model": "anthropic/claude-sonnet-4-5" },
+      "oracle":   { "model": "openai/gpt-5", "thinkingLevel": "xhigh" }
+    }
+  }
+}
+```
+
 
 ---
 
@@ -480,3 +557,38 @@ Environment variables take precedence over the JSON config files. They are usefu
 - **Default:** `~/.pi/acp.log`
 - **Status:** 🟢 ACTIVE
 - **Description:** Override the path to the log file. By default, structured logs are written to `~/.pi/acp.log` (the file rotates to `~/.pi/acp.log.old` at 10 MB). Point this at a different location to keep per-project or per-run logs separate.
+
+### `PI_ACP_DELEGATE_MAX_DEPTH`
+
+- **Type:** integer ≥ 1
+- **Default:** *(unset — follows `delegate.maxDepth`, then 2)*
+- **Status:** 🟢 ACTIVE
+- **Description:** Override the maximum delegate nesting depth for one session without editing config. Takes precedence over `delegate.maxDepth`. The resolved value is what gets propagated down the delegation tree. Do not set this manually mid-tree: it is also the internal variable ACP uses to pass the *effective limit* into child processes.
+
+### `PI_ACP_DELEGATE_SYNC_TIMEOUT_MINUTES`
+
+- **Type:** number (minutes) or `0`
+- **Default:** *(unset — follows `delegate.syncTimeoutMinutes`, then 5)*
+- **Status:** 🟢 ACTIVE
+- **Description:** Override the synchronous `acp_delegate` hard timeout. Set `0` to disable the sync hard timeout for one session. Takes precedence over `delegate.syncTimeoutMinutes`.
+
+### `PI_ACP_DELEGATE_IDLE_TIMEOUT_MINUTES`
+
+- **Type:** number (minutes) or `0`
+- **Default:** *(unset — follows `delegate.idleTimeoutMinutes`, then 5)*
+- **Status:** 🟢 ACTIVE
+- **Description:** Override the async idle watchdog window. Set `0` to disable the idle watchdog for one session (ACP logs a warning; `acp_delegate_cancel` remains as a manual escape hatch). Takes precedence over `delegate.idleTimeoutMinutes`.
+
+### `PI_ACP_DELEGATE_ASYNC_TIMEOUT_MINUTES`
+
+- **Type:** number (minutes) or `0`
+- **Default:** *(unset — follows `delegate.asyncTimeoutMinutes`, then 30)*
+- **Status:** 🟢 ACTIVE
+- **Description:** Override the absolute hard limit for async delegate children. Set `0` to run long tasks without an absolute cap (the idle watchdog still applies unless disabled). Takes precedence over `delegate.asyncTimeoutMinutes`.
+
+### `PI_ACP_DELEGATE_MAX_CONCURRENT`
+
+- **Type:** integer (≥ 1)
+- **Default:** *(unset — cap follows `delegate.maxConcurrent`, then unlimited)*
+- **Status:** 🟢 ACTIVE
+- **Description:** Override the background (`async`) delegate concurrency cap. **Takes precedence** over `delegate.maxConcurrent`. Set to `1` for forced serial execution. Invalid values fall back to the next source (then unlimited) with a warning rather than failing the session.

@@ -82,6 +82,18 @@ test("resolveConfig leaves growthFloor/growthCap at kernel defaults when compres
   assert.equal(cfg.nudge.growthCap, 50000);
 });
 
+test("resolveConfig maps compress.minPressureBenefitTokens to kernel nudge (0 = legacy any-pending)", () => {
+  const cfg = resolveConfig({ compress: { minPressureBenefitTokens: 0 } }, 1_000_000);
+  assert.equal(cfg.nudge.minPressureBenefitTokens, 0);
+  const cfg2 = resolveConfig({ compress: { minPressureBenefitTokens: 8000 } }, 1_000_000);
+  assert.equal(cfg2.nudge.minPressureBenefitTokens, 8000);
+});
+
+test("resolveConfig leaves minPressureBenefitTokens undefined (kernel default max(5000, limit×1%)) when omitted", () => {
+  const cfg = resolveConfig(EMPTY, 1_000_000);
+  assert.equal(cfg.nudge.minPressureBenefitTokens, undefined);
+});
+
 test("resolveConfig handles all three compress fields together", () => {
   const cfg = resolveConfig({ compress: { maxContextLimit: "70%", emergencyThresholdPercent: 0.9, nudgeGrowthTokens: 40000 } }, 1_000_000);
   assert.equal(cfg.nudge.maxContextLimitPct, 0.7);
@@ -91,22 +103,30 @@ test("resolveConfig handles all three compress fields together", () => {
   assert.equal(cfg.nudge.growthCap, 40000);
 });
 
-test("resolveDelegate: undefined delegate defaults to enabled + separate", () => {
+test("resolveDelegate: undefined delegate defaults to enabled + separate + skip", () => {
   const r = resolveDelegate({});
   assert.equal(r.enabled, true);
   assert.equal(r.displayUsage, "separate");
+  assert.equal(r.notifyIfRead, "skip");
 });
 
 test("resolveDelegate: boolean true shorthand", () => {
   const r = resolveDelegate({ delegate: true });
   assert.equal(r.enabled, true);
   assert.equal(r.displayUsage, "separate");
+  assert.equal(r.notifyIfRead, "skip");
 });
 
 test("resolveDelegate: boolean false shorthand", () => {
   const r = resolveDelegate({ delegate: false });
   assert.equal(r.enabled, false);
   assert.equal(r.displayUsage, "separate");
+  assert.equal(r.notifyIfRead, "skip");
+});
+
+test("resolveDelegate: notifyIfRead always is honored, skip is the default", () => {
+  assert.equal(resolveDelegate({ delegate: { notifyIfRead: "always" } }).notifyIfRead, "always");
+  assert.equal(resolveDelegate({ delegate: { enabled: true } }).notifyIfRead, "skip");
 });
 
 test("resolveDelegate: object with enabled + displayUsage", () => {
@@ -119,6 +139,22 @@ test("resolveDelegate: object with only enabled (displayUsage defaults)", () => 
   const r = resolveDelegate({ delegate: { enabled: true } });
   assert.equal(r.enabled, true);
   assert.equal(r.displayUsage, "separate");
+});
+
+test("resolveDelegate: maxConcurrent resolves from object form", () => {
+  const r = resolveDelegate({ delegate: { enabled: true, maxConcurrent: 3 } });
+  assert.equal(r.enabled, true);
+  assert.equal(r.maxConcurrent, 3);
+});
+
+test("resolveDelegate: maxConcurrent absent resolves to unlimited", () => {
+  const r = resolveDelegate({ delegate: { enabled: true } });
+  assert.equal(r.maxConcurrent, Infinity);
+});
+
+test("resolveDelegate: boolean shorthand leaves maxConcurrent unlimited", () => {
+  const r = resolveDelegate({ delegate: true });
+  assert.equal(r.maxConcurrent, Infinity);
 });
 
 test("resolveDelegate: legacy flat displayUsage still works with boolean delegate", () => {
@@ -136,6 +172,142 @@ test("resolveDelegate: legacy flat displayUsage still works with undefined deleg
 test("resolveDelegate: object displayUsage takes priority over legacy flat", () => {
   const r = resolveDelegate({ delegate: { displayUsage: "separate" }, displayUsage: "merged" });
   assert.equal(r.displayUsage, "separate");
+});
+
+// ─── #279: configurable maxDepth + timeouts ─────────────────────────────────
+
+test("resolveDelegate: maxDepth + timeouts default to 2 / 5m / 5m / 30m", () => {
+  const r = resolveDelegate({});
+  assert.equal(r.maxDepth, 2);
+  assert.equal(r.syncTimeoutMs, 5 * 60_000);
+  assert.equal(r.idleMs, 5 * 60_000);
+  assert.equal(r.asyncTimeoutMs, 30 * 60_000);
+});
+
+test("resolveDelegate: custom maxDepth + timeouts (minutes → ms)", () => {
+  const r = resolveDelegate({ delegate: { maxDepth: 1, syncTimeoutMinutes: 10, idleTimeoutMinutes: 7.5, asyncTimeoutMinutes: 120 } });
+  assert.equal(r.maxDepth, 1);
+  assert.equal(r.syncTimeoutMs, 10 * 60_000);
+  assert.equal(r.idleMs, 450_000);
+  assert.equal(r.asyncTimeoutMs, 120 * 60_000);
+});
+
+test("resolveDelegate: 0/null disables a timeout, others keep defaults", () => {
+  const r = resolveDelegate({ delegate: { syncTimeoutMinutes: 0, idleTimeoutMinutes: null, asyncTimeoutMinutes: 90 } });
+  assert.equal(r.syncTimeoutMs, null);
+  assert.equal(r.idleMs, null);
+  assert.equal(r.asyncTimeoutMs, 90 * 60_000);
+});
+
+test("resolveDelegate: invalid numeric values fall back to defaults", () => {
+  const r = resolveDelegate({ delegate: { maxDepth: 0, syncTimeoutMinutes: -5, idleTimeoutMinutes: Number.NaN } });
+  assert.equal(r.maxDepth, 2);
+  assert.equal(r.syncTimeoutMs, 5 * 60_000);
+  assert.equal(r.idleMs, 5 * 60_000);
+});
+
+const DELEGATE_ENV_KEYS = [
+  "PI_ACP_DELEGATE_MAX_DEPTH",
+  "PI_ACP_DELEGATE_SYNC_TIMEOUT_MINUTES",
+  "PI_ACP_DELEGATE_IDLE_TIMEOUT_MINUTES",
+  "PI_ACP_DELEGATE_ASYNC_TIMEOUT_MINUTES",
+  "PI_ACP_DELEGATE_MAX_CONCURRENT",
+] as const;
+
+function withDelegateEnv(mutate: (env: NodeJS.ProcessEnv) => void, fn: () => void): void {
+  const saved: Record<string, string | undefined> = {};
+  for (const k of DELEGATE_ENV_KEYS) saved[k] = process.env[k];
+  try {
+    mutate(process.env);
+    fn();
+  } finally {
+    for (const k of DELEGATE_ENV_KEYS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k]!;
+    }
+  }
+}
+
+test("resolveDelegate: env overrides acp.json; unset env falls back to config", () => {
+  withDelegateEnv(
+    (env) => {
+      env.PI_ACP_DELEGATE_MAX_DEPTH = "1";
+      env.PI_ACP_DELEGATE_ASYNC_TIMEOUT_MINUTES = "0";
+    },
+    () => {
+      const r = resolveDelegate({ delegate: { maxDepth: 5, asyncTimeoutMinutes: 120 } });
+      assert.equal(r.maxDepth, 1, "env beats config");
+      assert.equal(r.asyncTimeoutMs, null, "env 0 disables");
+    },
+  );
+  const r2 = resolveDelegate({ delegate: { maxDepth: 5, asyncTimeoutMinutes: 120 } });
+  assert.equal(r2.maxDepth, 5, "config used when env unset");
+  assert.equal(r2.asyncTimeoutMs, 120 * 60_000);
+});
+
+test("resolveDelegate: invalid env values fall back without failing", () => {
+  let r!: ReturnType<typeof resolveDelegate>;
+  withDelegateEnv(
+    (env) => {
+      env.PI_ACP_DELEGATE_MAX_DEPTH = "abc";
+      env.PI_ACP_DELEGATE_SYNC_TIMEOUT_MINUTES = "-3";
+      env.PI_ACP_DELEGATE_IDLE_TIMEOUT_MINUTES = "1.5x";
+    },
+    () => {
+      r = resolveDelegate({ delegate: { syncTimeoutMinutes: 8 } });
+    },
+  );
+  assert.equal(r.maxDepth, 2, "invalid env maxDepth → default");
+  assert.equal(r.syncTimeoutMs, 5 * 60_000, "invalid env timeout → default (not config)");
+  assert.equal(r.idleMs, 5 * 60_000, "invalid env idle → default");
+});
+
+test("resolveDelegate: maxConcurrent env > acp.json > unlimited, invalid env falls to config", () => {
+  withDelegateEnv(
+    (env) => {
+      delete env.PI_ACP_DELEGATE_MAX_CONCURRENT;
+    },
+    () => {
+      assert.equal(resolveDelegate({ delegate: { maxConcurrent: 3 } }).maxConcurrent, 3, "config when env unset");
+      process.env.PI_ACP_DELEGATE_MAX_CONCURRENT = "5";
+      assert.equal(resolveDelegate({ delegate: { maxConcurrent: 3 } }).maxConcurrent, 5, "env beats config");
+      process.env.PI_ACP_DELEGATE_MAX_CONCURRENT = "not-a-number";
+      assert.equal(resolveDelegate({ delegate: { maxConcurrent: 3 } }).maxConcurrent, 3, "invalid env falls to config");
+      process.env.PI_ACP_DELEGATE_MAX_CONCURRENT = "0";
+      assert.equal(resolveDelegate({ delegate: { maxConcurrent: 2 } }).maxConcurrent, 2, "env < 1 falls to config");
+      delete process.env.PI_ACP_DELEGATE_MAX_CONCURRENT;
+      assert.equal(resolveDelegate({}).maxConcurrent, Infinity, "no source -> unlimited");
+    },
+  );
+});
+
+test("resolveDelegate: object exposes thinkingLevel + per-role agents", () => {
+  const r = resolveDelegate({
+    delegate: {
+      thinkingLevel: "medium",
+      agents: {
+        reviewer: { model: "openai/gpt-5", thinkingLevel: "high" },
+        worker: { model: "anthropic/claude-5" },
+      },
+    },
+  });
+  assert.equal(r.enabled, true);
+  assert.equal(r.thinkingLevel, "medium");
+  assert.deepEqual(r.agents?.reviewer, { model: "openai/gpt-5", thinkingLevel: "high" });
+  assert.deepEqual(r.agents?.worker, { model: "anthropic/claude-5" });
+});
+
+test("resolveDelegate: boolean shorthand leaves thinkingLevel/agents undefined", () => {
+  const r = resolveDelegate({ delegate: true });
+  assert.equal(r.enabled, true);
+  assert.equal(r.thinkingLevel, undefined);
+  assert.equal(r.agents, undefined);
+});
+
+test("resolveDelegate: unset thinkingLevel/agents on object stay undefined", () => {
+  const r = resolveDelegate({ delegate: { enabled: true } });
+  assert.equal(r.thinkingLevel, undefined);
+  assert.equal(r.agents, undefined);
 });
 
 test("resolveCompress returns {} when no compress configured", () => {

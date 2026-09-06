@@ -20,7 +20,7 @@
 
 ---
 
-> **宿主支持:** 本插件面向 **Pi**。它**不支持 OMP(oh-my-pi)** —— 在 OMP 宿主上会拒绝运行。OMP 用户请改用 [billion-context](https://github.com/ranxianglei/billion-context)(`bili omp`)。详细说明:[docs/omp.zh-CN.md](./docs/omp.zh-CN.md)。
+> **宿主支持:** 本插件面向 **Pi**。它**不支持 OMP(oh-my-pi)** —— 在 OMP 宿主上会拒绝运行。OMP 用户请直接改用 [billion-context](https://github.com/ranxianglei/billion-context)(启动命令 bili omp);其他客户端的完整对照见[该选哪个?](#该选哪个)。OMP 详细说明:[docs/omp.zh-CN.md](./docs/omp.zh-CN.md)。
 
 ## 为什么选择 billion-context
 
@@ -37,6 +37,19 @@
 
 1. **一个会话即可支撑海量工作。** 根据三级压缩架构的模拟测试(见 [opencode-acp](https://github.com/ranxianglei/opencode-acp)),单会话累计可处理约 100 亿至 600 亿 token —— 同时对遥远的关键信息(路径、决策、签名)保持长久记忆。用户可以在**同一个会话里连续工作几个月**,而无需因为上下文膨胀而开新会话丢上下文。
 2. **上下文长期保持精简。** 实际运行中上下文通常稳定在 15 万 token 以下(opencode-acp 实测维持在 20 万以下),相比传统压缩方案动辄撑到 100 万上下文,**单会话累计可节省近 5 倍的 token 费用**。
+
+## 该选哪个?
+
+按客户端选:
+
+| 客户端 | 用这个 |
+|---|---|
+| **pi** | [`billion-context-pi`](https://github.com/ranxianglei/billion-context-pi)(进程内扩展) |
+| **opencode** | [`opencode-acp`](https://github.com/ranxianglei/opencode-acp)(进程内扩展) |
+| **omp** | [`billion-context`](https://github.com/ranxianglei/billion-context),`bili omp`(内置插件) |
+| **其余所有** | [`billion-context`](https://github.com/ranxianglei/billion-context) —— `bili <client>`(启动器,优先)或 `/bili/` 前缀 |
+
+> 为什么 OMP 不能用本进程内扩展、以及强行使用的后果:见下文[宿主支持](#宿主支持)与 [docs/omp.zh-CN.md](./docs/omp.zh-CN.md)。
 
 ## 安装
 
@@ -75,7 +88,7 @@ billion-context 通过拦截 Pi 的 `context` 事件接管上下文管理。**Pi
 
 ## 宿主支持
 
-billion-context-pi 面向 **Pi** 编码代理(`@earendil-works/pi-coding-agent`)构建,并在会话开始时检测宿主:
+billion-context-pi 面向 **Pi** 编码代理(`@earendil-works/pi-coding-agent`)构建,并在会话开始时检测宿主——完整的「客户端 → 包」对照表见[该选哪个?](#该选哪个):
 
 - **Pi** — 完全支持。
 - **OMP(`can1357/oh-my-pi`)** — **不支持。** OMP 的进程内会话 API 与 Pi 不同,扩展注入的压缩引用可能与会话的真实引用漂移失步,导致 `compress` 调用失败,报错 `does not exist in this session`(issue [#234](https://github.com/ranxianglei/billion-context-pi/issues/234))。在 OMP 上,扩展现在会**拒绝服务**:打印警告、禁用 ACP 工具,并保持宿主自身的上下文处理不受影响。
@@ -195,6 +208,37 @@ billion-context 保护三类内容不被压缩:
 1. **永久保护的工具** — `compress` 调用被硬保护(它们是承载关键元数据的;压缩它们会破坏 decompress 和"摘要是历史"的契约)。
 2. **软近期区** — 最后 N 条消息(默认 5)和最后约 5K token 被软保护,让模型保留工作集。来自 `decompress`、`search_context`、`read`、`bash` 的工具结果被**排除**出此区:它们体量大、消费后就该能压缩,所以不该占用保护预算。
 3. **最后一条用户消息** — 始终保护(用户意图必须存活)。
+
+## 会话存储与迁移
+
+billion-context-pi 把每个会话的压缩状态持久化在会话转录文件旁边的一个**旁挂(sidecar)文件**里。每个会话在 Pi 的会话目录(`~/.pi/agent/sessions/`)下都有两个文件:
+
+| 文件 | 内容 |
+|------|------|
+| `<id>.jsonl` | 会话转录(消息、工具调用) |
+| `<id>.jsonl.acp.json` | ACP 压缩状态(压缩块、消息引用、nudge 与统计) |
+
+`.acp.json` 旁挂文件承载了你的压缩块。没有它,会话就会以完整原始历史运行,直到 ACP 再次压缩。
+
+### 迁移会话(跨机器拷贝 / 备份恢复)
+
+Pi 内置的导出/导入只搬运**转录**,不搬 ACP 状态。会丢失两样东西:
+
+1. **`.acp.json` 旁挂文件不会被携带。** 因此导入后的会话*没有任何*压缩块:每次 LLM 调用都会重发完整原始历史,直到 nudge 重新压缩 —— 一次性全量重缓存成本 + 上下文膨胀回原始大小。超长会话可能在重新压缩生效前逼近甚至超出模型窗口(本插件激活时 Pi 的原生 compaction 被禁用,ACP 是唯一的上下文管理者)。
+2. **导出会丢弃 `parentSession` 头。** clone/fork 子会话依赖这个头字段来继承父会话的压缩状态;一旦导出,这条链接就断了 —— 即使目标机器上父会话的文件仍然存在。
+
+**要带着完整压缩状态迁移会话,请把两个文件一起拷贝**(它们共享同一基础名):
+
+```bash
+# 成对拷贝
+cp <id>.jsonl <id>.jsonl.acp.json  <目标目录>/
+# ... 或整体备份 / 恢复整个目录
+cp -r ~/.pi/agent/sessions  <备份>/pi-sessions
+```
+
+在目标机器上把它们放回彼此相邻的位置。对 clone/fork 子会话,还要带上父会话的那一对,以便 `parentSession` 能解析。
+
+> 根治方案 —— 让宿主在 import/export 时一并携带旁挂文件并保留 `parentSession` —— 属于上游 pi-coding-agent,已在 issue [#299](https://github.com/ranxianglei/billion-context-pi/issues/299) 跟踪。落地前请手动成对拷贝。
 
 ## 基于 acp-kernel
 

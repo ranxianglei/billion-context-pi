@@ -4,7 +4,8 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildChildArgs, delegateSpawnOptions, injectedWaitMessage, buildWaitResult, buildCancelResult, getDelegateUsage, resetDelegateUsage, injectResult, effectiveExitCode, formatRunResult, resolveWaitTimeoutMs, findUndeliveredRuns, undeliveredNoticeFrom, buildRecoveryNotice, makeDelegateTool, exitLabel, cancelledFileNote, delegateStdinText, readActivityTail, scheduleRunNotification, flushDelegateNotifications, formatBatchRunSection } from "../src/delegate-tool.js";
+import { buildChildArgs, delegateSpawnOptions, injectedWaitMessage, buildWaitResult, buildCancelResult, getDelegateUsage, resetDelegateUsage, injectResult, effectiveExitCode, formatRunResult, resolveWaitTimeoutMs, findUndeliveredRuns, undeliveredNoticeFrom, buildRecoveryNotice, makeDelegateTool, exitLabel, cancelledFileNote, delegateStdinText, readActivityTail, scheduleRunNotification, flushDelegateNotifications, formatBatchRunSection, setDelegatePolicy, delegateChildEnv, asyncWatchdogDescription, ConcurrencyGate, setDelegateDefaults, resetDelegateDefaults, isValidThinkingLevel, resolvePerCallTimeoutMs } from "../src/delegate-tool.js";
+import { DEFAULT_DELEGATE_POLICY } from "../src/config.js";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 /** Minimal ctx mock - buildChildArgs reads ctx.model and sessionManager. */
@@ -154,6 +155,166 @@ test("buildChildArgs uses explicit model override when provided", async () => {
   assert.equal(cliArgs[providerIdx + 1], "anthropic");
   assert.ok(modelIdx >= 0);
   assert.equal(cliArgs[modelIdx + 1], "claude-5");
+});
+
+// ─── per-role model + thinking level (issue #117) ─────────────────────────
+
+function flagVal(args: string[], flag: string): string | null {
+  const idx = args.indexOf(flag);
+  return idx >= 0 ? (args[idx + 1] ?? null) : null;
+}
+
+/** ctx mock with a live modelRegistry whose find() knows `knownModels`. */
+function ctxWithRegistry(
+  model: { provider: string; id: string } | undefined,
+  knownModels: string[] = [],
+): ExtensionContext {
+  const registry = {
+    find: (p: string, mid: string) =>
+      knownModels.includes(`${p}/${mid}`) ? { provider: p, id: mid } : undefined,
+  };
+  return {
+    model,
+    sessionManager: { buildContextEntries: () => [] },
+    modelRegistry: registry,
+  } as unknown as ExtensionContext;
+}
+
+test("buildChildArgs model: per-call overrides role config", async () => {
+  resetDelegateDefaults();
+  setDelegateDefaults({ agents: { worker: { model: "rolecfg/role-model" } } });
+  const { cliArgs } = await buildChildArgs(
+    { agent: "worker", task: "t", model: "call/call-model" },
+    "prompt", ctxWithRegistry({ provider: "parent", id: "parent-model" }, ["rolecfg/role-model"]), "del_m1",
+  );
+  assert.equal(flagVal(cliArgs, "--provider"), "call");
+  assert.equal(flagVal(cliArgs, "--model"), "call-model");
+});
+
+test("buildChildArgs model: role config used when no per-call model", async () => {
+  resetDelegateDefaults();
+  setDelegateDefaults({ agents: { reviewer: { model: "openai/gpt-5" } } });
+  const { cliArgs } = await buildChildArgs(
+    { agent: "reviewer", task: "t" },
+    "prompt", ctxWithRegistry({ provider: "parent", id: "parent-model" }, ["openai/gpt-5"]), "del_m2",
+  );
+  assert.equal(flagVal(cliArgs, "--provider"), "openai");
+  assert.equal(flagVal(cliArgs, "--model"), "gpt-5");
+});
+
+test("buildChildArgs model: inherits parent when neither per-call nor role config", async () => {
+  resetDelegateDefaults();
+  const { cliArgs } = await buildChildArgs(
+    { agent: "worker", task: "t" },
+    "prompt", ctxWithRegistry({ provider: "parent", id: "parent-model" }), "del_m3",
+  );
+  assert.equal(flagVal(cliArgs, "--provider"), "parent");
+  assert.equal(flagVal(cliArgs, "--model"), "parent-model");
+});
+
+test("buildChildArgs model: missing role model falls back to parent (never fails)", async () => {
+  resetDelegateDefaults();
+  setDelegateDefaults({ agents: { oracle: { model: "ghost/nonexistent" } } });
+  const { cliArgs } = await buildChildArgs(
+    { agent: "oracle", task: "t" },
+    "prompt", ctxWithRegistry({ provider: "parent", id: "parent-model" }), "del_m4",
+  );
+  assert.equal(flagVal(cliArgs, "--provider"), "parent");
+  assert.equal(flagVal(cliArgs, "--model"), "parent-model");
+});
+
+test("buildChildArgs model: malformed role model (no slash) ignored -> inherit parent", async () => {
+  resetDelegateDefaults();
+  setDelegateDefaults({ agents: { planner: { model: "just-a-name" } } });
+  const { cliArgs } = await buildChildArgs(
+    { agent: "planner", task: "t" },
+    "prompt", ctxWithRegistry({ provider: "parent", id: "parent-model" }), "del_m5",
+  );
+  assert.equal(flagVal(cliArgs, "--provider"), "parent");
+  assert.equal(flagVal(cliArgs, "--model"), "parent-model");
+});
+
+test("buildChildArgs model: slash in model id splits on first slash only", async () => {
+  resetDelegateDefaults();
+  setDelegateDefaults({ agents: { researcher: { model: "prov/a/b" } } });
+  const { cliArgs } = await buildChildArgs(
+    { agent: "researcher", task: "t" },
+    "prompt", ctxWithRegistry({ provider: "parent", id: "parent-model" }, ["prov/a/b"]), "del_m6",
+  );
+  assert.equal(flagVal(cliArgs, "--provider"), "prov");
+  assert.equal(flagVal(cliArgs, "--model"), "a/b");
+});
+
+test("buildChildArgs thinking: per-call wins over role and global", async () => {
+  resetDelegateDefaults();
+  setDelegateDefaults({ thinkingLevel: "low", agents: { worker: { thinkingLevel: "medium" } } });
+  const { cliArgs } = await buildChildArgs(
+    { agent: "worker", task: "t", thinkingLevel: "high" },
+    "prompt", ctxWithRegistry({ provider: "p", id: "m" }), "del_t1",
+  );
+  assert.equal(flagVal(cliArgs, "--thinking"), "high");
+});
+
+test("buildChildArgs thinking: role level wins over global", async () => {
+  resetDelegateDefaults();
+  setDelegateDefaults({ thinkingLevel: "low", agents: { worker: { thinkingLevel: "medium" } } });
+  const { cliArgs } = await buildChildArgs(
+    { agent: "worker", task: "t" },
+    "prompt", ctxWithRegistry({ provider: "p", id: "m" }), "del_t2",
+  );
+  assert.equal(flagVal(cliArgs, "--thinking"), "medium");
+});
+
+test("buildChildArgs thinking: global used when no per-call or role level", async () => {
+  resetDelegateDefaults();
+  setDelegateDefaults({ thinkingLevel: "xhigh" });
+  const { cliArgs } = await buildChildArgs(
+    { agent: "worker", task: "t" },
+    "prompt", ctxWithRegistry({ provider: "p", id: "m" }), "del_t3",
+  );
+  assert.equal(flagVal(cliArgs, "--thinking"), "xhigh");
+});
+
+test("buildChildArgs thinking: no flag when nothing configured (Pi default preserved)", async () => {
+  resetDelegateDefaults();
+  const { cliArgs } = await buildChildArgs(
+    { agent: "worker", task: "t" },
+    "prompt", ctxWithRegistry({ provider: "p", id: "m" }), "del_t4",
+  );
+  assert.equal(flagVal(cliArgs, "--thinking"), null);
+});
+
+test("buildChildArgs thinking: invalid value dropped without cascading to global", async () => {
+  resetDelegateDefaults();
+  setDelegateDefaults({ thinkingLevel: "low", agents: { worker: { thinkingLevel: "bogus" } } });
+  const { cliArgs } = await buildChildArgs(
+    { agent: "worker", task: "t" },
+    "prompt", ctxWithRegistry({ provider: "p", id: "m" }), "del_t5",
+  );
+  assert.equal(flagVal(cliArgs, "--thinking"), null);
+});
+
+test("buildChildArgs thinking: invalid per-call dropped even if global is valid", async () => {
+  resetDelegateDefaults();
+  setDelegateDefaults({ thinkingLevel: "low" });
+  const { cliArgs } = await buildChildArgs(
+    { agent: "worker", task: "t", thinkingLevel: "not-a-level" },
+    "prompt", ctxWithRegistry({ provider: "p", id: "m" }), "del_t6",
+  );
+  assert.equal(flagVal(cliArgs, "--thinking"), null);
+});
+
+for (const lvl of ["off", "minimal", "low", "medium", "high", "xhigh", "max"]) {
+  test(`isValidThinkingLevel accepts ${lvl}`, () => {
+    assert.equal(isValidThinkingLevel(lvl), true);
+  });
+}
+
+test("isValidThinkingLevel rejects invalid values", () => {
+  assert.equal(isValidThinkingLevel("bogus"), false);
+  assert.equal(isValidThinkingLevel("HIGH"), false);
+  assert.equal(isValidThinkingLevel(""), false);
+  assert.equal(isValidThinkingLevel(undefined), false);
 });
 
 // ─── wait() dedup: already-injected run returns "already delivered" ───────
@@ -807,3 +968,158 @@ test("formatBatchRunSection carries the timeout note and error excerpt", () => {
   assert.ok(ok.includes("[acp_delegate completed]"), "completed status");
   assert.ok(!ok.includes("hidden"), "completed runs carry no body");
 });
+
+// ─── #279: configurable maxDepth + timeouts ─────────────────────────────────
+
+test("depth gate honors configured maxDepth (rejection paths, no spawn)", async () => {
+  const pi = { sendUserMessage: () => {} } as unknown as Parameters<typeof makeDelegateTool>[0];
+  const tool = makeDelegateTool(pi);
+  const ctx = { ...mockCtx("pi"), mode: "tui", cwd: process.cwd() } as unknown as ExtensionContext;
+  const prev = process.env.PI_ACP_DELEGATE_DEPTH;
+  const textOf = (res: Awaited<ReturnType<typeof tool.execute>>): string => (res.content[0] as { text?: string }).text ?? "";
+  try {
+    setDelegatePolicy(DEFAULT_DELEGATE_POLICY);
+    process.env.PI_ACP_DELEGATE_DEPTH = "2";
+    let res = await tool.execute("tc-depth-a", { agent: "oracle", task: "x" }, undefined, undefined, ctx);
+    assert.match(textOf(res), /nesting limit reached \(depth 2, max 2\)/, "default maxDepth 2 rejects depth 2");
+
+    setDelegatePolicy({ ...DEFAULT_DELEGATE_POLICY, maxDepth: 1 });
+    process.env.PI_ACP_DELEGATE_DEPTH = "1";
+    res = await tool.execute("tc-depth-b", { agent: "oracle", task: "x" }, undefined, undefined, ctx);
+    assert.match(textOf(res), /nesting limit reached \(depth 1, max 1\)/, "maxDepth 1 rejects depth 1");
+
+    setDelegatePolicy({ ...DEFAULT_DELEGATE_POLICY, maxDepth: 3 });
+    process.env.PI_ACP_DELEGATE_DEPTH = "3";
+    res = await tool.execute("tc-depth-c", { agent: "oracle", task: "x" }, undefined, undefined, ctx);
+    assert.match(textOf(res), /nesting limit reached \(depth 3, max 3\)/, "maxDepth 3 rejects depth 3");
+  } finally {
+    if (prev === undefined) delete process.env.PI_ACP_DELEGATE_DEPTH;
+    else process.env.PI_ACP_DELEGATE_DEPTH = prev;
+    setDelegatePolicy(DEFAULT_DELEGATE_POLICY);
+  }
+});
+
+test("delegateChildEnv increments depth and propagates the maxDepth cap", () => {
+  const env = delegateChildEnv(1, 3);
+  assert.equal(env.PI_ACP_DELEGATE_DEPTH, "2", "child depth = parent + 1");
+  assert.equal(env.PI_ACP_DELEGATE_MAX_DEPTH, "3", "cap follows the delegation tree");
+  for (const [key, value] of Object.entries(process.env)) {
+    assert.equal(env[key], value, `parent env ${key} inherited`);
+  }
+});
+
+test("asyncWatchdogDescription reflects the resolved policy", () => {
+  try {
+    setDelegatePolicy(DEFAULT_DELEGATE_POLICY);
+    assert.equal(
+      asyncWatchdogDescription(),
+      "A watchdog force-finishes a hung run: no output for 5m, 10s after output ends, or a 30m hard limit — the result reflects whatever was produced.",
+    );
+    setDelegatePolicy({ ...DEFAULT_DELEGATE_POLICY, idleMs: 10 * 60_000, asyncTimeoutMs: 90 * 60_000 });
+    assert.equal(
+      asyncWatchdogDescription(),
+      "A watchdog force-finishes a hung run: no output for 10m, 10s after output ends, or a 90m hard limit — the result reflects whatever was produced.",
+    );
+    setDelegatePolicy({ ...DEFAULT_DELEGATE_POLICY, idleMs: null, asyncTimeoutMs: null });
+    assert.equal(
+      asyncWatchdogDescription(),
+      "A watchdog force-finishes a hung run: 10s after output ends — the result reflects whatever was produced.",
+    );
+  } finally {
+    setDelegatePolicy(DEFAULT_DELEGATE_POLICY);
+  }
+});
+
+test("resolvePerCallTimeoutMs: valid minutes → ms, clamped to cap", () => {
+  assert.equal(resolvePerCallTimeoutMs(90, 30 * 60_000), 90 * 60_000);
+  assert.equal(resolvePerCallTimeoutMs(0.5, 30 * 60_000), 30_000);
+  assert.equal(resolvePerCallTimeoutMs(1440, 30 * 60_000), 1440 * 60_000, "at cap");
+  assert.equal(resolvePerCallTimeoutMs(999_999, 30 * 60_000), 1440 * 60_000, "above cap clamps");
+});
+
+test("resolvePerCallTimeoutMs: absent/invalid → fallback default", () => {
+  assert.equal(resolvePerCallTimeoutMs(undefined, 30 * 60_000), 30 * 60_000);
+  assert.equal(resolvePerCallTimeoutMs(NaN, 30 * 60_000), 30 * 60_000);
+  assert.equal(resolvePerCallTimeoutMs(-5, 30 * 60_000), 30 * 60_000);
+  assert.equal(resolvePerCallTimeoutMs(0, 30 * 60_000), 30 * 60_000);
+  assert.equal(resolvePerCallTimeoutMs(undefined, null), null, "null fallback preserved");
+});
+
+test("asyncWatchdogDescription honors a per-run hard-limit override", () => {
+  try {
+    setDelegatePolicy(DEFAULT_DELEGATE_POLICY);
+    assert.equal(
+      asyncWatchdogDescription(90 * 60_000),
+      "A watchdog force-finishes a hung run: no output for 5m, 10s after output ends, or a 90m hard limit — the result reflects whatever was produced.",
+    );
+    assert.equal(
+      asyncWatchdogDescription(null),
+      "A watchdog force-finishes a hung run: no output for 5m, 10s after output ends, or a 30m hard limit — the result reflects whatever was produced.",
+    );
+    setDelegatePolicy({ ...DEFAULT_DELEGATE_POLICY, asyncTimeoutMs: null });
+    assert.equal(
+      asyncWatchdogDescription(45 * 60_000),
+      "A watchdog force-finishes a hung run: no output for 5m, 10s after output ends, or a 45m hard limit — the result reflects whatever was produced.",
+    );
+  } finally {
+    setDelegatePolicy(DEFAULT_DELEGATE_POLICY);
+  }
+});
+// ─── ConcurrencyGate: bounded / serial background delegation (#294) ────────
+
+test("ConcurrencyGate: unlimited capacity starts every launch immediately", () => {
+  const gate = new ConcurrencyGate(() => Infinity);
+  assert.equal(gate.unlimited, true);
+  let started = 0;
+  assert.equal(gate.launchOrQueue("a", () => started++), true);
+  assert.equal(gate.launchOrQueue("b", () => started++), true);
+  assert.equal(started, 2, "both launch immediately");
+  assert.equal(gate.queuedCount, 0);
+});
+
+test("ConcurrencyGate: capacity 1 serializes launches FIFO", () => {
+  const gate = new ConcurrencyGate(() => 1);
+  const order: string[] = [];
+  assert.equal(gate.launchOrQueue("a", () => order.push("a")), true, "first starts");
+  assert.equal(gate.launchOrQueue("b", () => order.push("b")), false, "second queues");
+  assert.equal(gate.launchOrQueue("c", () => order.push("c")), false, "third queues");
+  assert.deepEqual(order, ["a"]);
+  assert.equal(gate.activeCount, 1);
+  assert.equal(gate.queuedCount, 2);
+  gate.release();
+  assert.deepEqual(order, ["a", "b"], "release advances FIFO");
+  assert.equal(gate.activeCount, 1);
+  assert.equal(gate.queuedCount, 1);
+  gate.release();
+  assert.deepEqual(order, ["a", "b", "c"]);
+  assert.equal(gate.activeCount, 1);
+  assert.equal(gate.queuedCount, 0);
+});
+
+test("ConcurrencyGate: capacity N allows N concurrent before queueing", () => {
+  const gate = new ConcurrencyGate(() => 2);
+  const order: string[] = [];
+  assert.equal(gate.launchOrQueue("a", () => order.push("a")), true);
+  assert.equal(gate.launchOrQueue("b", () => order.push("b")), true);
+  assert.equal(gate.launchOrQueue("c", () => order.push("c")), false);
+  assert.deepEqual(order, ["a", "b"]);
+  assert.equal(gate.activeCount, 2);
+  gate.release();
+  assert.deepEqual(order, ["a", "b", "c"]);
+  assert.equal(gate.activeCount, 2);
+});
+
+test("ConcurrencyGate: cancelling a queued run skips it without leaking a slot", () => {
+  const gate = new ConcurrencyGate(() => 1);
+  const order: string[] = [];
+  assert.equal(gate.launchOrQueue("a", () => order.push("a")), true);
+  assert.equal(gate.launchOrQueue("b", () => order.push("b")), false);
+  assert.equal(gate.launchOrQueue("c", () => order.push("c")), false);
+  assert.equal(gate.cancelQueued("b"), true, "b was queued");
+  assert.equal(gate.cancelQueued("zzz"), false, "unknown id not queued");
+  gate.release();
+  assert.deepEqual(order, ["a", "c"], "cancelled b never launched");
+  assert.equal(gate.activeCount, 1);
+  assert.equal(gate.queuedCount, 0);
+});
+
