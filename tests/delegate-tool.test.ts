@@ -4,7 +4,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildChildArgs, delegateSpawnOptions, injectedWaitMessage, buildWaitResult, buildCancelResult, getDelegateUsage, resetDelegateUsage, injectResult, effectiveExitCode, formatRunResult, resolveWaitTimeoutMs, findUndeliveredRuns, undeliveredNoticeFrom, buildRecoveryNotice, makeDelegateTool, exitLabel, cancelledFileNote, delegateStdinText, readActivityTail, scheduleRunNotification, flushDelegateNotifications, formatBatchRunSection, setDelegatePolicy, delegateChildEnv, asyncWatchdogDescription, ConcurrencyGate } from "../src/delegate-tool.js";
+import { buildChildArgs, delegateSpawnOptions, injectedWaitMessage, buildWaitResult, buildCancelResult, getDelegateUsage, resetDelegateUsage, injectResult, effectiveExitCode, formatRunResult, resolveWaitTimeoutMs, findUndeliveredRuns, undeliveredNoticeFrom, buildRecoveryNotice, makeDelegateTool, exitLabel, cancelledFileNote, delegateStdinText, readActivityTail, scheduleRunNotification, flushDelegateNotifications, formatBatchRunSection, setDelegatePolicy, delegateChildEnv, asyncWatchdogDescription, ConcurrencyGate, setDelegateDefaults, resetDelegateDefaults, isValidThinkingLevel } from "../src/delegate-tool.js";
 import { DEFAULT_DELEGATE_POLICY } from "../src/config.js";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
@@ -155,6 +155,166 @@ test("buildChildArgs uses explicit model override when provided", async () => {
   assert.equal(cliArgs[providerIdx + 1], "anthropic");
   assert.ok(modelIdx >= 0);
   assert.equal(cliArgs[modelIdx + 1], "claude-5");
+});
+
+// ─── per-role model + thinking level (issue #117) ─────────────────────────
+
+function flagVal(args: string[], flag: string): string | null {
+  const idx = args.indexOf(flag);
+  return idx >= 0 ? (args[idx + 1] ?? null) : null;
+}
+
+/** ctx mock with a live modelRegistry whose find() knows `knownModels`. */
+function ctxWithRegistry(
+  model: { provider: string; id: string } | undefined,
+  knownModels: string[] = [],
+): ExtensionContext {
+  const registry = {
+    find: (p: string, mid: string) =>
+      knownModels.includes(`${p}/${mid}`) ? { provider: p, id: mid } : undefined,
+  };
+  return {
+    model,
+    sessionManager: { buildContextEntries: () => [] },
+    modelRegistry: registry,
+  } as unknown as ExtensionContext;
+}
+
+test("buildChildArgs model: per-call overrides role config", async () => {
+  resetDelegateDefaults();
+  setDelegateDefaults({ agents: { worker: { model: "rolecfg/role-model" } } });
+  const { cliArgs } = await buildChildArgs(
+    { agent: "worker", task: "t", model: "call/call-model" },
+    "prompt", ctxWithRegistry({ provider: "parent", id: "parent-model" }, ["rolecfg/role-model"]), "del_m1",
+  );
+  assert.equal(flagVal(cliArgs, "--provider"), "call");
+  assert.equal(flagVal(cliArgs, "--model"), "call-model");
+});
+
+test("buildChildArgs model: role config used when no per-call model", async () => {
+  resetDelegateDefaults();
+  setDelegateDefaults({ agents: { reviewer: { model: "openai/gpt-5" } } });
+  const { cliArgs } = await buildChildArgs(
+    { agent: "reviewer", task: "t" },
+    "prompt", ctxWithRegistry({ provider: "parent", id: "parent-model" }, ["openai/gpt-5"]), "del_m2",
+  );
+  assert.equal(flagVal(cliArgs, "--provider"), "openai");
+  assert.equal(flagVal(cliArgs, "--model"), "gpt-5");
+});
+
+test("buildChildArgs model: inherits parent when neither per-call nor role config", async () => {
+  resetDelegateDefaults();
+  const { cliArgs } = await buildChildArgs(
+    { agent: "worker", task: "t" },
+    "prompt", ctxWithRegistry({ provider: "parent", id: "parent-model" }), "del_m3",
+  );
+  assert.equal(flagVal(cliArgs, "--provider"), "parent");
+  assert.equal(flagVal(cliArgs, "--model"), "parent-model");
+});
+
+test("buildChildArgs model: missing role model falls back to parent (never fails)", async () => {
+  resetDelegateDefaults();
+  setDelegateDefaults({ agents: { oracle: { model: "ghost/nonexistent" } } });
+  const { cliArgs } = await buildChildArgs(
+    { agent: "oracle", task: "t" },
+    "prompt", ctxWithRegistry({ provider: "parent", id: "parent-model" }), "del_m4",
+  );
+  assert.equal(flagVal(cliArgs, "--provider"), "parent");
+  assert.equal(flagVal(cliArgs, "--model"), "parent-model");
+});
+
+test("buildChildArgs model: malformed role model (no slash) ignored -> inherit parent", async () => {
+  resetDelegateDefaults();
+  setDelegateDefaults({ agents: { planner: { model: "just-a-name" } } });
+  const { cliArgs } = await buildChildArgs(
+    { agent: "planner", task: "t" },
+    "prompt", ctxWithRegistry({ provider: "parent", id: "parent-model" }), "del_m5",
+  );
+  assert.equal(flagVal(cliArgs, "--provider"), "parent");
+  assert.equal(flagVal(cliArgs, "--model"), "parent-model");
+});
+
+test("buildChildArgs model: slash in model id splits on first slash only", async () => {
+  resetDelegateDefaults();
+  setDelegateDefaults({ agents: { researcher: { model: "prov/a/b" } } });
+  const { cliArgs } = await buildChildArgs(
+    { agent: "researcher", task: "t" },
+    "prompt", ctxWithRegistry({ provider: "parent", id: "parent-model" }, ["prov/a/b"]), "del_m6",
+  );
+  assert.equal(flagVal(cliArgs, "--provider"), "prov");
+  assert.equal(flagVal(cliArgs, "--model"), "a/b");
+});
+
+test("buildChildArgs thinking: per-call wins over role and global", async () => {
+  resetDelegateDefaults();
+  setDelegateDefaults({ thinkingLevel: "low", agents: { worker: { thinkingLevel: "medium" } } });
+  const { cliArgs } = await buildChildArgs(
+    { agent: "worker", task: "t", thinkingLevel: "high" },
+    "prompt", ctxWithRegistry({ provider: "p", id: "m" }), "del_t1",
+  );
+  assert.equal(flagVal(cliArgs, "--thinking"), "high");
+});
+
+test("buildChildArgs thinking: role level wins over global", async () => {
+  resetDelegateDefaults();
+  setDelegateDefaults({ thinkingLevel: "low", agents: { worker: { thinkingLevel: "medium" } } });
+  const { cliArgs } = await buildChildArgs(
+    { agent: "worker", task: "t" },
+    "prompt", ctxWithRegistry({ provider: "p", id: "m" }), "del_t2",
+  );
+  assert.equal(flagVal(cliArgs, "--thinking"), "medium");
+});
+
+test("buildChildArgs thinking: global used when no per-call or role level", async () => {
+  resetDelegateDefaults();
+  setDelegateDefaults({ thinkingLevel: "xhigh" });
+  const { cliArgs } = await buildChildArgs(
+    { agent: "worker", task: "t" },
+    "prompt", ctxWithRegistry({ provider: "p", id: "m" }), "del_t3",
+  );
+  assert.equal(flagVal(cliArgs, "--thinking"), "xhigh");
+});
+
+test("buildChildArgs thinking: no flag when nothing configured (Pi default preserved)", async () => {
+  resetDelegateDefaults();
+  const { cliArgs } = await buildChildArgs(
+    { agent: "worker", task: "t" },
+    "prompt", ctxWithRegistry({ provider: "p", id: "m" }), "del_t4",
+  );
+  assert.equal(flagVal(cliArgs, "--thinking"), null);
+});
+
+test("buildChildArgs thinking: invalid value dropped without cascading to global", async () => {
+  resetDelegateDefaults();
+  setDelegateDefaults({ thinkingLevel: "low", agents: { worker: { thinkingLevel: "bogus" } } });
+  const { cliArgs } = await buildChildArgs(
+    { agent: "worker", task: "t" },
+    "prompt", ctxWithRegistry({ provider: "p", id: "m" }), "del_t5",
+  );
+  assert.equal(flagVal(cliArgs, "--thinking"), null);
+});
+
+test("buildChildArgs thinking: invalid per-call dropped even if global is valid", async () => {
+  resetDelegateDefaults();
+  setDelegateDefaults({ thinkingLevel: "low" });
+  const { cliArgs } = await buildChildArgs(
+    { agent: "worker", task: "t", thinkingLevel: "not-a-level" },
+    "prompt", ctxWithRegistry({ provider: "p", id: "m" }), "del_t6",
+  );
+  assert.equal(flagVal(cliArgs, "--thinking"), null);
+});
+
+for (const lvl of ["off", "minimal", "low", "medium", "high", "xhigh", "max"]) {
+  test(`isValidThinkingLevel accepts ${lvl}`, () => {
+    assert.equal(isValidThinkingLevel(lvl), true);
+  });
+}
+
+test("isValidThinkingLevel rejects invalid values", () => {
+  assert.equal(isValidThinkingLevel("bogus"), false);
+  assert.equal(isValidThinkingLevel("HIGH"), false);
+  assert.equal(isValidThinkingLevel(""), false);
+  assert.equal(isValidThinkingLevel(undefined), false);
 });
 
 // ─── wait() dedup: already-injected run returns "already delivered" ───────

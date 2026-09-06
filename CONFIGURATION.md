@@ -111,8 +111,9 @@ All keys below are currently **ACTIVE**.
 | `delegate.syncTimeoutMinutes` | number | `5` | 🟢 ACTIVE | Hard timeout for **synchronous** `acp_delegate` calls, in minutes. `0` / `null` disables it. |
 | `delegate.idleTimeoutMinutes` | number | `5` | 🟢 ACTIVE | Idle watchdog for async delegate children — force-finish after this many minutes without output. `0` / `null` disables it. |
 | `delegate.asyncTimeoutMinutes` | number | `30` | 🟢 ACTIVE | Absolute hard limit for async delegate children, in minutes. `0` / `null` disables it. |
-=======
 | `delegate.maxConcurrent` | number | unlimited | 🟢 ACTIVE | Max background (`async`) delegates running at once; extra launches queue FIFO and start as slots free. `1` = forced serial. Overridden by `PI_ACP_DELEGATE_MAX_CONCURRENT`. |
+| `delegate.thinkingLevel` | string | _(unset)_ | 🟢 ACTIVE | Global default thinking level for delegates (per-call > role > global > Pi default). |
+| `delegate.agents` | object | _(unset)_ | 🟢 ACTIVE | Per-role default model + thinking level, keyed by role name. |
 
 **Provider throttle retry keys**
 
@@ -251,7 +252,7 @@ The `delegate` sub-object controls the `acp_delegate` sub-agent tool family (`ac
 - **Default:** `30`
 - **Status:** 🟢 ACTIVE
 - **Description:** Absolute hard limit for **asynchronous** delegate children, regardless of activity. Set `0` (or `null`) to run long tasks without an absolute cap — the idle watchdog still applies unless separately disabled. Fractional minutes are accepted. Invalid values fall back to the default with a warning log. Environment override: `PI_ACP_DELEGATE_ASYNC_TIMEOUT_MINUTES` (`0` disables).
-=======
+
 ### `delegate.maxConcurrent`
 
 - **Type:** number (integer ≥ 1)
@@ -259,6 +260,36 @@ The `delegate` sub-object controls the `acp_delegate` sub-agent tool family (`ac
 - **Status:** 🟢 ACTIVE
 - **Environment override:** `PI_ACP_DELEGATE_MAX_CONCURRENT` (takes precedence over this key)
 - **Description:** Caps how many background (`async: true`) delegates run **at the same time**. When the limit is reached, further launches are held in a FIFO queue and start automatically as soon as a slot frees, so nothing is dropped — they just wait their turn. Set `1` to force strictly serial execution (useful on low-power machines where parallel sub-agents contend for CPU and time out). Sync (`async: false`) calls always run immediately and are not affected by this cap. Invalid values (non-integers or `< 1`) fall back to unlimited with a warning rather than failing the session. Only meaningful when `delegate.enabled` is `true`.
+
+### `delegate.thinkingLevel`
+
+- **Type:** string enum `"off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"`
+- **Default:** _(unset — each child uses Pi's own default)_
+- **Status:** 🟢 ACTIVE
+- **Description:** Global default thinking level applied to every delegate when neither the per-call `thinkingLevel` nor the role's own `thinkingLevel` (see `delegate.agents`) is set. Without any value at all levels, no `--thinking` flag is passed and each child runs on Pi's own default. An invalid value is ignored with a warning logged (it never fails the run). A per-call `acp_delegate({ thinkingLevel })` always wins over this global.
+
+### `delegate.agents`
+
+- **Type:** object — map of role name → `{ model?, thinkingLevel? }`
+- **Default:** _(unset — all roles inherit the parent model + Pi defaults)_
+- **Status:** 🟢 ACTIVE
+- **Description:** Per-role defaults so long-lived automation can pin a cheaper or more capable model and thinking level per delegate role without the main agent having to fill them in on every call. Keys are role names (`reviewer`, `researcher`, `worker`, `planner`, `oracle`, or any custom role). Each value may set:
+  - `model` (`"provider/id"`) — this role's default model. Resolution priority: per-call `model` > this role's `model` > parent agent's current model. A value that isn't a valid `"provider/id"` is ignored. If the configured model doesn't exist in the live registry, the child falls back to the parent model and a warning is logged — it never fails.
+  - `thinkingLevel` — this role's default thinking level (same enum as `delegate.thinkingLevel`). Priority: per-call > role > global.
+
+```jsonc
+{
+  "delegate": {
+    "thinkingLevel": "low",
+    "agents": {
+      "reviewer": { "model": "opencode-go/deepseek-v4-flash", "thinkingLevel": "high" },
+      "worker":   { "model": "anthropic/claude-sonnet-4-5" },
+      "oracle":   { "model": "openai/gpt-5", "thinkingLevel": "xhigh" }
+    }
+  }
+}
+```
+
 
 ---
 
@@ -494,7 +525,7 @@ Environment variables take precedence over the JSON config files. They are usefu
 - **Default:** *(unset — follows `delegate.asyncTimeoutMinutes`, then 30)*
 - **Status:** 🟢 ACTIVE
 - **Description:** Override the absolute hard limit for async delegate children. Set `0` to run long tasks without an absolute cap (the idle watchdog still applies unless disabled). Takes precedence over `delegate.asyncTimeoutMinutes`.
-=======
+
 ### `PI_ACP_DELEGATE_MAX_CONCURRENT`
 
 - **Type:** integer (≥ 1)
