@@ -8,11 +8,11 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { OUT_DIR, fleetRunsSnapshot, orderRunsForFleet, makeDelegateTool, makeDelegateCancelTool } from "../src/delegate-tool.js";
 import {
-  formatDuration, statusIcon, usageSummary, buildListRows, renderListView, renderTranscriptView, readTailSync, buildSnapshotText,
-  type InspectorTheme, type ListRow,
+  formatDuration, statusIcon, usageSummary, buildListRows, renderListBody, renderTranscriptBlocks, parseSessionJsonl, readTailSync, readHeadSync, buildSnapshotText,
+  type InspectorTheme, type ListRow, type TranscriptBlock,
 } from "../src/fleet-inspector.js";
 
-const plainTheme: InspectorTheme = { fg: (_c, t) => t, bold: (t) => t };
+const plainTheme: InspectorTheme = { fg: (_c, t) => t, bold: (t) => t, bg: (_c, t) => t };
 
 function mkView(over: Record<string, unknown> = {}): any {
   return {
@@ -90,30 +90,70 @@ test("buildListRows shows live duration for running, terminal label + tokens oth
   assert.ok(rows[1]!.detail.includes("↑10 ↓2"), "token summary appended");
 });
 
-test("renderListView is width-safe, marks selection, handles empty list", () => {
+test("renderListBody is width-safe, marks selection, handles empty list", () => {
   const rows: ListRow[] = buildListRows([mkView(), mkView({ runId: "del_y", agent: "oracle" })], Date.now());
-  const lines = renderListView(rows, 1, plainTheme, 30);
+  const lines = renderListBody(rows, 1, plainTheme, 30);
   assertWidthSafe(lines, 30);
-  assert.ok(!lines[1]!.startsWith("> "), "first row not selected");
-  assert.ok(lines[2]!.startsWith("> "), "selected row has marker");
-  assert.ok(lines[lines.length - 1]!.includes("select"), "hint row survives truncation");
-  assert.ok(renderListView(rows, 1, plainTheme, 60).at(-1)!.includes("esc close"), "full hint at wide width");
+  assert.equal(lines.length, rows.length);
+  assert.ok(!lines[0]!.startsWith("> "), "first row not selected");
+  assert.ok(lines[1]!.startsWith("> "), "selected row has marker");
 
-  const empty = renderListView([], 0, plainTheme, 30);
+  const empty = renderListBody([], 0, plainTheme, 30);
   assertWidthSafe(empty, 30);
   assert.ok(empty.some((l) => l.includes("no delegate runs yet")));
 });
 
-test("renderTranscriptView shows header, meta, tail and is width-safe", () => {
-  const run = mkView({ sessionFile: undefined, resumedFrom: "del_prev" });
-  const lines = renderTranscriptView(run, "step 1\nstep 2", Date.now(), plainTheme, 40);
-  assertWidthSafe(lines, 40);
-  assert.ok(lines[0]!.includes("del_x") && lines[0]!.includes("running"));
-  assert.ok(lines[1]!.includes("/tmp/proj") && lines[1]!.includes("resumed from del_prev"));
-  assert.ok(lines.includes("step 1") && lines.includes("step 2"));
+test("parseSessionJsonl extracts user/thinking/text/toolCall/toolResult from a pi session", () => {
+  const raw = [
+    JSON.stringify({ type: "session", version: 3, id: "s1", cwd: "/tmp" }),
+    JSON.stringify({ type: "model_change", provider: "vllm", modelId: "qwen" }),
+    JSON.stringify({ type: "message", message: { role: "user", content: [{ type: "text", text: "do it" }] } }),
+    JSON.stringify({ type: "message", message: { role: "assistant", content: [{ type: "thinking", thinking: "hmm" }, { type: "text", text: "ok" }, { type: "toolCall", name: "bash", arguments: { command: "ls" } }] } }),
+    JSON.stringify({ type: "message", message: { role: "toolResult", toolName: "bash", content: [{ type: "text", text: "a\nb" }], isError: false } }),
+    "not-json-line",
+  ].join("\n");
+  const blocks = parseSessionJsonl(raw);
+  assert.deepEqual(blocks.map((b) => b.kind), ["meta", "user", "thinking", "text", "toolCall", "toolResult"]);
+  assert.equal(blocks.find((b) => b.kind === "toolCall")?.name, "bash");
+  assert.equal(blocks.find((b) => b.kind === "toolResult")?.isError, false);
+});
 
-  const idle = renderTranscriptView(mkView(), "", Date.now(), plainTheme, 40);
-  assert.ok(idle.includes("(no output yet)"));
+test("renderTranscriptBlocks renders conversation+thinking+tools and is width-safe", () => {
+  const blocks: TranscriptBlock[] = parseSessionJsonl([
+    JSON.stringify({ type: "message", message: { role: "user", content: [{ type: "text", text: "hello world" }] } }),
+    JSON.stringify({ type: "message", message: { role: "assistant", content: [{ type: "thinking", thinking: "reasoning here" }, { type: "text", text: "the answer" }] } }),
+    JSON.stringify({ type: "message", message: { role: "toolResult", toolName: "read", content: [{ type: "text", text: "file contents" }], isError: true } }),
+  ].join("\n"));
+  const lines = renderTranscriptBlocks(blocks, plainTheme, 40);
+  assertWidthSafe(lines, 40);
+  assert.ok(lines.some((l) => l.includes("you ›")), "user marker present");
+  assert.ok(lines.some((l) => l.includes("hello world")));
+  assert.ok(lines.some((l) => l.includes("⌥") && l.includes("reasoning here")), "thinking shown");
+  assert.ok(lines.some((l) => l.includes("the answer")));
+  assert.ok(lines.some((l) => l.includes("✗ read:")), "error tool result marked");
+});
+
+test("renderTranscriptBlocks shows placeholder when empty", () => {
+  assert.ok(renderTranscriptBlocks([], plainTheme, 40).some((l) => l.includes("(no session content yet)")));
+});
+
+test("readHeadSync returns whole small file, bounded head, '' when missing", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "fleet-head-"));
+  try {
+    const small = join(dir, "small.txt");
+    await writeFile(small, "abc\ndef\n");
+    assert.equal(readHeadSync(small, 4096), "abc\ndef\n");
+    const big = join(dir, "big.txt");
+    let content = "";
+    for (let i = 0; i < 200; i++) content += `line-${i}\n`;
+    await writeFile(big, content);
+    const head = readHeadSync(big, 20);
+    assert.ok(head.startsWith("line-0"), `head starts at beginning: ${JSON.stringify(head.slice(0, 8))}`);
+    assert.equal(readHeadSync(join(dir, "nope.txt"), 100), "");
+    assert.equal(readHeadSync(undefined, 100), "");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("buildSnapshotText lists runs, tails running activity, points at files dir", () => {
