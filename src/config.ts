@@ -53,9 +53,32 @@ export interface CompressConfig extends CompressSettings {
   providers?: Record<string, ProviderCompress>;
 }
 
+/** Generic tool-call repetition guard. Detects the same tool being called
+ *  repeatedly with byte-identical arguments — a sequence-level attractor that
+ *  token-level penalties cannot break (greedy small models loop on e.g.
+ *  acp_status or bash polls forever, each round adding protected tokens that
+ *  the compression protection band then refuses to reclaim). Consecutive
+ *  identical calls accumulate per session: at `warn` a strong warning is
+ *  appended to that call's toolResult; at `abort` the call is refused (blocked,
+ *  error toolResult) and the turn aborted so the attractor breaks. Any change
+ *  to the arguments (or a switch to a different tool) resets the counter.
+ *  Accepts a boolean shorthand (`false` disables) or an object. Default:
+ *  enabled, warn=3, abort=5. See issue #308. */
+export interface RepetitionGuardConfig {
+  /** Enable/disable the guard. Default: true. */
+  enabled?: boolean;
+  /** Consecutive identical calls before a strong warning is appended to the
+   *  matching toolResult. Default: 3. */
+  warn?: number;
+  /** Consecutive identical calls before the call is refused and the turn
+   *  aborted. Default: 5. Must be greater than `warn`; clamped up
+   *  automatically if not. */
+  abort?: number;
+}
+
 /**
  * Adapter configuration. Maps onto acp-kernel's `Config` plus Pi-specific knobs
- * (live model context window, protected tools, state persistence).
+ *  (live model context window, protected tools, state persistence).
  */
 export interface AdapterConfig {
   /** Master switch. Default: true. Set `enabled: false` in acp.json (or
@@ -105,6 +128,11 @@ export interface AdapterConfig {
    *  disables) or a ThrottleRetryConfig object. Default: enabled, 10 retries,
    *  60s exponential base capped at 300s per kick. */
   throttleRetry?: boolean | ThrottleRetryConfig;
+  /** Generic tool-call repetition guard (see RepetitionGuardConfig). Accepts a
+   *  boolean shorthand (`false` disables) or an object. Default: enabled,
+   *  warn=3, abort=5. Stops greedy small models looping on byte-identical
+   *  tool calls (issue #308). */
+  repetitionGuard?: boolean | RepetitionGuardConfig;
   /** Legacy flat alias for `delegate.displayUsage`. Kept for backward
    *  compatibility with existing acp.json files. Prefer `delegate.displayUsage`. */
   displayUsage?: "merged" | "separate";
@@ -137,6 +165,28 @@ export function resolveDelegate(adapter: AdapterConfig): { enabled: boolean; dis
     enabled: d !== false,
     displayUsage: adapter.displayUsage ?? "separate",
   };
+}
+
+/** Defaults for the generic tool-call repetition guard (issue #308). */
+export const REPETITION_GUARD_DEFAULTS = { warn: 3, abort: 5 } as const;
+
+function positiveInt(v: unknown, fallback: number): number {
+  return typeof v === "number" && Number.isFinite(v) && v >= 1 ? Math.floor(v) : fallback;
+}
+
+/** Resolve the repetition-guard configuration from the adapter, handling the
+ *  boolean shorthand (`false` disables) and clamping `abort` to stay strictly
+ *  above `warn` (a guard that aborts at or before its warn threshold would be
+ *  meaningless). Non-numeric / out-of-range values fall back to defaults. */
+export function resolveRepetitionGuard(adapter: AdapterConfig): { enabled: boolean; warn: number; abort: number } {
+  const g = adapter.repetitionGuard;
+  if (g === false) return { enabled: false, warn: REPETITION_GUARD_DEFAULTS.warn, abort: REPETITION_GUARD_DEFAULTS.abort };
+  if (typeof g === "object" && g !== null) {
+    const warn = positiveInt(g.warn, REPETITION_GUARD_DEFAULTS.warn);
+    const abort = Math.max(positiveInt(g.abort, REPETITION_GUARD_DEFAULTS.abort), warn + 1);
+    return { enabled: g.enabled !== false, warn, abort };
+  }
+  return { enabled: true, warn: REPETITION_GUARD_DEFAULTS.warn, abort: REPETITION_GUARD_DEFAULTS.abort };
 }
 
 /** Per-field deepest-wins merge of the three compression levels (global →
