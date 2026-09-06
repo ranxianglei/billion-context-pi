@@ -37,6 +37,7 @@ export function formatDuration(ms: number): string {
 
 export function statusIcon(status: FleetRunView["status"]): string {
   switch (status) {
+    case "queued": return "○";
     case "running": return "●";
     case "completed": return "✓";
     case "failed": return "✗";
