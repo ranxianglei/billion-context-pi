@@ -37,6 +37,7 @@ test("formatDuration buckets seconds/minutes/hours", () => {
 });
 
 test("statusIcon maps each run status", () => {
+  assert.equal(statusIcon("queued"), "○");
   assert.equal(statusIcon("running"), "●");
   assert.equal(statusIcon("completed"), "✓");
   assert.equal(statusIcon("failed"), "✗");
