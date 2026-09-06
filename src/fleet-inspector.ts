@@ -7,8 +7,7 @@ import { OUT_DIR, fleetRunsSnapshot, type FleetRunView } from "./delegate-tool.j
 const REFRESH_MS = 500;
 const MAX_TASK_LEN = 48;
 const SNAPSHOT_TAIL_BYTES = 4096;
-const SESSION_READ_CAP = 2 * 1024 * 1024;
-const TOOL_RESULT_PREVIEW = 160;
+const MAX_RESULT_LINES = 8;
 const PANEL_MAX_H = 40;
 const PANEL_MIN_H = 12;
 
@@ -100,8 +99,7 @@ export function readTailSync(file: string | undefined, maxBytes: number): string
   }
 }
 
-/** First maxBytes of a file as utf8 (session logs grow at the end, so we read
- *  from the start). Missing/unreadable → "". */
+/** First maxBytes of a file as utf8. Missing/unreadable → "". */
 export function readHeadSync(file: string | undefined, maxBytes: number): string {
   if (!file) return "";
   try {
@@ -148,16 +146,41 @@ export interface TranscriptBlock {
   name?: string;
   text: string;
   isError?: boolean;
+  args?: unknown;
 }
 
-function compactArgs(args: unknown): string {
-  let s: string;
-  try {
-    s = typeof args === "string" ? args : JSON.stringify(args ?? {});
-  } catch {
-    s = String(args);
+/** Pi-style one-line summary of a tool call (mirrors pi's formatToolCall). */
+export function formatToolLabel(name: string, args: unknown): string {
+  const a: Record<string, unknown> = args && typeof args === "object" ? (args as Record<string, unknown>) : {};
+  const s = (v: unknown): string => String(v ?? "");
+  switch (name) {
+    case "read": {
+      const path = s(a.path ?? a.file_path);
+      const offset = typeof a.offset === "number" ? a.offset : undefined;
+      const limit = typeof a.limit === "number" ? a.limit : undefined;
+      let display = path;
+      if (offset !== undefined || limit !== undefined) {
+        const start = offset ?? 1;
+        const end = limit !== undefined ? start + limit - 1 : "";
+        display += `:${start}${end ? `-${end}` : ""}`;
+      }
+      return `read ${display}`;
+    }
+    case "write": return `write ${s(a.path ?? a.file_path)}`;
+    case "edit": return `edit ${s(a.path ?? a.file_path)}`;
+    case "bash": {
+      const cmd = s(a.command).replace(/[\n\t]/g, " ").trim();
+      return `bash ${cmd.length > 60 ? `${cmd.slice(0, 60)}…` : cmd}`;
+    }
+    case "grep": return `grep /${s(a.pattern)}/ in ${s(a.path ?? ".")}`;
+    case "find": return `find ${s(a.pattern)} in ${s(a.path ?? ".")}`;
+    case "ls": return `ls ${s(a.path ?? ".")}`;
+    default: {
+      let j = "";
+      try { j = JSON.stringify(args ?? {}); } catch { j = String(args); }
+      return `${name} ${j.length > 60 ? `${j.slice(0, 60)}…` : j}`;
+    }
   }
-  return s.length > 240 ? `${s.slice(0, 240)}…` : s;
 }
 
 /** Parse a pi session .jsonl into display blocks (conversation + thinking + tools). */
@@ -186,7 +209,7 @@ export function parseSessionJsonl(raw: string): TranscriptBlock[] {
       for (const c of m.content ?? []) {
         if (c.type === "thinking" && c.thinking?.trim()) blocks.push({ kind: "thinking", text: c.thinking });
         else if (c.type === "text" && c.text?.trim()) blocks.push({ kind: "text", text: c.text });
-        else if (c.type === "toolCall") blocks.push({ kind: "toolCall", name: c.name, text: compactArgs(c.arguments) });
+        else if (c.type === "toolCall") blocks.push({ kind: "toolCall", name: c.name, text: "", args: c.arguments });
       }
     } else if (m.role === "toolResult") {
       const text = (m.content ?? []).map((c) => c.text ?? "").join("");
@@ -240,15 +263,19 @@ export function renderTranscriptBlocks(blocks: TranscriptBlock[], theme: Inspect
       case "text":
         for (const l of wrapTextWithAnsi(b.text, wrapW)) out.push(theme.fg("text", `  ${l}`));
         break;
-      case "toolCall":
-        out.push(truncateToWidth(`${theme.fg("toolTitle", `  🔧 ${b.name ?? "?"}`)} ${theme.fg("dim", b.text)}`, innerW));
+      case "toolCall": {
+        out.push(truncateToWidth(theme.fg("toolTitle", theme.bold(`  ⚙ ${b.name ?? "?"}`)), innerW));
+        const label = formatToolLabel(b.name ?? "", b.args);
+        if (label) out.push(truncateToWidth(theme.fg("dim", `     ${label}`), innerW));
         break;
+      }
       case "toolResult": {
         const icon = b.isError ? "✗" : "✓";
         const color = b.isError ? "error" : "toolOutput";
-        const flat = b.text.replace(/\s+/g, " ").trim();
-        const preview = flat.length > TOOL_RESULT_PREVIEW ? `${flat.slice(0, TOOL_RESULT_PREVIEW)}…` : flat;
-        out.push(truncateToWidth(theme.fg(color, `  ${icon} ${b.name ?? "?"}: ${preview}`), innerW));
+        const rawLines = b.text.replace(/\n+$/, "").split("\n");
+        const shown = rawLines.slice(0, MAX_RESULT_LINES);
+        shown.forEach((l, i) => out.push(truncateToWidth(theme.fg(color, `  ${i === 0 ? `${icon} ${b.name ?? "?"}: ` : ""}${l}`), innerW)));
+        if (rawLines.length > shown.length) out.push(truncateToWidth(theme.fg("dim", `      … +${rawLines.length - shown.length} more`), innerW));
         break;
       }
     }
@@ -283,7 +310,8 @@ class FleetInspectorComponent implements Component {
   private follow = true;
   private viewTop = 0;
   private blocks: TranscriptBlock[] = [];
-  private blocksKey = "";
+  private loadedFile = "";
+  private loadedBytes = 0;
   private transcriptLines: string[] = [];
   private lastWidth = 80;
   private timer: ReturnType<typeof setInterval> | undefined;
@@ -320,6 +348,50 @@ class FleetInspectorComponent implements Component {
     return Math.max(1, this.panelHeight() - 2 - 2 - 1);
   }
 
+  /** Incrementally append newly-written session.jsonl bytes (waterfall load).
+   *  Only reads the delta past loadedBytes; holds back a trailing partial line
+   *  while the run is still writing. */
+  private loadTranscript(file: string | undefined, isRunning: boolean): void {
+    if (!file) return;
+    if (file !== this.loadedFile) {
+      this.loadedFile = file;
+      this.loadedBytes = 0;
+      this.blocks = [];
+    }
+    let size = 0;
+    try {
+      const fd = openSync(file, "r");
+      try { size = fstatSync(fd).size; } finally { closeSync(fd); }
+    } catch {
+      return;
+    }
+    if (size < this.loadedBytes) {
+      this.loadedBytes = 0;
+      this.blocks = [];
+    }
+    if (size <= this.loadedBytes) return;
+    const len = size - this.loadedBytes;
+    const buf = Buffer.alloc(len);
+    let got = 0;
+    try {
+      const fd = openSync(file, "r");
+      try { got = readSync(fd, buf, 0, len, this.loadedBytes); } finally { closeSync(fd); }
+    } catch {
+      return;
+    }
+    const text = buf.subarray(0, got).toString("utf8");
+    let complete: string;
+    if (isRunning && !text.endsWith("\n")) {
+      const nl = text.lastIndexOf("\n");
+      if (nl < 0) return;
+      complete = text.slice(0, nl + 1);
+    } else {
+      complete = text;
+    }
+    this.blocks.push(...parseSessionJsonl(complete));
+    this.loadedBytes += Buffer.byteLength(complete, "utf8");
+  }
+
   private tick(): void {
     if (this.closed) return;
     const now = Date.now();
@@ -332,12 +404,7 @@ class FleetInspectorComponent implements Component {
     }
     const sel = this.rows[this.selIdx]?.run;
     if (this.mode === "transcript" && sel) {
-      const raw = readHeadSync(sel.sessionFile, SESSION_READ_CAP);
-      const key = `${sel.sessionFile}:${raw.length}`;
-      if (key !== this.blocksKey) {
-        this.blocks = parseSessionJsonl(raw);
-        this.blocksKey = key;
-      }
+      this.loadTranscript(sel.sessionFile, sel.status === "running");
       this.transcriptLines = renderTranscriptBlocks(this.blocks, this.theme, Math.max(20, this.lastWidth - 4));
     }
     this.tui.requestRender();
@@ -362,8 +429,8 @@ class FleetInspectorComponent implements Component {
     } else {
       if (matchesKey(data, Key.up) || matchesKey(data, "k")) this.scrollTranscript(-1);
       else if (matchesKey(data, Key.down) || matchesKey(data, "j")) this.scrollTranscript(1);
-      else if (matchesKey(data, Key.pageUp)) this.scrollTranscript(-this.pageSize());
-      else if (matchesKey(data, Key.pageDown)) this.scrollTranscript(this.pageSize());
+      else if (matchesKey(data, Key.left) || matchesKey(data, Key.pageUp)) this.scrollTranscript(-this.pageSize());
+      else if (matchesKey(data, Key.right) || matchesKey(data, Key.pageDown)) this.scrollTranscript(this.pageSize());
       else if (matchesKey(data, Key.enter)) {
         this.mode = "list";
         this.tui.requestRender();
@@ -446,7 +513,7 @@ class FleetInspectorComponent implements Component {
       const maxTop = Math.max(0, middle.length - midH);
       const top = clamp(this.follow ? maxTop : this.viewTop, 0, maxTop);
       middle = middle.slice(top, top + midH);
-      footer = this.theme.fg("dim", "↑↓/pgup·pgdn scroll · enter back · esc close");
+      footer = this.theme.fg("dim", "↑↓/←→/pg scroll · enter back · esc close");
     }
     while (middle.length < midH) middle.push("");
     return frame([...header, ...middle, footer], width, this.theme);

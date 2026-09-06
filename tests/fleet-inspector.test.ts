@@ -8,7 +8,7 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { OUT_DIR, fleetRunsSnapshot, orderRunsForFleet, makeDelegateTool, makeDelegateCancelTool } from "../src/delegate-tool.js";
 import {
-  formatDuration, statusIcon, usageSummary, buildListRows, renderListBody, renderTranscriptBlocks, parseSessionJsonl, readTailSync, readHeadSync, buildSnapshotText,
+  formatDuration, formatToolLabel, statusIcon, usageSummary, buildListRows, renderListBody, renderTranscriptBlocks, parseSessionJsonl, readTailSync, readHeadSync, buildSnapshotText,
   type InspectorTheme, type ListRow, type TranscriptBlock,
 } from "../src/fleet-inspector.js";
 
@@ -271,4 +271,26 @@ test("fleetRunsSnapshot maps real spawns: failed run fields, running-first order
     await rm(workDir, { recursive: true, force: true });
     await rm(scriptsDir, { recursive: true, force: true });
   }
+});
+
+test("formatToolLabel summarizes common tools pi-style", () => {
+  assert.equal(formatToolLabel("bash", { command: "echo hi\nthere" }), "bash echo hi there");
+  assert.equal(formatToolLabel("read", { path: "/a/b.ts", offset: 10, limit: 5 }), "read /a/b.ts:10-14");
+  assert.equal(formatToolLabel("read", { path: "/a/b.ts" }), "read /a/b.ts");
+  assert.equal(formatToolLabel("grep", { pattern: "foo", path: "/x" }), "grep /foo/ in /x");
+  assert.equal(formatToolLabel("ls", { path: "/tmp" }), "ls /tmp");
+  assert.match(formatToolLabel("custom", { a: 1 }), /^custom \{.*\}/);
+});
+
+test("renderTranscriptBlocks renders tool call (name + label) and multi-line result", () => {
+  const blocks: TranscriptBlock[] = [
+    { kind: "toolCall", name: "bash", text: "", args: { command: "ls -la" } },
+    { kind: "toolResult", name: "bash", text: "line1\nline2\nline3", isError: false },
+  ];
+  const lines = renderTranscriptBlocks(blocks, plainTheme, 40);
+  assertWidthSafe(lines, 40);
+  assert.ok(lines.some((l) => l.includes("⚙ bash")), "tool name shown");
+  assert.ok(lines.some((l) => l.includes("bash ls -la")), "pi-style arg label");
+  assert.ok(lines.some((l) => l.includes("✓ bash: line1")), "result header line");
+  assert.ok(lines.some((l) => l.trim() === "line2"), "multi-line result body");
 });
