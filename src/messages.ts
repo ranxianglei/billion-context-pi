@@ -22,6 +22,14 @@ const TRAILING_REF_TAG = new RegExp(`\\n*${REF_TAG_SOURCE}\\s*$`);
 // session, but never projected into the sent view.
 export const ACP_STATUS_CUSTOM_TYPE = "acp-status";
 
+// Nudge persistence record (issue #326): written via pi.appendEntry as a
+// type:"custom" entry — never projected into the sent view (see above), so
+// the compact one-liner stays out of model context while surviving restarts.
+export const ACP_NUDGE_CUSTOM_TYPE = "acp-nudge";
+export interface AcpNudgeRecord {
+  text: string;
+}
+
 export function entriesToCoreMessages(entries: SessionEntry[]): CoreMessage[] {
   const out: CoreMessage[] = [];
   for (const entry of entries) {

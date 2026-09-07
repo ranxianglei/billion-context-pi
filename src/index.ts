@@ -5,6 +5,7 @@ import type {
   SessionMessageEntry,
 } from "@earendil-works/pi-coding-agent";
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
+import { Box, Text } from "@earendil-works/pi-tui";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -18,7 +19,7 @@ import { makeSearchTool } from "./search-tool.js";
 import { makeStatusTool } from "./status-tool.js";
 import { makeDelegateTool, makeDelegateWaitTool, makeDelegateCancelTool, runningRunsSnapshot, resetDelegateUsage, setDelegateDisplayUsage } from "./delegate-tool.js";
 import { makeCommands } from "./commands.js";
-import { coreOutToAgentMessages, extractText } from "./messages.js";
+import { coreOutToAgentMessages, extractText, ACP_NUDGE_CUSTOM_TYPE, type AcpNudgeRecord } from "./messages.js";
 import { buildAcpSystemPrompt, ACP_DELEGATE_PROMPT } from "./system-prompt.js";
 import { delegateStatusWidget } from "./fleet-widget.js";
 import { wireToolGuardrails } from "./tool-guardrails.js";
@@ -69,6 +70,7 @@ export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactor
     for (const { name, options } of makeCommands(runtime, pi)) {
       pi.registerCommand(name, options);
     }
+    wireNudgeRecords(pi);
   };
 }
 
@@ -369,6 +371,19 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
         }
         if (!emergency) runtime.markNudgeShown(turnKey);
         debug.event("nudge-injected", { sid: ctx.sessionManager.getSessionId(), voice: rendered.voice, channels: ["context", debugOn ? "terminal" : null].filter(Boolean), emergency, turnKey, text: rendered.text + example });
+        // issue #326: persist a compact display-only record so the injection
+        // survives restarts (TUI scrollback + session file). One per user turn:
+        // emergency nudges re-inject on every LLM call and must not flood the
+        // session file; type:"custom" entries are never projected into the
+        // sent view, so model context stays clean.
+        if (typeof pi.appendEntry === "function" && !runtime.nudgeRecordedFor(turnKey)) {
+          try {
+            pi.appendEntry(ACP_NUDGE_CUSTOM_TYPE, { text: formatNudgeRecord(turn.nudge, emergency) });
+            runtime.markNudgeRecorded(turnKey);
+          } catch (e) {
+            logWarn("nudge", { sid: ctx.sessionManager.getSessionId(), event: "persist-failed", error: e instanceof Error ? e.message : String(e) });
+          }
+        }
       } else {
         debug.event("nudge-suppressed", { sid: ctx.sessionManager.getSessionId(), turnKey, reason: turn.nudge.reason });
       }
@@ -528,6 +543,20 @@ function wireThrottleRetry(pi: ExtensionAPI, runtime: AcpRuntime): void {
   });
 }
 
+// issue #326: render persisted nudge records in the TUI. Without a registered
+// renderer pi silently drops custom entries on both live append and session
+// rebuild, so this is required for the records to be visible at all.
+function wireNudgeRecords(pi: ExtensionAPI): void {
+  if (typeof pi.registerEntryRenderer !== "function") return;
+  pi.registerEntryRenderer<AcpNudgeRecord>(ACP_NUDGE_CUSTOM_TYPE, (entry, _options, theme) => {
+    const text = entry.data?.text;
+    if (!text) return undefined;
+    const box = new Box(1, 1, (t: string) => theme.bg("customMessageBg", t));
+    box.addChild(new Text(theme.fg("dim", text), 0, 0));
+    return box;
+  });
+}
+
 function collectOriginals(entries: Array<{ type: string; id: string; message?: AgentMessage; content?: unknown }>): Map<string, AgentMessage> {
   const map = new Map<string, AgentMessage>();
   for (const entry of entries) {
@@ -571,6 +600,17 @@ function collectCompressOutcomes(entries: Array<{ type: string; id: string; mess
     out.push({ toolCallId: m.toolCallId, isError: m.isError === true, success: m.isError !== true && isCompressSuccessText(text), noop: m.isError !== true && isCompressNoopText(text), text });
   }
   return out;
+}
+
+// Compact one-line twin of nudgeMessage() for the persisted session entry
+// (issue #326): auditability only — the full multi-line nudge deliberately
+// stays out of the session file.
+export function formatNudgeRecord(nudge: NudgeDecision, emergency: boolean): string {
+  const pct = Math.round(nudge.contextUsage * 100);
+  const tier = `T${nudge.tier ?? 1}`;
+  const top = [...nudge.compressibleRanges].sort((a, b) => b.tokens - a.tokens)[0];
+  const range = top ? ` · top range ${top.startRef}–${top.endRef}` : "";
+  return `[ACP nudge]${emergency ? " EMERGENCY" : ""} ${pct}% · ${tier}${range}`;
 }
 
 function nudgeMessage(nudge: NudgeDecision, blocks: CompressionBlock[], prompts: Prompts): AgentMessage {

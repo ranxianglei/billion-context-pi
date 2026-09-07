@@ -177,7 +177,9 @@ billion-context-pi writes a structured, always-on log to `~/.pi/acp.log` (overri
 - **Always written** (even with `debug: false`): `error`, `warn`, `info` levels — session start, every context turn (token usage / nudge decision), compress/decompress, delegate spawn/done, and **all errors and warnings** (config/state/tool failures, delegate errors, guardrail caps, update failures). Error lines include the message and stack trace.
 - **Written only when `debug: true`**: verbose `debug`-level diagnostics (full field dumps, per-turn internals).
 
-Each line: `<ISO timestamp> [<level>] [<scope>] key=value key=value`. The file rotates to `~/.pi/acp.log.old` at 10 MB.
+- **Nudge audit trail**: whenever a context-limit nudge is injected, a compact one-line record (e.g. `[ACP nudge] EMERGENCY 95% · T1 · top range m00120–m00168`) is appended as a *display-only* session entry — it survives process restarts, shows up in TUI scrollback and the session file, and is never sent to the model.
+
+Each line: `<ISO timestamp> [<level>] [<scope>] key=value key=value`. Multi-line values (e.g. the full nudge text in `nudge-injected`) are escaped (`\n` → literal `\\n`), so every entry occupies exactly **one physical line** and stays self-contained for `grep`. The file rotates to `~/.pi/acp.log.old` at 10 MB.
 
 ```sh
 tail -f ~/.pi/acp.log                 # watch the session live

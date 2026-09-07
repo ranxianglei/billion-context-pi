@@ -69,6 +69,23 @@ test("logThrow records message and stack as error", async () => {
   await rm(path.dirname(file), { recursive: true, force: true });
 });
 
+test("multi-line field values stay on one physical line (issue #326)", async () => {
+  const file = await freshLog();
+  const log = await loadLogger(file);
+  log.setDebugEnabled(true);
+  log.debug.event("nudge", { event: "nudge-injected", text: "⚠️ Context limit reached\nTier 1 ranges:\n  m00001–m00050: 12K tokens" });
+  log.logThrow("ctx", new Error("boom"), { sid: "s9" });
+  log.closeLogStream();
+  const content = await readFile(file, "utf8");
+  const lines = content.split("\n").filter((l) => l.length > 0);
+  for (const l of lines) {
+    assert.match(l, /^\d{4}-\d{2}-\d{2}T[\d:.]+Z \[/, `every entry is one tagged physical line: ${l}`);
+  }
+  assert.ok(lines.some((l) => l.includes("text=⚠️ Context limit reached\\nTier 1 ranges:\\n  m00001–m00050: 12K tokens")), "escaped newlines keep the nudge body self-contained for grep");
+  assert.ok(lines.some((l) => /\[error\] \[ctx\]/.test(l) && l.includes("stack=Error: boom\\n")), "stack trace stays on the same physical line");
+  await rm(path.dirname(file), { recursive: true, force: true });
+});
+
 test("log lines carry ISO timestamp, level and scope", async () => {
   const file = await freshLog();
   const log = await loadLogger(file);
