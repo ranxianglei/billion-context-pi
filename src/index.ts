@@ -40,6 +40,7 @@ import { defaultCountTokens } from "acp-kernel";
 import { formatSystemPromptForEvent, getSystemPromptText } from "./compat.js";
 import { inspectOverflowMessage, reserveOutputHeadroom, shouldReserveOutputHeadroom } from "./overflow-selfheal.js";
 import { isOmpHost, OMP_UNSUPPORTED_MESSAGE } from "./omp.js";
+import { isBiliProxyBaseUrl, PROXY_STAND_DOWN_MESSAGE } from "./proxy-detect.js";
 
 type AgentMessage = SessionMessageEntry["message"];
 
@@ -56,10 +57,31 @@ export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactor
       return;
     }
     const runtime = createRuntime(adapter);
+    // Manual-wiring double-compression guard (issue #296): the launcher path
+    // exports BILLION_CONTEXT_PROXY (checked above), but a user who starts the
+    // proxy standalone (`bili start`) and points models.json baseUrl at
+    // http://127.0.0.1:PORT/bili/<scheme>://upstream... never sets the env var —
+    // without this check bcp and the proxy both compress every request. Yields
+    // exactly like the env path: stand down, let the proxy own compression.
+    // Checked lazily because ctx.model only exists on events, not in the
+    // factory; warn once per process like the OMP refusal.
+    let proxyWarned = false;
+    const standDownIfProxied = (ctx: ExtensionContext): boolean => {
+      if (!isBiliProxyBaseUrl((ctx.model as { baseUrl?: string } | undefined)?.baseUrl)) return false;
+      runtime.refused = true;
+      runtime.refusalMessage = PROXY_STAND_DOWN_MESSAGE;
+      if (!proxyWarned) {
+        proxyWarned = true;
+        logWarn("host", { event: "proxy-baseurl-detected", sid: ctx.sessionManager.getSessionId(), action: "refused" });
+        if (ctx.hasUI) ctx.ui.notify(PROXY_STAND_DOWN_MESSAGE, "warning");
+        else console.error(PROXY_STAND_DOWN_MESSAGE);
+      }
+      return true;
+    };
     wireCompactionDisable(pi, runtime);
     wireDelegateReadTracking(pi);
-    wireSessionLifecycle(pi, runtime);
-    wireContextTransform(pi, runtime);
+    wireSessionLifecycle(pi, runtime, standDownIfProxied);
+    wireContextTransform(pi, runtime, standDownIfProxied);
     wireSystemPrompt(pi, runtime);
     wireToolGuardrails(pi, runtime);
     wireOverflowSelfHeal(pi, runtime);
@@ -131,7 +153,7 @@ function wireDelegateReadTracking(pi: ExtensionAPI): void {
   });
 }
 
-function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
+function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIfProxied: (ctx: ExtensionContext) => boolean): void {
   let ompWarned = false;
   pi.on("session_start", async (_event, ctx) => {
     // OMP (oh-my-pi) is not supported: its in-process live-entries integration
@@ -151,6 +173,7 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
       }
       return;
     }
+    if (standDownIfProxied(ctx)) return;
     runtime.store.invalidate();
     runtime.clearNudgeTracking();
     runtime.throttleFor(ctx.sessionManager.getSessionId()).reset();
@@ -217,12 +240,15 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
 // The core integration: Pi's `context` event fires before every LLM call with the
 // messages about to be sent. We run acp-kernel's processTurn (prune + ref-tag +
 // nudge decision) and return the transformed AgentMessage[].
-function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
+function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIfProxied: (ctx: ExtensionContext) => boolean): void {
   pi.on("context", async (event, ctx) => {
-    // Refused host (OMP): leave the context completely untouched — no ref tags,
-    // no compression, no nudge. Returning undefined makes pi send the original
-    // messages verbatim.
+    // Refused host (OMP / proxied baseUrl): leave the context completely
+    // untouched — no ref tags, no compression, no nudge. Returning undefined
+    // makes pi send the original messages verbatim.
     if (runtime.refused) return;
+    // Fallback for hosts where session_start did not fire before the first LLM
+    // call: detect the proxied baseUrl here instead.
+    if (standDownIfProxied(ctx)) return;
     const sid = ctx.sessionManager.getSessionId();
     const release = await runtime.acquireLock(sid);
     try {

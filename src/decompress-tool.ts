@@ -46,7 +46,7 @@ export function makeDecompressTool(runtime: AcpRuntime): ToolDefinition<typeof D
     ],
     parameters: DecompressParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {
-      if (runtime.refused) return { details: undefined, content: [{ type: "text", text: OMP_UNSUPPORTED_MESSAGE }] };
+      if (runtime.refused) return { details: undefined, content: [{ type: "text", text: runtime.refusalMessage ?? OMP_UNSUPPORTED_MESSAGE }] };
       let result: string;
       try {
         result = await handleDecompress(params as DecompressArgs, runtime, ctx);
