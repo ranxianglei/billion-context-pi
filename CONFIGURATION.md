@@ -188,6 +188,8 @@ All keys below are currently **ACTIVE**.
 - **Default:** `true`
 - **Status:** 🟢 ACTIVE
 - **Description:** On Pi startup, check the npm registry for a newer version of `billion-context-pi` and auto-install it. Set to `false` to avoid all startup network calls. Can also be disabled via the `ACP_AUTO_UPDATE` environment variable (`ACP_AUTO_UPDATE=0` or `ACP_AUTO_UPDATE=false`), which overrides this setting.
+  - **Read-only install location:** when the copy's install prefix is not writable (e.g. a root-owned `npm i -g` global prefix), auto-update stops retrying that location after the first `EACCES`/permission failure and shows a one-time hint to run `npm i -g billion-context-pi` (or remove the global copy if you rely on pi's bundled install) instead of looping. The check throttle and the stop-retry marker are keyed per install location, so a healthy copy never suppresses a failing one's checks.
+  - **Two parallel mechanisms:** this extension-side auto-update is independent of pi's own core update banner — both can appear, and disabling one does not disable the other.
 
 ### `modelContextLimit`
 

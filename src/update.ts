@@ -3,6 +3,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
 import { homedir } from "node:os";
+import { createHash } from "node:crypto";
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 import { debug, logInfo, logWarn } from "./log.js";
 
@@ -13,12 +14,31 @@ const registryUrl = (tag: string) =>
   `https://registry.npmjs.org/${PACKAGE_NAME}/${encodeURIComponent(tag)}`;
 const SEMVER_RE = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z-.]+)?$/;
 const CHECK_INTERVAL_MS = 3 * 60 * 1000;
+// Short stable key for an install location, used to scope the throttle +
+// read-only marker files per copy. Two copies of the extension (e.g. an
+// `npm i -g` global install and pi's own npm dir) must not share these files:
+// a healthy copy refreshing the throttle would otherwise silently suppress a
+// failing copy's checks, and a read-only location's stop-retry marker would
+// wrongly apply to a writable one (issue #267).
+function locationKey(location: string): string {
+  return createHash("sha256").update(location).digest("hex").slice(0, 12);
+}
 // Resolved lazily (not at module load) so tests can redirect it via env at any
 // time. Without this, parallel test processes race on the real file under the
 // user's home dir: one process stamps the throttle timestamp while another has
 // just deleted it, making the victim's check skip "npm view" entirely.
-const throttleFile = () =>
-  process.env.ACP_UPDATE_THROTTLE_FILE ?? join(homedir(), CONFIG_DIR_NAME, "agent", ".billion-context-pi-update-check");
+// Keyed by the extension dir so each installed copy throttles independently.
+const throttleFileFor = (extDir?: string): string => {
+  if (process.env.ACP_UPDATE_THROTTLE_FILE) return process.env.ACP_UPDATE_THROTTLE_FILE;
+  const base = join(homedir(), CONFIG_DIR_NAME, "agent");
+  return extDir ? join(base, `.billion-context-pi-update-check-${locationKey(extDir)}`) : join(base, ".billion-context-pi-update-check");
+};
+// Persistent marker for an install location that failed with a permission
+// error (EACCES/EPERM). Once set, auto-update stops retrying that location —
+// a read-only global prefix can never be fixed by re-running npm install, so
+// retrying is a pure infinite loop (issue #267). The user must `npm i -g`.
+export const readOnlyMarkerFile = (extDir: string): string =>
+  join(homedir(), CONFIG_DIR_NAME, "agent", `.billion-context-pi-readonly-${locationKey(extDir)}`);
 
 // Guards against concurrent checks: the context event fires on every LLM call,
 // so several can race past the throttle read before any writes the timestamp.
@@ -176,21 +196,39 @@ function parseSemVer(version: string): { parts: number[]; pre: string[] } | unde
   };
 }
 
-async function readLastCheck(): Promise<number> {
+async function readLastCheck(throttle: string): Promise<number> {
   try {
-    const data = await readFile(throttleFile(), "utf-8");
+    const data = await readFile(throttle, "utf-8");
     return parseInt(data.trim(), 10) || 0;
   } catch {
     return 0;
   }
 }
 
-async function writeLastCheck(timestamp: number): Promise<void> {
+async function writeLastCheck(timestamp: number, throttle: string): Promise<void> {
   try {
-    await mkdir(dirname(throttleFile()), { recursive: true });
-    await writeFile(throttleFile(), String(timestamp), "utf-8");
+    await mkdir(dirname(throttle), { recursive: true });
+    await writeFile(throttle, String(timestamp), "utf-8");
   } catch {
     // best-effort
+  }
+}
+
+async function isReadOnlyLocation(extDir: string): Promise<boolean> {
+  try {
+    await access(readOnlyMarkerFile(extDir));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function markReadOnlyLocation(extDir: string): Promise<void> {
+  try {
+    await mkdir(dirname(readOnlyMarkerFile(extDir)), { recursive: true });
+    await writeFile(readOnlyMarkerFile(extDir), String(Date.now()), "utf-8");
+  } catch {
+    // best-effort: if we can't write the marker we'll keep retrying (old behavior)
   }
 }
 
@@ -222,7 +260,7 @@ export function findNpmRoot(extDir: string): string | undefined {
   }
 }
 
-async function findExtensionDir(): Promise<string | undefined> {
+export async function findExtensionDir(): Promise<string | undefined> {
   let dir = dirname(fileURLToPath(import.meta.url));
   for (;;) {
     const pkg = await readPackageJson(join(dir, "package.json"));
@@ -233,7 +271,13 @@ async function findExtensionDir(): Promise<string | undefined> {
   }
 }
 
-export type InstallOutcome = "ok" | "failed" | "rolled-back";
+export type InstallOutcome = "ok" | "failed" | "rolled-back" | "read-only";
+
+// A permission failure means the install prefix itself is not writable (e.g. an
+// `npm i -g` global prefix owned by root). Re-running npm install can never fix
+// that, so the caller stops retrying the location and tells the user to run
+// `npm i -g` (issue #267). Matched against npm's stderr, not the exit code.
+const PERMISSION_ERROR_RE = /EACCES|EPERM|permission denied|operation not permitted|read-only file system|read only file system/i;
 
 // The declared entries pi/loaders may touch: pi's own extension entry, the
 // ESM export, and main. All of them must exist on disk after an install.
@@ -321,6 +365,13 @@ export async function autoInstallLatest(latest: string, extDirOverride?: string)
         npmDir,
         stderr: stderr.trim().slice(-2000),
       });
+      if (PERMISSION_ERROR_RE.test(stderr)) {
+        // The install prefix is not writable (e.g. root-owned global prefix).
+        // Mark it so we stop retrying, and surface a user-visible hint.
+        await markReadOnlyLocation(extDir);
+        logWarn("update", { event: "auto-install-read-only", latest, npmDir });
+        return "read-only";
+      }
       return "failed";
     }
     const verify = await verifyInstall(npmDir, latest);
@@ -405,11 +456,20 @@ export async function checkForUpdate(
   if (updateInFlight) return;
   updateInFlight = true;
   try {
+    const extDir = await findExtensionDir();
+    // A location already marked read-only (EACCES) can never be fixed by
+    // re-running npm install — skip the whole check (no npm view, no install)
+    // and remind the user once per process (issue #267).
+    if (extDir && (await isReadOnlyLocation(extDir))) {
+      notifyReadOnly(notify);
+      return;
+    }
+    const throttle = throttleFileFor(extDir);
     const now = Date.now();
-    const lastCheck = await readLastCheck();
+    const lastCheck = await readLastCheck(throttle);
     if (now - lastCheck < CHECK_INTERVAL_MS) return;
 
-    await writeLastCheck(now);
+    await writeLastCheck(now, throttle);
 
     const runtimeVersion = await getRuntimeVersion();
     // Follow the channel the user installed from (dist-tag), not the global
@@ -437,8 +497,10 @@ export async function checkForUpdate(
     logInfo("update", { event: "check", current, latest, hasUpdate });
 
     if (hasUpdate) {
-      const outcome = await autoInstallLatest(latest);
-      if (outcome === "ok" && notify) {
+      const outcome = await autoInstallLatest(latest, extDir);
+      if (outcome === "read-only" && notify) {
+        notifyReadOnly(notify);
+      } else if (outcome === "ok" && notify) {
         notify(
           `\x1b[32m\u2714 ACP auto-updated ${current} \u2192 ${latest}. Restart Pi to finish.\x1b[0m`,
         );
@@ -461,6 +523,21 @@ export async function checkForUpdate(
   } finally {
     updateInFlight = false;
   }
+}
+
+// Emitted at most once per process so a read-only location (checked on every
+// context event) does not spam a toast on each LLM call.
+let readOnlyNotified = false;
+function notifyReadOnly(notify?: (msg: string) => void): void {
+  if (!notify || readOnlyNotified) return;
+  readOnlyNotified = true;
+  notify(
+    `\x1b[33m\u26a0 ACP auto-update cannot write to this install location (no permission). ` +
+      `To update run \`npm i -g ${PACKAGE_NAME}\`, or remove the global copy if you rely on pi's bundled install.\x1b[0m`,
+  );
+}
+export function resetUpdateStateForTest(): void {
+  readOnlyNotified = false;
 }
 
 async function getRuntimeVersion(): Promise<string | undefined> {

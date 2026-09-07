@@ -38,7 +38,7 @@ import {
 } from "./throttle-retry.js";
 import { defaultCountTokens } from "acp-kernel";
 import { formatSystemPromptForEvent, getSystemPromptText } from "./compat.js";
-import { inspectOverflowMessage, reserveOutputHeadroom, shouldReserveOutputHeadroom } from "./overflow-selfheal.js";
+import { applyOutputHeadroom, inspectOverflowMessage } from "./overflow-selfheal.js";
 import { isOmpHost, OMP_UNSUPPORTED_MESSAGE } from "./omp.js";
 import { isBiliProxyBaseUrl, PROXY_STAND_DOWN_MESSAGE } from "./proxy-detect.js";
 
@@ -232,6 +232,7 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
   });
   pi.on("session_shutdown", (_event, ctx) => {
     runtime.clearDeadCompress(ctx.sessionManager.getSessionId());
+    runtime.dropTokenScale(ctx.sessionManager.getSessionId());
     delegateStatusWidget.dispose();
     closeLogStream();
   });
@@ -273,20 +274,13 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
       // Output headroom: reserve the model's max output budget from the window
       // so the kernel's nudge/truncate bands sit below (window - maxTokens) —
       // the context then always leaves room for the model's reply, preventing
-      // the "context + output > window" overflow on a small window. maxTokens is
-      // the model's max output capability (ctx.model.maxTokens). Applied to the
-      // (possibly re-centered) window above; never mutates the shared config.
-      // Anthropic is exempt — its input limit is enforced independently of
-      // max_tokens, so reserving would shift every band down by maxTokens with
-      // no safety gain (see shouldReserveOutputHeadroom).
-      const maxOutput = (ctx.model as { maxTokens?: number } | undefined)?.maxTokens ?? 0;
-      if (shouldReserveOutputHeadroom((ctx.model as { api?: string } | undefined)?.api)) {
-        const reservedWindow = reserveOutputHeadroom(config.modelContextLimit, maxOutput);
-        if (reservedWindow !== config.modelContextLimit) {
-          const before = config.modelContextLimit;
-          config = { ...config, modelContextLimit: reservedWindow };
-          logInfo("overflow-selfheal", { sid, event: "output-headroom", before, after: reservedWindow, maxOutput });
-        }
+      // the "context + output > window" overflow on a small window. Applied to
+      // the (possibly re-centered) window above; never mutates the shared
+      // config. Anthropic is exempt (see applyOutputHeadroom).
+      const beforeHeadroom = config.modelContextLimit;
+      config = applyOutputHeadroom(config, ctx.model);
+      if (config.modelContextLimit !== beforeHeadroom) {
+        logInfo("overflow-selfheal", { sid, event: "output-headroom", before: beforeHeadroom, after: config.modelContextLimit, maxOutput: (ctx.model as { maxTokens?: number } | undefined)?.maxTokens ?? 0 });
       }
       const coveredIds = collectCoveredMessageIds(state);
       // Nudge arbitration on the SENT-VIEW scale: CJK-aware estimate over the
@@ -328,6 +322,22 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
           tokenCount = applyFloors(view.viewTokens);
           logInfo("turn", { sid, event: "view-recount", prelim: sentTokens, viewTokens: view.viewTokens, tokenCount });
         }
+      }
+      // Growth scale guard (issue #267): the meter switches rulers when the
+      // anchor flips stale↔not-stale (estimate ↔ provider). A growth delta
+      // spanning that switch is a false artifact, not real growth, so reset the
+      // growth baselines on the flip: the T1 growth reference (lastNudgeShownTokens
+      // / lastPerMessageNudgeTokens) AND the per-tier cadence baselines
+      // (lastShownByTier, kernel 0.0.55: cadence = tokenCount - lastShownByTier[t]
+      // >= growthFloor) — an old-scale lastShown subtracted from a new-scale
+      // tokenCount is exactly the false "+35k growth" artifact from the issue.
+      // The usage bands above keep the floor-stale behavior untouched — only
+      // the growth references are re-anchored.
+      if (runtime.noteTokenScale(sid, !hostFloorActive)) {
+        state.nudge.lastNudgeShownTokens = 0;
+        state.nudge.lastPerMessageNudgeTokens = 0;
+        state.nudge.lastShownByTier = {};
+        logInfo("growth-scale", { sid, event: "scale-flip-reset", anchorStale: !hostFloorActive });
       }
       debug.event("context-in", {
         sid,

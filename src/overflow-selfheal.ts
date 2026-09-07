@@ -111,6 +111,27 @@ export function shouldReserveOutputHeadroom(api: string | undefined): boolean {
   return api !== "anthropic-messages";
 }
 
+/**
+ * Apply the output-headroom reservation to a resolved config's modelContextLimit
+ * (see reserveOutputHeadroom / shouldReserveOutputHeadroom). Returns a NEW config
+ * (never mutates the input) so the shared resolved config stays untouched. Used
+ * by BOTH the live context transform and the read-only panel surfaces (/acp,
+ * acp_status) so every percentage is measured against the SAME real request
+ * limit — otherwise the panel reports against the full window while the nudge
+ * bands run against (window − maxOutput) (issue #267).
+ */
+export function applyOutputHeadroom<T extends { modelContextLimit: number }>(
+  config: T,
+  model: { maxTokens?: number; api?: string } | undefined,
+): T {
+  const maxOutput = model?.maxTokens ?? 0;
+  if (shouldReserveOutputHeadroom(model?.api)) {
+    const reserved = reserveOutputHeadroom(config.modelContextLimit, maxOutput);
+    if (reserved !== config.modelContextLimit) return { ...config, modelContextLimit: reserved };
+  }
+  return config;
+}
+
 // Per-session overflow self-heal state. Keyed by session id so concurrent
 // sessions in one extension instance cannot share a learned window or an
 // armed emergency (same rationale as the throttle episode).
