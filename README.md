@@ -222,10 +222,10 @@ The `.acp.json` sidecar is what holds your compressed blocks. Without it, the se
 
 ### Migrating a session (cross-machine copy / backup-restore)
 
-Pi's built-in export/import moves only the **transcript**, not the ACP state. Two things are lost:
+Pi's built-in export/import moves only the **transcript**, not the ACP state. Two things are affected:
 
-1. **The `.acp.json` sidecar is not carried.** An imported session therefore has *no* compressed blocks: every LLM call resends the entire raw history until the nudge re-compresses it — a one-time full re-cache cost plus context bloat back to original size. Very long sessions can approach or exceed the model window before re-compression kicks in (Pi's native compaction is disabled while this plugin is active, so ACP is the only context manager).
-2. **Export drops the `parentSession` header.** Clone/fork child sessions rely on that header field to inherit their parent's compression state; once exported, the link is gone even if the parent's files still exist on the target machine.
+1. **The `.acp.json` sidecar is not carried.** As a fallback, ACP now **rebuilds the compression state by replaying the session log itself**: on the first context event after import, it re-applies every successful `compress` call recorded in the transcript (assistant tool-call arguments + tool results) through the kernel, restoring the block structure, summaries, message refs and cumulative stats, then persists the recreated sidecar (#299). Errored, no-op and unparseable calls are skipped; the replay runs only when no sidecar and no inheritable parent state exists. This removes the old behavior — resending the entire raw history until the nudge re-compresses, with a one-time full re-cache cost and context bloat back to original size. Caveat: the replay restores what the *log* records, so summaries come back exactly as stored in the transcript, and stats like per-message token snapshots are re-derived rather than bit-identical.
+2. **Export drops the `parentSession` header.** Clone/fork child sessions rely on that header field to inherit their parent's compression state; once exported, the link is gone even if the parent's files still exist on the target machine. (A host-side fix is proposed upstream in [pi#1](https://github.com/ranxianglei/pi/pull/1).)
 
 **To migrate a session with its compression state intact, copy both files together** (they share the same base name):
 
@@ -238,7 +238,7 @@ cp -r ~/.pi/agent/sessions  <backup>/pi-sessions
 
 Restore them next to each other on the target machine. For clone/fork children, also bring the parent's pair so `parentSession` resolves.
 
-> A permanent fix — the host carrying the sidecar through import/export and preserving `parentSession` — belongs upstream in pi-coding-agent and is tracked in issue [#299](https://github.com/ranxianglei/billion-context-pi/issues/299). Until it lands, copy the pair manually.
+> If you import only the `.jsonl`, ACP's log-replay fallback rebuilds the state automatically on the next session (see above). Copying the pair is still preferred — it is exact, while the replay re-derives token snapshots and can only restore what the transcript records.
 
 ## Built on acp-kernel
 

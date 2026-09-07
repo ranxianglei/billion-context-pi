@@ -11,6 +11,7 @@ import {
 import { resolveConfig, type AdapterConfig } from "./config.js";
 import { entriesToCoreMessages, extractText, matchesStoredText, messageIdentity, messageRef } from "./messages.js";
 import { SessionStateStore, type LiveRefOrigin } from "./state.js";
+import { hasCompressHistory, rebuildStateFromLog } from "./state-rebuild.js";
 import { loadUserConfig, applyUserConfig } from "./user-config.js";
 import { ThrottleEpisode } from "./throttle-retry.js";
 import { logInfo, logWarn, setDebugEnabled } from "./log.js";
@@ -377,8 +378,29 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     const sm = ctx.sessionManager;
     const sessionFile = sm.getSessionFile() ?? undefined;
     const sessionId = sm.getSessionId();
-    const state = await store.load(sessionFile, sessionId);
+    let state = await store.load(sessionFile, sessionId);
     const entries = readContextEntries(sm);
+    // Issue #299 (ranxianglei/billion-context-pi#299): pi's importFromJsonl
+    // copies only the .jsonl, so the `${sessionFile}.acp.json` sidecar never
+    // travels with an imported session and compression state silently resets
+    // (the adapter then re-compresses already-compressed content). Last resort
+    // after the sidecar and parent-session inheritance both miss: replay the
+    // successful compress calls recorded in the session log itself. Uses only
+    // persisted entries — the omp live tail is not part of history yet.
+    if (sessionFile && state.blocks.length === 0 && hasCompressHistory(entries)) {
+      const rebuilt = rebuildStateFromLog({ entries, state, config: configFor(ctx), core });
+      if (rebuilt.report.blocks > 0) {
+        state = rebuilt.state;
+        await store.save(state, sessionFile, sessionId);
+        logInfo("state", {
+          sid: sessionId,
+          event: "state-rebuilt",
+          blocks: rebuilt.report.blocks,
+          callsApplied: rebuilt.report.callsApplied,
+          callsSkipped: rebuilt.report.callsSkipped,
+        });
+      }
+    }
     // omp fires the context event BEFORE the current user message is persisted
     // to the session branch (its agent-loop emits message_end only after
     // prepareProviderCall → transformContext), so getBranch() lags one message
