@@ -453,6 +453,7 @@ The flow is:
 - **Default:** `50000`
 - **Status:** 🟢 ACTIVE
 - **Description:** The token-growth threshold that controls the cadence of **soft** compression nudges. A soft nudge fires roughly every time this many tokens of new compressible content accumulate. A lower value means the model is nudged to compress more often; a higher value means less frequent nudges. This only governs *growth-driven* nudges — once usage crosses `compress.maxContextLimit`, forced nudges take over regardless of this setting. Maps to the kernel settings `nudge.growthFloor` and `nudge.growthCap`.
+- **Same-turn re-inject:** within one user turn a nudge injects at most once, but once the context has since grown by a full growth floor (mirroring the kernel's anti-thrashing cadence: `max(minGrowthFloor, minGrowthRatio × adaptiveGrowth)` — 22.5K tokens with defaults) a fresh reminder re-injects in the same turn (issue #269: a model that ignored a 78% nudge used to stay silent until the 95% emergency truncation). After a successful compress the growth baseline re-anchors to the new (smaller) scale, so post-compress regrowth into the pressure band is not held against the pre-compress peak.
 
 ### `compress.providers` — per-provider & per-model overrides
 

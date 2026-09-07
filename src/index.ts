@@ -399,6 +399,33 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     const compressOutcomes = collectCompressOutcomes(entries, turnStartIndex(entries));
     const outcome = compressOutcomes.length > 0 ? runtime.noteCompressOutcomes(turnKey, compressOutcomes) : null;
 
+    // Growth-aware re-inject bookkeeping (issue #269) runs on EVERY context
+    // event, not only when the kernel wants to inject: the drop re-anchor
+    // must advance even on idle events (post-compress collapse), or the
+    // baseline would keep pointing at the pre-compress peak and suppress the
+    // next pressure nudge straight into the emergency band.
+    // Floor mirrors the kernel's decideNudge cadence inputs (config carries
+    // kernel defaults via defaultConfig, so unset fields are the kernel's own):
+    //   nudgeGrowthTokens = min(growthCap, max(growthFloor, limit × growthRatio))
+    //   floor = max(minGrowthFloor, minGrowthRatio × nudgeGrowthTokens)
+    const adaptiveGrowth =
+      !config.modelContextLimit || config.modelContextLimit <= 0
+        ? config.nudge.growthFloor
+        : Math.min(
+            config.nudge.growthCap,
+            Math.max(config.nudge.growthFloor, Math.round(config.modelContextLimit * config.nudge.growthRatio)),
+          );
+    const reInjectFloor = Math.max(config.nudge.minGrowthFloor, config.nudge.minGrowthRatio * adaptiveGrowth);
+    let shownAt = runtime.nudgeShownTokensFor(turnKey);
+    if (shownAt !== undefined && tokenCount < shownAt - adaptiveGrowth) {
+      // Mirror the kernel's drop re-anchor (nudgeNode): after a successful
+      // compress the meter collapses; growth since the last shown must
+      // restart from the new baseline, not from the old peak.
+      logInfo("nudge", { sid: ctx.sessionManager.getSessionId(), event: "drop-reanchor", turnKey, from: shownAt, to: tokenCount });
+      shownAt = tokenCount;
+      runtime.markNudgeShown(turnKey, tokenCount);
+    }
+
     if (turn.nudge?.shouldInject) {
       // Two independent channels for the nudge:
       //  1. CONTEXT injection (always on): the nudge is appended to the
@@ -408,11 +435,21 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
       //  2. TERMINAL echo (debug only): when debug is on, also print the exact
       //     text via ctx.ui.notify so the user can observe what is being
       //     injected while debugging. The model never sees terminal output.
-      // Emergency nudges (usage >= 80%) bypass the per-turn dedup so the
+      // Emergency nudges (usage >= 95%) bypass the per-turn dedup so the
       // overflow warning always reaches the model. Other nudges inject at most
       // once per turn: pi fires the context event multiple times per assistant
       // reply (streaming/tool loop), and without this gate the same nudge
-      // would be appended on every event.
+      // would be appended on every event. Exception (issue #269): once the
+      // context has GROWN by a full growth floor since the last actual
+      // injection, the nudge is allowed to re-inject within the same turn — a
+      // model that ignored the earlier nudge gets a fresh reminder on the new
+      // growth instead of being driven into the emergency band first. The
+      // floor mirrors the kernel's own anti-thrashing cadence (decideNudge:
+      // growthFloor = max(minGrowthFloor, minGrowthRatio × nudgeGrowthTokens),
+      // nudgeGrowthTokens = resolveAdaptiveGrowth — acp-kernel), so the
+      // re-inject never fires more eagerly than the kernel's growth-branch
+      // cadence and merely extends it to the pressure branch (75%+), which the
+      // kernel re-decides on every event by design.
       const emergency = turn.nudge.breakdown?.emergencyOverride === 1;
       // Recommend only ranges the model can actually compress: a tiny
       // fragmented range in the list makes batched attempts fail atomically
@@ -425,7 +462,8 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
       // MAX_COMPRESS_ATTEMPTS attempts, stop re-injecting the nudge — the
       // kernel's emergency truncation still shrinks context mechanically.
       const retryCapped = runtime.compressRetryCappedFor(turnKey);
-      const alreadyShown = retryCapped || (!emergency && runtime.nudgeShownFor(turnKey));
+      const reInjectReady = shownAt === undefined || tokenCount - shownAt >= reInjectFloor;
+      const alreadyShown = retryCapped || (!emergency && runtime.nudgeShownFor(turnKey) && !reInjectReady);
       if (!alreadyShown) {
         rebuilt.push(nudgeMessage(turn.nudge, turn.state.blocks.filter((b) => b.active), runtime.prompts));
         const rendered = renderNudgeText(turn.nudge, runtime.prompts);
@@ -437,10 +475,10 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
         if (debugOn && ctx.hasUI) {
           ctx.ui.notify(`[ACP nudge → context]${emergency ? " [EMERGENCY]" : ""}\n${rendered.text}${example}`);
         }
-        if (!emergency) runtime.markNudgeShown(turnKey);
-        debug.event("nudge-injected", { sid: ctx.sessionManager.getSessionId(), voice: rendered.voice, channels: ["context", debugOn ? "terminal" : null].filter(Boolean), emergency, turnKey, text: rendered.text + example });
+        if (!emergency) runtime.markNudgeShown(turnKey, tokenCount);
+        debug.event("nudge-injected", { sid: ctx.sessionManager.getSessionId(), voice: rendered.voice, channels: ["context", debugOn ? "terminal" : null].filter(Boolean), emergency, turnKey, reInject: shownAt !== undefined, text: rendered.text + example });
       } else {
-        debug.event("nudge-suppressed", { sid: ctx.sessionManager.getSessionId(), turnKey, reason: turn.nudge.reason });
+        debug.event("nudge-suppressed", { sid: ctx.sessionManager.getSessionId(), turnKey, reason: turn.nudge.reason, shownAt: shownAt ?? null, tokenCount, adaptiveGrowth, reInjectFloor });
       }
     }
 
