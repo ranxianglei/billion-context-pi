@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { usageAnchorPredatesCompression } from "../src/floor-stale.js";
+import type { CompressionBlock } from "acp-kernel";
+import { usageAnchorPredatesCompression, compressionAnchorStaleness } from "../src/floor-stale.js";
 
 // The issue #257 floor must be skipped while the host's provider-usage anchor
 // (the usage on the last valid assistant message) predates the last
@@ -95,4 +96,87 @@ test("non-compress toolResults are ignored", () => {
     msg("e2", { role: "toolResult", toolName: "read", toolCallId: "c9", content: [{ type: "text", text: PANEL_OK }] }),
   ];
   assert.equal(usageAnchorPredatesCompression(entries), false);
+});
+
+// issue #325: compressionAnchorStaleness attributes reclamation to blocks whose
+// creating compress toolResult lands after the last valid usage anchor, so the
+// caller can floor at (anchor − netReclaimed) instead of skipping the floor.
+const ct = (t: string): number => t.length;
+const blk = (over: Partial<CompressionBlock> = {}): CompressionBlock => ({
+  blockId: "b0", runId: "r", tier: 1, summary: "abcde", directMessageIds: [], effectiveMessageIds: [],
+  directBlockIds: [], compressedTokens: 1000, createdAt: Date.now(), survivedCount: 0, generation: "young", active: true, ...over,
+});
+
+test("staleness: fresh anchor → not predates, nothing reclaimed", () => {
+  const entries = [
+    msg("e0", { role: "user", content: "go" }),
+    assistantUsage("e1"),
+    compressResult("e2", PANEL_OK),
+    assistantUsage("e3"),
+  ];
+  const r = compressionAnchorStaleness(entries, [blk()], ct);
+  assert.equal(r.predates, false);
+  assert.equal(r.netReclaimed, 0);
+});
+
+test("staleness: stale anchor reclaims a post-anchor block", () => {
+  const entries = [
+    msg("e0", { role: "user", content: "go" }),
+    assistantUsage("e1"),
+    compressResult("e2", PANEL_OK), // toolCallId c1
+  ];
+  const r = compressionAnchorStaleness(entries, [blk({ compressCallId: "c1" })], ct);
+  assert.equal(r.predates, true);
+  assert.equal(r.netReclaimed, 995); // 1000 − len("abcde")
+});
+
+test("staleness: pre-anchor block is not counted as reclaimed", () => {
+  const entries = [
+    msg("e0", { role: "user", content: "go" }),
+    compressResult("e1", PANEL_OK), // c1 before any usage anchor
+    assistantUsage("e2"),
+  ];
+  const r = compressionAnchorStaleness(entries, [blk({ compressCallId: "c1" })], ct);
+  assert.equal(r.predates, false);
+  assert.equal(r.netReclaimed, 0);
+});
+
+test("staleness: inactive and unattributable blocks are skipped", () => {
+  const entries = [
+    msg("e0", { role: "user", content: "go" }),
+    assistantUsage("e1"),
+    compressResult("e2", PANEL_OK), // c1
+  ];
+  const r = compressionAnchorStaleness(entries, [
+    blk({ compressCallId: "c1", active: false }),
+    blk({ blockId: "b1", compressCallId: undefined }),
+  ], ct);
+  assert.equal(r.predates, true);
+  assert.equal(r.netReclaimed, 0);
+});
+
+test("staleness: negative savings clamp to zero", () => {
+  const entries = [
+    msg("e0", { role: "user", content: "go" }),
+    assistantUsage("e1"),
+    compressResult("e2", PANEL_OK), // c1
+  ];
+  const r = compressionAnchorStaleness(entries, [blk({ compressCallId: "c1", compressedTokens: 3 })], ct);
+  assert.equal(r.predates, true);
+  assert.equal(r.netReclaimed, 0); // 3 − 5 < 0 → clamped
+});
+
+test("staleness: sums multiple post-anchor blocks", () => {
+  const entries = [
+    msg("e0", { role: "user", content: "go" }),
+    assistantUsage("e1"),
+    compressResult("e2", PANEL_OK), // c1
+    msg("e3", { role: "toolResult", toolName: "compress", toolCallId: "c2", content: [{ type: "text", text: PANEL_OK }] }),
+  ];
+  const r = compressionAnchorStaleness(entries, [
+    blk({ compressCallId: "c1", compressedTokens: 1000 }), // 995
+    blk({ blockId: "b1", compressCallId: "c2", compressedTokens: 2000 }), // 1995
+  ], ct);
+  assert.equal(r.predates, true);
+  assert.equal(r.netReclaimed, 2990);
 });

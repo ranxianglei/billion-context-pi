@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFile, rm } from "node:fs/promises";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import { createAcpExtension } from "../src/index.js";
 import { tmpPath } from "./tmp-path.js";
 
@@ -55,6 +55,18 @@ function fakeCtx(tokens: number) {
 const fire = (handlers: Map<string, ((e: any, ctx: any) => any)[]>, entries: any[], ctx: any) =>
   handlers.get("context")![0]!({ type: "context", messages: entries.map((e) => e.message) }, ctx);
 
+async function seedState(file: string, block: Record<string, unknown>) {
+  const state = { blocks: [block], nextBlockId: 2, messageRefs: { byRaw: {}, byRef: {}, nextRef: 0 }, nudge: {}, stats: {} };
+  await writeFile(file, JSON.stringify(state), "utf8");
+}
+
+const seedBlock = (over: Record<string, unknown> = {}) => ({
+  blockId: "b0", runId: 0, tier: 1, generation: "young", active: true,
+  summary: "compressed early history", directMessageIds: ["e1", "e2", "e3"],
+  effectiveMessageIds: ["e1", "e2", "e3"], directBlockIds: [], compressedTokens: 60_000,
+  survivedCount: 3, createdAt: Date.now(), compressCallId: "c1", ...over,
+});
+
 // 20 MID-sized messages (~75-90K estimate) + a 175K provider usage anchor.
 function bulkEntries(): any[] {
   const entries: any[] = [msg("e0", "user", "start " + MID)];
@@ -64,11 +76,15 @@ function bulkEntries(): any[] {
 
 test("growth baseline re-anchors on the stale→not-stale scale flip (no cross-scale false growth)", async () => {
   await rm(`${STATE_FILE}.acp.json`, { force: true });
+  await seedState(`${STATE_FILE}.acp.json`, seedBlock({ compressedTokens: 150_000 }));
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 180_000 })(api as any);
 
-  // Turn 1 — STALE: the successful compress lands after the 175K usage anchor,
-  // so the meter runs on the estimate scale (sentTokens), far below 175K.
+  // Turn 1 — STALE: the successful compress landed after the 175K usage anchor
+  // and its seeded block shows ~150K reclaimed, so the #325 adjusted floor
+  // (anchor − reclaimed ≈ 25K) sits far under the estimate — the baseline stays
+  // on the estimate scale, well below 175K. The flip under test is that the next
+  // (fresh) turn re-anchors to the provider scale without a false cross-scale delta.
   const staleEntries = [
     ...bulkEntries(),
     { type: "message", id: "e19", parentId: null, timestamp: "", message: { role: "assistant", content: "f19 " + MID, timestamp: Date.now(), usage: { input: 175_000, cacheRead: 0, cacheWrite: 0 } } },
