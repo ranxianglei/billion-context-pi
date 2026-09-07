@@ -141,6 +141,8 @@ All keys below are currently **ACTIVE**.
 | `compress.maxContextLimit` | number \| string | `"75%"` | 🟢 ACTIVE | Context threshold that triggers forced compression nudges. |
 | `compress.emergencyThresholdPercent` | number \| string | `"95%"` | 🟢 ACTIVE | Context threshold that triggers emergency truncation. |
 | `compress.nudgeGrowthTokens` | number | `50000` | 🟢 ACTIVE | Token growth step for soft compression nudges. |
+| `compress.stripImages` | boolean | `false` | 🟢 ACTIVE | **Opt-in** wire-level strip of historical image payloads (issue #321). When `true`, every message older than the most recent `stripImagesKeepRecent` has its image parts dropped from the outbound provider body; image-only messages collapse to a `"[image]"` text placeholder. Supported wire dialects: anthropic-messages, openai-completions, openai-responses (incl. azure/codex variants). |
+| `compress.stripImagesKeepRecent` | number | `5` | 🟢 ACTIVE | How many of the most recent messages keep their image payloads when `stripImages` is on. |
 
 **Prompts keys**
 

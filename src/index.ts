@@ -22,6 +22,7 @@ import { coreOutToAgentMessages, extractText } from "./messages.js";
 import { buildAcpSystemPrompt, ACP_DELEGATE_PROMPT } from "./system-prompt.js";
 import { delegateStatusWidget } from "./fleet-widget.js";
 import { openFleetInspector } from "./fleet-inspector.js";
+import { applyStripImages } from "./strip-images.js";
 import { wireToolGuardrails } from "./tool-guardrails.js";
 import { debug, logError, logInfo, logWarn, logThrow, closeLogStream } from "./log.js";
 import { collectCoveredMessageIds, estimateTokens, lastUserMessageId, collectImageTokens, modelSupportsImages, sentViewTokenCount } from "./tokens.js";
@@ -82,6 +83,7 @@ export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactor
     wireDelegateReadTracking(pi);
     wireSessionLifecycle(pi, runtime, standDownIfProxied);
     wireContextTransform(pi, runtime, standDownIfProxied);
+    wireBeforeProviderRequest(pi, runtime, standDownIfProxied);
     wireSystemPrompt(pi, runtime);
     wireToolGuardrails(pi, runtime);
     wireOverflowSelfHeal(pi, runtime);
@@ -235,6 +237,32 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     runtime.dropTokenScale(ctx.sessionManager.getSessionId());
     delegateStatusWidget.dispose();
     closeLogStream();
+  });
+}
+
+// Opt-in wire-level strip of historical image payloads (issue #321, kernel
+// #215). pi serializes the provider request body from the (already transformed)
+// messages and fires before_provider_request with the RAW payload right before
+// the HTTP call — the same wire point the billion-context proxy strips at. We
+// only touch the body when the policy is enabled AND something was actually
+// removed; returning undefined keeps pi's payload reference untouched.
+function wireBeforeProviderRequest(pi: ExtensionAPI, runtime: AcpRuntime, standDownIfProxied: (ctx: ExtensionContext) => boolean): void {
+  pi.on("before_provider_request", async (event, ctx) => {
+    if (runtime.refused) return;
+    if (standDownIfProxied(ctx)) return;
+    const settings = runtime.stripImagesFor(ctx);
+    if (!settings.enabled) return;
+    const outcome = applyStripImages(event.payload, (ctx.model as { api?: string } | undefined)?.api, settings);
+    if (outcome.removed > 0) {
+      logInfo("strip-images", {
+        sid: ctx.sessionManager.getSessionId(),
+        event: "stripped",
+        removed: outcome.removed,
+        keepRecent: settings.keepRecent,
+      });
+      return outcome.body;
+    }
+    return;
   });
 }
 
