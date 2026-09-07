@@ -40,11 +40,15 @@ export function isPiHost(sm: ExtensionContext["sessionManager"]): boolean {
 
 export interface AcpRuntime {
   core: CompressionCore;
-  /** Set when the host is unsupported (currently: OMP / oh-my-pi). Once true,
-   *  the extension stands down: the context transform, system-prompt injection,
-   *  compaction-cancel and ACP tools all no-op so the host runs untouched.
-   *  Set at session_start (see wireOmpRefusal in src/index.ts). */
+  /** Set when the host is unsupported (currently: OMP / oh-my-pi) or when the
+   *  model's baseUrl routes through the billion-context wire proxy (#296).
+   *  Once true, the extension stands down: the context transform, system-prompt
+   *  injection, compaction-cancel and ACP tools all no-op so the host runs
+   *  untouched. Set at session_start (first context event as fallback). */
   refused: boolean;
+  /** User-facing reason shown when a refused ACP tool is invoked; null means
+   *  the default OMP refusal text applies. Set together with `refused`. */
+  refusalMessage: string | null;
   /** Per-session provider-throttle retry episode (attempt budget + kick
    *  pacing), keyed by session id so concurrent sessions in one extension
    *  instance cannot share an episode. Reset on session_start and on any
@@ -405,4 +409,5 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   }
 
   let refused = false;
-  return { core, store, get refused() { return refused; }, set refused(v: boolean) { refused = v; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reloadConfig, stateFor, save, acquireLock, overflowFor, overflowDrop, noteDeadCompress, clearDeadCompress, throttleFor, throttleDrop };}
+  let refusalMessage: string | null = null;
+  return { core, store, get refused() { return refused; }, set refused(v: boolean) { refused = v; }, get refusalMessage() { return refusalMessage; }, set refusalMessage(v: string | null) { refusalMessage = v; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reloadConfig, stateFor, save, acquireLock, overflowFor, overflowDrop, noteDeadCompress, clearDeadCompress, throttleFor, throttleDrop };}

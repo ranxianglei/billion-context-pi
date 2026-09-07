@@ -103,6 +103,8 @@ billion-context-pi is built for the **Pi** coding agent (`@earendil-works/pi-cod
 
   Full details: [docs/omp.md](./docs/omp.md).
 
+- **Coexisting with the [billion-context](https://github.com/ranxianglei/billion-context) wire proxy** — running both on the same session double-compresses every request (wasted tokens, nested summaries, two ref coordinate systems). This is prevented automatically: launcher paths (`bili pi`, …) export `BILLION_CONTEXT_PROXY`, and models whose `baseUrl` routes through the proxy (`…/bili/https://upstream…`) are detected at session start — in both cases billion-context-pi stands down with a warning and leaves the proxy as the sole compressor. One exception: transparent mode, where traffic reaches the proxy via `HTTPS_PROXY` so the URL carries no `/bili/` prefix — that is undetectable from the URL, so export `BILLION_CONTEXT_PROXY=1` before starting pi in that case.
+
 ## Model-facing tools
 
 | Tool | What it does |
