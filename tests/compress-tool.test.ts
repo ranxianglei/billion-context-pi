@@ -157,6 +157,35 @@ test("compress normalizes double-escaped \\uXXXX summaries before storage", asyn
   assert.ok(!block.summary.includes("\\u5408"), "stored summary must not contain literal \\uXXXX runs");
 });
 
+// issue #335: the success panel must report WHICH ranges were compressed
+// (block id + start..end refs), so the model knows those refs are consumed
+// and won't re-compress the same range.
+test("compress success panel reports the compressed ranges", async () => {
+  const { api, handlers } = captureApi();
+  // minCompressRange gate needs ≥5000 chars per range; each entry carries 6000
+  // CJK chars, and preserveRecentMessages:1 keeps the trailing entry outside
+  // the compressed range (same pattern as the #309/#322 tests).
+  createAcpExtension({ modelContextLimit: 200_000, preserveRecentMessages: 1 })(api as any);
+  const BIG = "中".repeat(6000);
+  const entries = [userMsg("e1", BIG), userMsg("e2", BIG), userMsg("e3", BIG), userMsg("e4", BIG)];
+  const stateFile = "/tmp/pai-acp-compress-ranges.session.json";
+  await rm(`${stateFile}.acp.json`, { force: true });
+  const ctx = fakeCtx(entries, stateFile);
+  ctx.__setUsage(100_000);
+  await runContextRound(handlers, ctx); // prime refs
+
+  const compressTool = api.tools.find((t: any) => t.name === "compress")!;
+  const out = await compressTool.execute(
+    "tc1",
+    { content: [{ startId: "m00001", endId: "m00002", summary: "range report regression block for issue 335 compressed range reporting" }] },
+    undefined, undefined, ctx,
+  );
+  const text = typeof out === "string" ? out : out.content?.[0]?.text ?? String(out);
+  assert.ok(text.includes("▣ ACP"), `compress failed: ${text}`);
+  assert.ok(!text.includes("Errors:"), `compress rejected: ${text}`);
+  assert.match(text, /Compressed: b1 \(m00001\.\.m00002\)/, `success panel must report the compressed range: ${text}`);
+});
+
 // issue #322: in-memory subagent sessions (pi-subagents rememberAgents:false →
 // SessionManager.inMemory()) have getSessionFile() === undefined. A successful
 // compress must stay visible to the NEXT context round; before the fix save()

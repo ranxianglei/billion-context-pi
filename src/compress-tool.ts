@@ -431,6 +431,9 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
   }
 
   const lines = [`▣ ACP | ${formatK(beforeTokens)} → ${formatK(afterTokens)} tokens (~${formatK(reclaimed)} reclaimed, ${blocksCreated} block${blocksCreated > 1 ? "s" : ""})`];
+  if (blocksCreated > 0) {
+    lines.push(`Compressed: ${newBlocks.map((b) => `${b.blockId} (${b.startRef ?? "?"}..${b.endRef ?? "?"})`).join(", ")} — these refs are now consumed; do not compress them again.`);
+  }
   if (warnings.length > 0) lines.push("⚠️ " + warnings.join("; "));
   if (errors.length > 0) lines.push("Errors: " + errors.join("; "));
   return lines.join("\n");
