@@ -461,3 +461,74 @@ test("message identity ignores tag-only text blocks but preserves original empty
   assert.equal(messageIdentity(taggedImage), messageIdentity(imageOnly));
   assert.notEqual(messageIdentity(emptyText), messageIdentity(imageOnly));
 });
+
+// issue #330: an interrupted turn leaves its tool_calls unmatched. projectMessage
+// keys off stopReason (not "missing result anywhere") so OMP execution roles /
+// evicted-undo fixtures are untouched. These lock in both the drop AND that scope.
+function interruptedAssistant(name: string, stopReason: string, text?: string): object {
+  return {
+    role: "assistant",
+    content: [
+      ...(text ? [{ type: "text", text }] : []),
+      { type: "toolCall", id: "tcF", name, arguments: {} },
+    ],
+    api: "anthropic",
+    provider: "anthropic",
+    model: "m",
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+    stopReason,
+    timestamp: Date.now(),
+  };
+}
+
+test("entriesToCoreMessages drops a dangling tool-call from an aborted turn — issue #330", () => {
+  const entries: SessionEntry[] = [
+    msgEntry("a", user("keep working")),
+    msgEntry("f", interruptedAssistant("compress", "aborted")),
+  ];
+  const core = entriesToCoreMessages(entries);
+  assert.ok(!core.some((m) => m.role === "assistant" && m.contentType === "tool-call"), "no dangling tool-call in sent view");
+  assert.equal(core.length, 1, "only the preceding user message survives");
+});
+
+test("entriesToCoreMessages drops a dangling tool-call on stopReason error too — issue #330", () => {
+  const entries: SessionEntry[] = [
+    msgEntry("a", user("go")),
+    msgEntry("f", interruptedAssistant("compress", "error")),
+  ];
+  const core = entriesToCoreMessages(entries);
+  assert.ok(!core.some((m) => m.role === "assistant" && m.contentType === "tool-call"));
+});
+
+test("entriesToCoreMessages keeps visible prose when an interrupted turn also had text — issue #330", () => {
+  const entries: SessionEntry[] = [
+    msgEntry("a", user("go")),
+    msgEntry("f", interruptedAssistant("compress", "aborted", "Let me compress now")),
+  ];
+  const core = entriesToCoreMessages(entries);
+  const assistant = core.find((m) => m.role === "assistant");
+  assert.ok(assistant, "assistant prose kept");
+  assert.equal(assistant!.contentType, "text");
+  assert.equal(assistant!.text, "Let me compress now");
+});
+
+test("entriesToCoreMessages keeps a normal toolUse call that has its result — control", () => {
+  const entries: SessionEntry[] = [
+    msgEntry("a", user("go")),
+    msgEntry("c", assistantToolCall("read")),
+    msgEntry("d", toolResult("tc1", "read", "ok")),
+  ];
+  const core = entriesToCoreMessages(entries);
+  assert.ok(core.some((m) => m.role === "assistant" && m.contentType === "tool-call"), "normal call preserved");
+});
+
+test("entriesToCoreMessages does NOT drop a toolUse call merely because its result is absent — issue #330 scope", () => {
+  // We deliberately key off stopReason, not result-presence: a toolUse with no
+  // result yet is normal mid-stream state, not an interruption.
+  const entries: SessionEntry[] = [
+    msgEntry("a", user("go")),
+    msgEntry("c", assistantToolCall("read")),
+  ];
+  const core = entriesToCoreMessages(entries);
+  assert.ok(core.some((m) => m.role === "assistant" && m.contentType === "tool-call"), "toolUse w/o result retained (not interrupted)");
+});

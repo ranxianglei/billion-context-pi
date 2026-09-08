@@ -296,7 +296,7 @@ function cappedRejectionText(snapshot: string): string {
     "Current compressible ranges (use these refs exactly as listed):",
     snapshot,
     "",
-    "Continue the task; compress becomes available again on the next user message.",
+    "Continue the task WITHOUT compressing. If none of the ranges above fit, call acp_status for the full picture. Compress becomes available again on the next user message.",
   ].join("\n");
 }
 

@@ -73,7 +73,7 @@ test("applyUserConfig flows prompts through to the adapter", () => {
 test("buildAcpSystemPrompt default output is byte-stable (no trailing whitespace, full rules embedded)", () => {
   const prompt = buildAcpSystemPrompt(defaultPrompts);
   assert.ok(
-    prompt.endsWith("If the user sends new input during a retry wait, the retry is cancelled.\n"),
+    prompt.endsWith("Compressing becomes available again on the next user message.\n"),
     "ends exactly like the master const — const->function refactor must not add trailing whitespace",
   );
   assert.equal(
@@ -81,6 +81,7 @@ test("buildAcpSystemPrompt default output is byte-stable (no trailing whitespace
     false,
     "no trailing whitespace before the final newline",
   );
+  assert.ok(prompt.includes("[ACP:compress-loop]"), "compress-loop guard sentinel is documented");
   assert.ok(prompt.includes(defaultPrompts.compressPhilosophy), "full compressPhilosophy embedded verbatim");
   assert.ok(prompt.includes(defaultPrompts.howToCompressRules), "full howToCompressRules embedded verbatim");
   assert.ok(prompt.includes(defaultPrompts.tier2DistillRules), "full tier2DistillRules embedded verbatim");
