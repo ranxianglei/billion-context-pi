@@ -102,10 +102,24 @@ test("reasoning core text is never inlined into the rebuilt text block", () => {
 test("resolveConfig defaults reasoningReplay to open-round and honors overrides", () => {
   const def = resolveConfig({}, 262144);
   assert.equal(def.reasoningReplay, "open-round");
-  const off = resolveConfig({ reasoningReplay: "always" }, 262144);
+  const off = resolveConfig({ compress: { reasoningReplay: "always" } }, 262144);
   assert.equal(off.reasoningReplay, "always");
   const viaCore = resolveConfig({ coreOverrides: { reasoningReplay: "never" } }, 262144);
   assert.equal(viaCore.reasoningReplay, "never");
+  const viaProvider = resolveConfig(
+    { compress: { providers: { openai: { reasoningReplay: "open-round" } } } },
+    262144,
+    "openai",
+    "gpt-5",
+  );
+  assert.equal(viaProvider.reasoningReplay, "open-round");
+  const viaModel = resolveConfig(
+    { compress: { reasoningReplay: "always", providers: { openai: { models: { "gpt-5": { reasoningReplay: "never" } } } } } },
+    262144,
+    "openai",
+    "gpt-5",
+  );
+  assert.equal(viaModel.reasoningReplay, "never");
 });
 
 test("reasoningReplay defaults conservatively for GPT-family provider/model", () => {
@@ -118,6 +132,6 @@ test("reasoningReplay defaults conservatively for GPT-family provider/model", ()
 });
 
 test("explicit reasoningReplay beats the GPT-family default", () => {
-  assert.equal(resolveConfig({ reasoningReplay: "open-round" }, 262144, "openai", "gpt-5").reasoningReplay, "open-round");
-  assert.equal(resolveConfig({ reasoningReplay: "always" }, 262144, "zhipuai-lb", "glm-5.3").reasoningReplay, "always");
+  assert.equal(resolveConfig({ compress: { reasoningReplay: "open-round" } }, 262144, "openai", "gpt-5").reasoningReplay, "open-round");
+  assert.equal(resolveConfig({ compress: { reasoningReplay: "always" } }, 262144, "zhipuai-lb", "glm-5.3").reasoningReplay, "always");
 });

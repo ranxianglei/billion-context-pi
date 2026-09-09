@@ -129,6 +129,15 @@ export interface CompressSettings {
    *  window and would suppress every nudge. Maps to kernel
    *  nudge.minPressureBenefitTokens. */
   minPressureBenefitTokens?: number;
+  /** Reasoning-block replay policy (kernel reasoningReplay), available at all
+   *  three levels (global → provider → model). Default: "open-round" —
+   *  history thinking is stripped from the outgoing view once its round
+   *  closes; providers only require replaying thinking for the current
+   *  unresolved round. GPT-family providers/models default to "always"
+   *  (legacy keep-everything — OpenAI reasoning items are encrypted and
+   *  must round-trip unmodified, untestable from here). Set "always"/"never"
+   *  at any level to override either default. */
+  reasoningReplay?: "always" | "open-round" | "never";
 }
 
 /** Per-provider compression overrides. Carries the same tuning fields as the
@@ -188,14 +197,6 @@ export interface AdapterConfig {
    *  Set explicitly for tests/headless runs. */
   modelContextLimit?: number;
   protectedTools?: string[];
-  /** Reasoning-block replay policy (kernel reasoningReplay). Default:
-   *  "open-round" — history thinking is stripped from the outgoing view once
-   *  its round closes; providers only require replaying thinking for the
-   *  current unresolved round. GPT-family providers/models default to
-   *  "always" (legacy keep-everything — OpenAI reasoning items are opaque
-   *  and untestable from here). Set "always"/"never" explicitly to override
-   *  either default; coreOverrides wins. Kill-switch for #336. */
-  reasoningReplay?: "always" | "open-round" | "never";
   preserveRecentMessages?: number;
   /** Check npm for a newer billion-context-pi on startup and auto-install it. Default: true.
    *  Disable via `autoUpdate: false` or env `ACP_AUTO_UPDATE=0` to avoid all
@@ -366,6 +367,7 @@ export function mergeCompress(
     emergencyThresholdPercent: model?.emergencyThresholdPercent ?? provider?.emergencyThresholdPercent ?? global?.emergencyThresholdPercent,
     nudgeGrowthTokens: model?.nudgeGrowthTokens ?? provider?.nudgeGrowthTokens ?? global?.nudgeGrowthTokens,
     minPressureBenefitTokens: model?.minPressureBenefitTokens ?? provider?.minPressureBenefitTokens ?? global?.minPressureBenefitTokens,
+    reasoningReplay: model?.reasoningReplay ?? provider?.reasoningReplay ?? global?.reasoningReplay,
   };
 }
 
@@ -402,8 +404,9 @@ export function resolveConfig(adapter: AdapterConfig, liveContextLimit: number, 
     preserveRecentMessages: adapter.preserveRecentMessages ?? 5,
     ...adapter.coreOverrides,
   });
-  config.reasoningReplay = adapter.coreOverrides?.reasoningReplay ?? adapter.reasoningReplay ?? defaultReasoningReplay(provider, modelId);
+  config.reasoningReplay = adapter.coreOverrides?.reasoningReplay ?? defaultReasoningReplay(provider, modelId);
   const c = resolveCompress(adapter.compress, provider, modelId);
+  if (c.reasoningReplay !== undefined) config.reasoningReplay = c.reasoningReplay;
   if (c.maxContextLimit !== undefined) config.nudge.maxContextLimitPct = parsePercent(c.maxContextLimit);
   if (c.emergencyThresholdPercent !== undefined) {
     const pct = parsePercent(c.emergencyThresholdPercent);
