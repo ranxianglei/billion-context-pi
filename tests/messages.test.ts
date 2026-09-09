@@ -450,3 +450,151 @@ test("message identity ignores tag-only text blocks but preserves original empty
   assert.equal(messageIdentity(taggedImage), messageIdentity(imageOnly));
   assert.notEqual(messageIdentity(emptyText), messageIdentity(imageOnly));
 });
+
+function compressAssistantMsg(args: unknown): object {
+  return {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "tc1", name: "compress", arguments: args }],
+    api: "anthropic",
+    provider: "anthropic",
+    model: "m",
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+    stopReason: "toolUse",
+    timestamp: Date.now(),
+  };
+}
+
+function contentOf(msg: object): Array<{ type: string; id?: string; name?: string; arguments?: unknown }> {
+  return (msg as { content: Array<{ type: string; id?: string; name?: string; arguments?: unknown }> }).content;
+}
+
+test("coreOutToAgentMessages syncs kernel-slimmed compress args (single-call, no-# path)", () => {
+  const longArgs = { content: [{ startId: "m00001", endId: "m00010", summary: "S".repeat(400) }] };
+  const stubbedArgs = { content: [{ startId: "m00001", endId: "m00010", summary: "S".repeat(199) + "…" }] };
+  const assistantMsg = compressAssistantMsg(longArgs);
+  const originalById = new Map([["entry1", assistantMsg as SessionMessageEntry["message"]]]);
+
+  const tag = acpRef("m00003");
+  const coreOut: CoreMessage[] = [
+    { id: "entry1", role: "assistant", contentType: "tool-call", toolName: "compress", toolCallId: "tc1", text: `${tag}\n${JSON.stringify(stubbedArgs)}` },
+  ];
+
+  const out = coreOutToAgentMessages(coreOut, originalById);
+  assert.equal(out.length, 1);
+  const tc = contentOf(out[0]!).find((b) => b.type === "toolCall");
+  assert.deepEqual(tc?.arguments, stubbedArgs, "outgoing args are the kernel-slimmed version");
+  assert.equal(contentOf(assistantMsg)[0]!.arguments, longArgs, "original entry not mutated");
+});
+
+test("coreOutToAgentMessages syncs compress args on # path, leaves non-compress calls untouched", () => {
+  const longArgs = { content: [{ startId: "m00001", endId: "m00010", summary: "S".repeat(400) }] };
+  const stubbedArgs = { content: [{ startId: "m00001", endId: "m00010", summary: "S".repeat(199) + "…" }] };
+  const readArgs = { path: "/tmp/x" };
+  const assistantMsg = assistantParallelToolCalls([
+    { id: "tc1", name: "compress", args: longArgs },
+    { id: "tc2", name: "read", args: readArgs },
+  ]);
+  const originalById = new Map([["entry1", assistantMsg as SessionMessageEntry["message"]]]);
+
+  const tag = acpRef("m00003");
+  const coreOut: CoreMessage[] = [
+    { id: "entry1#tc1", role: "assistant", contentType: "tool-call", toolName: "compress", toolCallId: "tc1", text: `${tag}\n${JSON.stringify(stubbedArgs)}` },
+    { id: "entry1#tc2", role: "assistant", contentType: "tool-call", toolName: "read", toolCallId: "tc2", text: `${tag}\n${JSON.stringify(readArgs)}` },
+  ];
+
+  const out = coreOutToAgentMessages(coreOut, originalById);
+  assert.equal(out.length, 1);
+  const blocks = contentOf(out[0]!);
+  assert.deepEqual(blocks.find((b) => b.id === "tc1")?.arguments, stubbedArgs, "compress call synced");
+  assert.deepEqual(blocks.find((b) => b.id === "tc2")?.arguments, readArgs, "non-compress call untouched");
+});
+
+test("coreOutToAgentMessages is a no-op when kernel text is byte-identical to original args", () => {
+  const args = { content: [{ startId: "m00001", endId: "m00010", summary: "short" }] };
+  const assistantMsg = compressAssistantMsg(args);
+  const originalById = new Map([["entry1", assistantMsg as SessionMessageEntry["message"]]]);
+
+  const tag = acpRef("m00003");
+  const coreOut: CoreMessage[] = [
+    { id: "entry1", role: "assistant", contentType: "tool-call", toolName: "compress", toolCallId: "tc1", text: `${tag}\n${JSON.stringify(args)}` },
+  ];
+
+  const out = coreOutToAgentMessages(coreOut, originalById);
+  assert.equal(out[0], assistantMsg, "unchanged text returns the original reference (byte-stability)");
+});
+
+test("coreOutToAgentMessages does not rewrite non-compress string args containing braces", () => {
+  const bashArgs = 'result: {"x":1}';
+  const assistantMsg = {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "tc1", name: "bash", arguments: bashArgs }],
+    api: "anthropic",
+    provider: "anthropic",
+    model: "m",
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+    stopReason: "toolUse",
+    timestamp: Date.now(),
+  };
+  const originalById = new Map([["entry1", assistantMsg as SessionMessageEntry["message"]]]);
+
+  const tag = acpRef("m00003");
+  const coreOut: CoreMessage[] = [
+    { id: "entry1", role: "assistant", contentType: "tool-call", toolName: "bash", toolCallId: "tc1", text: `${tag}\n${bashArgs}` },
+  ];
+
+  const out = coreOutToAgentMessages(coreOut, originalById);
+  assert.equal(out[0], assistantMsg, "non-compress tool with brace-containing string args is untouched");
+});
+
+test("coreOutToAgentMessages keeps string-form compress args as a string (shape preserved)", () => {
+  const longInner = JSON.stringify([{ startId: "m00001", endId: "m00010", summary: "S".repeat(400) }]);
+  const strArgs = JSON.stringify({ content: longInner });
+  const stubbedInner = JSON.stringify([{ startId: "m00001", endId: "m00010", summary: "S".repeat(199) + "…" }]);
+  const stubbedStr = JSON.stringify({ content: stubbedInner });
+  const assistantMsg = compressAssistantMsg(strArgs);
+  const originalById = new Map([["entry1", assistantMsg as SessionMessageEntry["message"]]]);
+
+  const tag = acpRef("m00003");
+  const coreOut: CoreMessage[] = [
+    { id: "entry1", role: "assistant", contentType: "tool-call", toolName: "compress", toolCallId: "tc1", text: `${tag}\n${stubbedStr}` },
+  ];
+
+  const out = coreOutToAgentMessages(coreOut, originalById);
+  const args = contentOf(out[0]!).find((b) => b.type === "toolCall")?.arguments;
+  assert.equal(typeof args, "string", "string-form args stay a string");
+  assert.equal(args, stubbedStr, "string-form args hold the slimmed JSON");
+});
+
+test("coreOutToAgentMessages keeps original args when rewritten text is unparseable", () => {
+  const args = { content: [{ startId: "m00001", endId: "m00010", summary: "S".repeat(400) }] };
+  const assistantMsg = compressAssistantMsg(args);
+  const originalById = new Map([["entry1", assistantMsg as SessionMessageEntry["message"]]]);
+
+  const tag = acpRef("m00003");
+  const coreOut: CoreMessage[] = [
+    { id: "entry1", role: "assistant", contentType: "tool-call", toolName: "compress", toolCallId: "tc1", text: `${tag}\n{"content":"[truncated...` },
+  ];
+
+  const out = coreOutToAgentMessages(coreOut, originalById);
+  assert.deepEqual(contentOf(out[0]!).find((b) => b.type === "toolCall")?.arguments, args, "unparseable rewrite falls back to original args");
+});
+
+test("coreOutToAgentMessages ignores tool-result cores sharing the compress callId", () => {
+  const longArgs = { content: [{ startId: "m00001", endId: "m00010", summary: "S".repeat(400) }] };
+  const stubbedArgs = { content: [{ startId: "m00001", endId: "m00010", summary: "S".repeat(199) + "…" }] };
+  const assistantMsg = compressAssistantMsg(longArgs);
+  const originalById = new Map([
+    ["entry1", assistantMsg as SessionMessageEntry["message"]],
+    ["entry2", toolResult("tc1", "compress", "Compressed 3 messages into block b1") as SessionMessageEntry["message"]],
+  ]);
+
+  const tag = acpRef("m00003");
+  const coreOut: CoreMessage[] = [
+    { id: "entry1", role: "assistant", contentType: "tool-call", toolName: "compress", toolCallId: "tc1", text: `${tag}\n${JSON.stringify(stubbedArgs)}` },
+    { id: "entry2", role: "tool", contentType: "tool-result", toolName: "compress", toolCallId: "tc1", text: `${tag}\nCompressed 3 messages into block b1` },
+  ];
+
+  const out = coreOutToAgentMessages(coreOut, originalById);
+  const tc = contentOf(out[0]!).find((b) => b.type === "toolCall");
+  assert.deepEqual(tc?.arguments, stubbedArgs, "sync uses the tool-call core text, not the tool-result core");
+});

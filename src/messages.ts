@@ -221,6 +221,14 @@ export function coreOutToAgentMessages(
 ): AgentMessage[] {
   const out: AgentMessage[] = [];
   const emittedSplit = new Set<string>();
+  const coreTextByCallId = new Map<string, string>();
+  for (const c of coreOut) {
+    // tool-result cores share the call's toolCallId — only the tool-call core
+    // ever carries the kernel-rewritten args text.
+    if (c.toolCallId && c.contentType === "tool-call" && typeof c.text === "string") {
+      coreTextByCallId.set(c.toolCallId, c.text);
+    }
+  }
 
   for (const core of coreOut) {
     if (core.id.startsWith("acp_summary_")) continue;
@@ -228,7 +236,7 @@ export function coreOutToAgentMessages(
     const hashIdx = core.id.indexOf("#");
     if (hashIdx < 0) {
       const original = originalById.get(core.id);
-      if (original) out.push(patchRefTag(original, core));
+      if (original) out.push(patchRefTag(original, core, coreTextByCallId));
       continue;
     }
 
@@ -246,7 +254,7 @@ export function coreOutToAgentMessages(
         .filter((id): id is string => !!id),
     );
 
-    out.push(reconstructToolCallMessage(original, core, survivingCallIds));
+    out.push(reconstructToolCallMessage(original, core, survivingCallIds, coreTextByCallId));
   }
 
   return out;
@@ -256,6 +264,7 @@ function reconstructToolCallMessage(
   original: AgentMessage,
   firstCore: CoreMessage,
   survivingCallIds: Set<string>,
+  coreTextByCallId: Map<string, string>,
 ): AgentMessage {
   const base = original as AnyMessage;
   const match = firstCore.text ? firstCore.text.match(REF_TAG) : null;
@@ -272,7 +281,8 @@ function reconstructToolCallMessage(
       if (b.type === "toolCall") return survivingCallIds.has(b.id ?? "");
       return true;
     });
-    const peeled2 = peelRefTagBlocks(filtered2);
+    const synced2 = syncToolCallArgs(filtered2, coreTextByCallId);
+    const peeled2 = peelRefTagBlocks(synced2);
     return { ...(original as object), content: peeled2 } as AgentMessage;
   }
 
@@ -288,7 +298,8 @@ function reconstructToolCallMessage(
     return true;
   });
 
-  const peeled = peelRefTagBlocks(filtered);
+  const synced = syncToolCallArgs(filtered, coreTextByCallId);
+  const peeled = peelRefTagBlocks(synced);
   const stableTag = rewriteTagTokens(tag, coreBodyOf(firstCore.text ?? "", tag));
   const lastTextIdx = [...peeled].reverse().findIndex((b) => (b as { type?: string }).type === "text");
   if (lastTextIdx >= 0) {
@@ -308,15 +319,58 @@ function coreBodyOf(coreText: string, tag: string): string {
   return coreText.slice(bodyStart);
 }
 
-function patchRefTag(original: AgentMessage, core: CoreMessage): AgentMessage {
-  const match = core.text ? core.text.match(REF_TAG) : null;
-  const tag = match ? match[0] : null;
-  if (!tag) return original;
+// The kernel's hide-compress-calls stage (acp-kernel #230/#232) rewrites the
+// outgoing text of live compress calls (consumed-range filter + >200-char
+// summary stubs). It only rewrites compress tool-calls, keeps everything before
+// the first `{`, and keeps the content shape (string stays string). Sync the
+// rewritten JSON back into toolCall.arguments so the provider receives the
+// slimmed args instead of the original full-args copy.
+function syncToolCallArgs(blocks: unknown[], coreTextByCallId: Map<string, string>): unknown[] {
+  let changed = false;
+  const out = blocks.map((block) => {
+    const b = block as { type?: string; name?: string; id?: string; arguments?: unknown };
+    if (b.type !== "toolCall" || b.name !== "compress" || !b.id) return block;
+    const rewritten = coreTextByCallId.get(b.id);
+    if (rewritten === undefined) return block;
+    const start = rewritten.indexOf("{");
+    if (start < 0) return block;
+    const jsonPart = rewritten.slice(start);
+    const argStr = stringifyArgs(b.arguments);
+    if (jsonPart === argStr) return block;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(jsonPart);
+    } catch {
+      return block;
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return block;
+    const content = (parsed as { content?: unknown }).content;
+    if (!Array.isArray(content) && typeof content !== "string") return block;
+    if (typeof b.arguments === "string") {
+      const prefix = argStr.indexOf("{") >= 0 ? argStr.slice(0, argStr.indexOf("{")) : "";
+      changed = true;
+      return { ...b, arguments: prefix + jsonPart };
+    }
+    changed = true;
+    return { ...b, arguments: parsed };
+  });
+  return changed ? out : blocks;
+}
+
+function patchRefTag(original: AgentMessage, core: CoreMessage, coreTextByCallId: Map<string, string>): AgentMessage {
   const base = original as AnyMessage;
   // Skip tag injection for assistant messages — the model sees tags on its own
   // previous responses and echoes them, causing visible tag fragments in the terminal.
   // The model can still reference assistant messages by inferring refs from context.
-  if (base.role === "assistant") return original;
+  if (base.role === "assistant") {
+    const blocks = Array.isArray(base.content) ? base.content : [];
+    const synced = syncToolCallArgs(blocks, coreTextByCallId);
+    if (synced === blocks) return original;
+    return { ...(original as object), content: synced } as AgentMessage;
+  }
+  const match = core.text ? core.text.match(REF_TAG) : null;
+  const tag = match ? match[0] : null;
+  if (!tag) return original;
   // Honor kernel body mutations (emergency truncation of large tool-results,
   // future rewrites): if core.text's body differs from the original text,
   // rebuild from the kernel body — otherwise truncation never reaches the model.
