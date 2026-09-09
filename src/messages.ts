@@ -59,6 +59,17 @@ function projectMessage(message: AgentMessage, id: string): CoreMessage[] {
     }];
   }
   if (role === "assistant") {
+    // Thinking parts project as `reasoning` cores with deterministic `#r<n>`
+    // sub-ids so the kernel can see (and, per reasoningReplay, strip) them;
+    // the rebuild filters the original thinking blocks by sub-id survival.
+    const thinkingTexts = thinkingBlockTexts(msg.content);
+    const splitIds = thinkingTexts.length > 0;
+    const out: CoreMessage[] = [];
+    thinkingTexts.forEach((text, i) => {
+      if (text.trim().length > 0) {
+        out.push({ id: `${id}#r${i}`, role: "assistant", contentType: "reasoning", text });
+      }
+    });
     const calls = allToolCalls(msg.content);
     if (calls.length > 0) {
       const textParts = extractText(msg.content);
@@ -66,9 +77,10 @@ function projectMessage(message: AgentMessage, id: string): CoreMessage[] {
         const call = calls[0]!;
         const argStr = stringifyArgs(call.arguments);
         const text = argStr && textParts ? `${textParts}\n${argStr}` : argStr || textParts;
-        return [{ id, role: "assistant", contentType: "tool-call", toolName: call.name, toolCallId: call.id, text }];
+        out.push({ id: splitIds ? `${id}#${call.id}` : id, role: "assistant", contentType: "tool-call", toolName: call.name, toolCallId: call.id, text });
+        return out;
       }
-      return calls.map((call) => {
+      out.push(...calls.map((call) => {
         const argStr = stringifyArgs(call.arguments);
         return {
           id: `${id}#${call.id}`,
@@ -78,18 +90,33 @@ function projectMessage(message: AgentMessage, id: string): CoreMessage[] {
           toolCallId: call.id,
           text: argStr || textParts,
         };
-      });
+      }));
+      return out;
     }
     const text = extractText(msg.content);
     // Drop thinking-only turns: empty assistant text makes OpenAI-compatible
     // providers (e.g. GLM) return 400 (no body), which Pi misreads as overflow.
     if (!text.trim()) return [];
-    return [{ id, role: "assistant", contentType: "text", text }];
+    out.push({ id: splitIds ? `${id}#t0` : id, role: "assistant", contentType: "text", text });
+    return out;
   }
   const customText = extractText(msg.content) || fallbackText(msg);
   return customText.length > 0
     ? [{ id, role: "user", contentType: "text", text: customText }]
     : [];
+}
+
+function thinkingBlockTexts(content: unknown): string[] {
+  if (!Array.isArray(content)) return [];
+  return content
+    .filter((block): block is Record<string, unknown> => {
+      if (!block || typeof block !== "object") return false;
+      return (block as { type?: string }).type === "thinking";
+    })
+    .map((block) => {
+      const text = block.thinking ?? block.text;
+      return typeof text === "string" ? text : "";
+    });
 }
 
 function fallbackText(msg: AnyMessage): string {
@@ -245,8 +272,18 @@ export function coreOutToAgentMessages(
         .map((c) => c.toolCallId)
         .filter((id): id is string => !!id),
     );
+    const survivingSubIds = new Set(
+      coreOut
+        .filter((c) => c.id.startsWith(`${baseId}#`) && !c.id.startsWith("acp_summary_"))
+        .map((c) => c.id),
+    );
+    const coreTextByCallId = new Map(
+      coreOut
+        .filter((c) => c.id.startsWith(`${baseId}#`) && c.toolCallId)
+        .map((c) => [c.toolCallId as string, c.text]),
+    );
 
-    out.push(reconstructToolCallMessage(original, core, survivingCallIds));
+    out.push(reconstructToolCallMessage(original, core, survivingCallIds, baseId, survivingSubIds, coreTextByCallId));
   }
 
   return out;
@@ -256,10 +293,47 @@ function reconstructToolCallMessage(
   original: AgentMessage,
   firstCore: CoreMessage,
   survivingCallIds: Set<string>,
+  baseId?: string,
+  survivingSubIds?: Set<string>,
+  coreTextByCallId?: Map<string, string | undefined>,
 ): AgentMessage {
   const base = original as AnyMessage;
   const match = firstCore.text ? firstCore.text.match(REF_TAG) : null;
   const tag = match ? match[0] : null;
+
+  const filterBlocks = (blocks: unknown[]): unknown[] => {
+    let reasoningIndex = 0;
+    return blocks.filter((block) => {
+      const b = block as { type?: string; id?: string };
+      if (b.type === "toolCall") return survivingCallIds.has(b.id ?? "");
+      if (b.type === "thinking") {
+        const subId = baseId !== undefined && survivingSubIds !== undefined
+          ? `${baseId}#r${reasoningIndex}`
+          : null;
+        reasoningIndex++;
+        if (subId === null) return true;
+        return survivingSubIds!.has(subId);
+      }
+      return true;
+    }).map((block) => {
+      // The kernel may have rewritten a compress call's text (live-range
+      // filter, summary stubs). Sync it back so the rewritten form — not the
+      // original full-args JSON — is what the provider receives.
+      const b = block as { type?: string; id?: string; arguments?: unknown };
+      if (b.type !== "toolCall" || !coreTextByCallId) return block;
+      const rewritten = coreTextByCallId.get(b.id ?? "");
+      if (rewritten === undefined) return block;
+      const argStr = stringifyArgs(b.arguments);
+      if (rewritten === argStr || !argStr) return block;
+      const start = rewritten.indexOf("{");
+      if (start < 0) return block;
+      try {
+        return { ...b, arguments: JSON.parse(rewritten.slice(start)) };
+      } catch {
+        return block;
+      }
+    });
+  };
 
   if (base.role === "assistant" || !tag) {
     const rawBlocks2: unknown[] = Array.isArray(base.content)
@@ -267,11 +341,7 @@ function reconstructToolCallMessage(
       : typeof base.content === "string"
         ? [{ type: "text", text: base.content }]
         : [];
-    const filtered2 = rawBlocks2.filter((block) => {
-      const b = block as { type?: string; id?: string };
-      if (b.type === "toolCall") return survivingCallIds.has(b.id ?? "");
-      return true;
-    });
+    const filtered2 = filterBlocks(rawBlocks2);
     const peeled2 = peelRefTagBlocks(filtered2);
     return { ...(original as object), content: peeled2 } as AgentMessage;
   }
@@ -282,11 +352,7 @@ function reconstructToolCallMessage(
       ? [{ type: "text", text: base.content }]
       : [];
 
-  const filtered = rawBlocks.filter((block) => {
-    const b = block as { type?: string; id?: string };
-    if (b.type === "toolCall") return survivingCallIds.has(b.id ?? "");
-    return true;
-  });
+  const filtered = filterBlocks(rawBlocks);
 
   const peeled = peelRefTagBlocks(filtered);
   const stableTag = rewriteTagTokens(tag, coreBodyOf(firstCore.text ?? "", tag));

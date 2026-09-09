@@ -103,16 +103,20 @@ test("entriesToCoreMessages drops thinking-only assistant turns (no empty assist
   );
 });
 
-test("entriesToCoreMessages keeps assistant turn that has thinking AND text (text extracted, thinking ignored)", () => {
+test("entriesToCoreMessages keeps assistant turn that has thinking AND text (reasoning projected with #r sub-id, text with #t0)", () => {
   const entries: SessionEntry[] = [
     msgEntry("a", assistantThinkingAndText("private reasoning", "visible answer") as object),
   ];
   const core = entriesToCoreMessages(entries);
 
-  assert.equal(core.length, 1);
+  assert.equal(core.length, 2);
   assert.equal(core[0]!.role, "assistant");
-  assert.equal(core[0]!.contentType, "text");
-  assert.equal(core[0]!.text, "visible answer", "text kept, thinking block not inlined");
+  assert.equal(core[0]!.contentType, "reasoning");
+  assert.equal(core[0]!.id, "a#r0");
+  assert.equal(core[0]!.text, "private reasoning");
+  assert.equal(core[1]!.contentType, "text");
+  assert.equal(core[1]!.id, "a#t0");
+  assert.equal(core[1]!.text, "visible answer", "text kept, thinking block not inlined");
 });
 
 test("entriesToCoreMessages drops assistant turn whose text is whitespace-only", () => {
