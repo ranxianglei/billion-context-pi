@@ -19,7 +19,7 @@ import { makeStatusTool } from "./status-tool.js";
 import { makeDelegateTool, makeDelegateWaitTool, makeDelegateCancelTool, runningRunsSnapshot, resetDelegateUsage, setDelegateDisplayUsage, setDelegatePolicy, setDelegateDefaults, setDelegateNotifyIfRead, markDelegateResultRead, markDelegateRunReadByCommand } from "./delegate-tool.js";
 import { makeCommands } from "./commands.js";
 import { coreOutToAgentMessages, extractText } from "./messages.js";
-import { dropCompressReasoning } from "./reasoning-drop.js";
+import { countThinkingChars, dropCompressReasoning } from "./reasoning-drop.js";
 import { buildAcpSystemPrompt, ACP_DELEGATE_PROMPT } from "./system-prompt.js";
 import { delegateStatusWidget } from "./fleet-widget.js";
 import { openFleetInspector } from "./fleet-inspector.js";
@@ -412,7 +412,8 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     const reasoningDrop = runtime.reasoningDropFor(ctx);
     const droppedThinking = dropCompressReasoning(rebuilt, reasoningDrop);
     if (droppedThinking !== rebuilt) {
-      debug.event("reasoning-drop", { sid, dropped: droppedThinking.length, drop: reasoningDrop.drop, threshold: reasoningDrop.threshold });
+      const droppedChars = countThinkingChars(rebuilt) - countThinkingChars(droppedThinking);
+      debug.event("reasoning-drop", { sid, droppedChars, drop: reasoningDrop.drop, threshold: reasoningDrop.threshold });
     }
     rebuilt = droppedThinking;
     const debugOn = debug.enabled;

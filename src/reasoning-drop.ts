@@ -84,6 +84,10 @@ function reasoningLength(content: unknown): number {
   return content.reduce((n, p) => (isThinking(p) ? n + p.thinking.length : n), 0);
 }
 
+export function countThinkingChars(messages: AgentMessage[]): number {
+  return messages.reduce((n, m) => n + reasoningLength((m as { content?: unknown }).content), 0);
+}
+
 /** Request-time pass aligned with opencode-acp #377: remove `thinking` parts
  *  from a message only when ALL gates hold —
  *  1. closed round [#348]: EVERY `compress` toolCall in the message has its
