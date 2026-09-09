@@ -191,9 +191,10 @@ export interface AdapterConfig {
   /** Reasoning-block replay policy (kernel reasoningReplay). Default:
    *  "open-round" — history thinking is stripped from the outgoing view once
    *  its round closes; providers only require replaying thinking for the
-   *  current unresolved round. Set "always" to restore legacy keep-everything
-   *  behavior, "never" to strip even the open round. Kill-switch for
-   *  billion-context-pi #336. */
+   *  current unresolved round. GPT-family providers/models default to
+   *  "always" (legacy keep-everything — OpenAI reasoning items are opaque
+   *  and untestable from here). Set "always"/"never" explicitly to override
+   *  either default; coreOverrides wins. Kill-switch for #336. */
   reasoningReplay?: "always" | "open-round" | "never";
   preserveRecentMessages?: number;
   /** Check npm for a newer billion-context-pi on startup and auto-install it. Default: true.
@@ -401,7 +402,7 @@ export function resolveConfig(adapter: AdapterConfig, liveContextLimit: number, 
     preserveRecentMessages: adapter.preserveRecentMessages ?? 5,
     ...adapter.coreOverrides,
   });
-  config.reasoningReplay = adapter.coreOverrides?.reasoningReplay ?? adapter.reasoningReplay ?? "open-round";
+  config.reasoningReplay = adapter.coreOverrides?.reasoningReplay ?? adapter.reasoningReplay ?? defaultReasoningReplay(provider, modelId);
   const c = resolveCompress(adapter.compress, provider, modelId);
   if (c.maxContextLimit !== undefined) config.nudge.maxContextLimitPct = parsePercent(c.maxContextLimit);
   if (c.emergencyThresholdPercent !== undefined) {
@@ -424,4 +425,15 @@ export function parsePercent(v: number | string): number {
   const s = v.trim();
   if (s.endsWith("%")) return Number(s.slice(0, -1)) / 100;
   return Number(s);
+}
+
+// OpenAI reasoning models hand back opaque encrypted reasoning items that
+// must be echoed back unmodified (Responses API), and we cannot test that
+// path from here — GPT-family providers/models default to the legacy
+// keep-everything behavior. Explicit reasoningReplay config always wins.
+const GPT_FAMILY = /(^|[^a-z0-9])(gpt-|o[134](-|\d|\/|$)|codex|openai)/i;
+
+export function defaultReasoningReplay(provider?: string, modelId?: string): "always" | "open-round" {
+  const hay = `${provider ?? ""} ${modelId ?? ""}`;
+  return GPT_FAMILY.test(hay) ? "always" : "open-round";
 }

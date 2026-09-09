@@ -107,3 +107,17 @@ test("resolveConfig defaults reasoningReplay to open-round and honors overrides"
   const viaCore = resolveConfig({ coreOverrides: { reasoningReplay: "never" } }, 262144);
   assert.equal(viaCore.reasoningReplay, "never");
 });
+
+test("reasoningReplay defaults conservatively for GPT-family provider/model", () => {
+  assert.equal(resolveConfig({}, 262144, "openai", "gpt-5").reasoningReplay, "always");
+  assert.equal(resolveConfig({}, 262144, undefined, "o3-mini").reasoningReplay, "always");
+  assert.equal(resolveConfig({}, 262144, "openai-compatible", "gpt-4o").reasoningReplay, "always");
+  assert.equal(resolveConfig({}, 262144, "zhipuai-lb", "glm-5.3").reasoningReplay, "open-round");
+  assert.equal(resolveConfig({}, 262144, undefined, "qwen3.8-27b").reasoningReplay, "open-round");
+  assert.equal(resolveConfig({}, 262144, undefined, "llama-3").reasoningReplay, "open-round");
+});
+
+test("explicit reasoningReplay beats the GPT-family default", () => {
+  assert.equal(resolveConfig({ reasoningReplay: "open-round" }, 262144, "openai", "gpt-5").reasoningReplay, "open-round");
+  assert.equal(resolveConfig({ reasoningReplay: "always" }, 262144, "zhipuai-lb", "glm-5.3").reasoningReplay, "always");
+});
