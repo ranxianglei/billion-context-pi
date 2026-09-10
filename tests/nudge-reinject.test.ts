@@ -8,13 +8,16 @@ import { createAcpExtension } from "../src/index.js";
 // the 95% emergency band (per-turn suppression → mechanical truncation) with
 // no fresh reminder on the growth in between. Fix: once the context has grown
 // by a full growth floor (mirroring the kernel's decideNudge cadence:
-// max(minGrowthFloor, minGrowthRatio × adaptiveGrowth) — for the defaults
-// below, 0.45 × 50 000 = 22 500), the nudge re-injects within the same turn.
+// max(minGrowthFloor, minGrowthRatio × adaptiveGrowth) — with the Pi host
+// defaults below, 0.45 × 100 000 = 45 000 (#359)), the nudge re-injects
+// within the same turn.
 // After a successful compress the baseline re-anchors (mirror of the kernel's
 // nudgeNode drop re-anchor), so post-compress regrowth into the pressure band
 // re-injects without needing to exceed the old peak.
 
-const LIMIT = 180_000;
+// Test 1 needs a wide window: at the 45K re-inject floor the first pressure
+// injection (≥75%) and the re-inject point (+45K, <95%) must both fit inside
+// the pressure band — impossible under 233K windows.
 function captureApi() {
   const handlers = new Map<string, ((event: any, ctx: any) => any)[]>();
   const api = {
@@ -36,28 +39,28 @@ function msg(id: string, role: string, text: string, over: Record<string, unknow
 }
 
 const MID = "lorem ".repeat(3000);
-const COMPRESS_PANEL = "▣ ACP | 120.5K → 55.1K tokens (~65.4K reclaimed, 2 blocks)";
+const COMPRESS_PANEL = "▣ ACP | 250.0K → 130.0K tokens (~120.0K reclaimed, 2 blocks)";
 
 let branchEntries: any[] = [];
 let stateFile = "";
 
-function fakeCtx(tokens: number) {
+function fakeCtx(tokens: number, limit: number) {
   return {
     mode: "rpc" as const,
     hasUI: false,
     ui: { notify: () => {}, confirm: async () => true, select: async () => undefined, input: async () => "", setStatus: () => {} },
-    model: { contextWindow: LIMIT },
+    model: { contextWindow: limit },
     sessionManager: {
       getBranch: () => branchEntries as any[],
       getSessionId: () => "reinject",
       getSessionFile: () => stateFile,
     },
-    getContextUsage: () => ({ tokens, percent: tokens / LIMIT, contextWindow: LIMIT }),
+    getContextUsage: () => ({ tokens, percent: tokens / limit, contextWindow: limit }),
   };
 }
 
-const fire = (handlers: Map<string, ((e: any, ctx: any) => any)[]>, entries: any[], tokens: number) =>
-  handlers.get("context")![0]!({ type: "context", messages: entries.map((e) => e.message) }, fakeCtx(tokens));
+const fire = (handlers: Map<string, ((e: any, ctx: any) => any)[]>, entries: any[], tokens: number, limit: number) =>
+  handlers.get("context")![0]!({ type: "context", messages: entries.map((e) => e.message) }, fakeCtx(tokens, limit));
 
 // Six MID-sized messages (~11K compressible mass, above the 5K
 // minPressureBenefit floor) ending in the anchor assistant. The LAST USER
@@ -85,62 +88,70 @@ const nudgeCount = (rebuilt: any[]) =>
   }).length;
 
 test("same-turn pressure nudge re-injects only after a full growth floor (issue #269)", async () => {
+  const LIMIT_A = 280_000;
   stateFile = "/tmp/pai-acp-reinject-a.session.json";
   await rm(`${stateFile}.acp.json`, { force: true });
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: LIMIT })(api as any);
+  createAcpExtension({ modelContextLimit: LIMIT_A })(api as any);
 
-  // Event 1 — 140K/180K = 78%: pressure nudge injects (mark at 140K).
-  branchEntries = [...bulk(), anchor(140_000)];
-  const r1 = (await fire(handlers, branchEntries, 140_000)).messages;
-  assert.equal(nudgeCount(r1), 1, "78% pressure nudge injects");
+  // Event 1 — 215K/280K = 76.8%: pressure nudge injects (mark at 215K).
+  branchEntries = [...bulk(), anchor(215_000)];
+  const r1 = (await fire(handlers, branchEntries, 215_000, LIMIT_A)).messages;
+  assert.equal(nudgeCount(r1), 1, "76.8% pressure nudge injects");
 
-  // Event 2 — same turn, +2K growth (< floor): suppressed.
-  branchEntries = [...bulk(), anchor(142_000)];
-  const r2 = (await fire(handlers, branchEntries, 142_000)).messages;
+  // Event 2 — same turn, +2K growth (< 45K floor): suppressed.
+  branchEntries = [...bulk(), anchor(217_000)];
+  const r2 = (await fire(handlers, branchEntries, 217_000, LIMIT_A)).messages;
   assert.equal(nudgeCount(r2), 0, "small same-turn growth stays suppressed");
 
-  // Event 3 — same turn, +23K growth (>= floor): re-injects.
-  branchEntries = [...bulk(), anchor(163_000)];
-  const r3 = (await fire(handlers, branchEntries, 163_000)).messages;
+  // Event 3 — same turn, +49K growth (>= 45K floor): re-injects.
+  branchEntries = [...bulk(), anchor(264_000)];
+  const r3 = (await fire(handlers, branchEntries, 264_000, LIMIT_A)).messages;
   assert.equal(nudgeCount(r3), 1, "growth past the re-inject floor re-shows within the turn");
 });
 
 test("drop re-anchor: post-compress regrowth into the pressure band re-injects without exceeding the old peak", async () => {
+  // Also needs a wide window: the collapse must beat the drop-reanchor gate
+  // (tokenCount < peak − adaptiveGrowth, i.e. 100K at the #359 defaults) while
+  // the regrown point sits in the pressure band yet UNDER the old peak.
+  const LIMIT_B = 280_000;
   stateFile = "/tmp/pai-acp-reinject-b.session.json";
   await rm(`${stateFile}.acp.json`, { force: true });
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: LIMIT })(api as any);
+  createAcpExtension({ modelContextLimit: LIMIT_B })(api as any);
 
-  // Inject at 150K, then a successful compress collapses the anchor scale.
-  branchEntries = [...bulk(), anchor(150_000)];
-  const r1 = (await fire(handlers, branchEntries, 150_000)).messages;
-  assert.equal(nudgeCount(r1), 1, "83% pressure nudge injects");
+  // Inject at 250K (89.3%, pressure), then a successful compress collapses the anchor scale.
+  branchEntries = [...bulk(), anchor(250_000)];
+  const r1 = (await fire(handlers, branchEntries, 250_000, LIMIT_B)).messages;
+  assert.equal(nudgeCount(r1), 1, "89.3% pressure nudge injects");
 
-  // Post-compress: the compress toolResult predates the fresh 90K anchor, so
-  // the meter runs on the provider scale at 90K. 90K < 150K − 50K → the
-  // baseline re-anchors to 90K (no nudge at 50% usage).
-  branchEntries = [...bulk(), { type: "message", id: "c1", parentId: null, timestamp: "", message: { role: "toolResult", toolName: "compress", toolCallId: "tc1", content: [{ type: "text", text: COMPRESS_PANEL }], timestamp: Date.now() } }, anchor(90_000)];
-  const r2 = (await fire(handlers, branchEntries, 90_000)).messages;
+  // Post-compress: the compress toolResult predates the fresh 130K anchor, so
+  // the meter runs on the provider scale at 130K. 130K < 250K − 100K → the
+  // baseline re-anchors to 130K (no nudge at 46.4% usage).
+  branchEntries = [...bulk(), { type: "message", id: "c1", parentId: null, timestamp: "", message: { role: "toolResult", toolName: "compress", toolCallId: "tc1", content: [{ type: "text", text: COMPRESS_PANEL }], timestamp: Date.now() } }, anchor(130_000)];
+  const r2 = (await fire(handlers, branchEntries, 130_000, LIMIT_B)).messages;
   assert.equal(nudgeCount(r2), 0, "post-compress regrowth stays quiet below the pressure band");
 
-  // Regrow to 136K (75.6%, pressure). Without the drop re-anchor the baseline
-  // would still be the 150K peak (growth −14K < floor) and the nudge would be
-  // suppressed straight into the emergency band — the exact #269 escalation.
-  branchEntries = [...bulk(), { type: "message", id: "c1", parentId: null, timestamp: "", message: { role: "toolResult", toolName: "compress", toolCallId: "tc1", content: [{ type: "text", text: COMPRESS_PANEL }], timestamp: Date.now() } }, anchor(136_000)];
-  const r3 = (await fire(handlers, branchEntries, 136_000)).messages;
+  // Regrow to 220K (78.6%, pressure, still 30K under the 250K peak). With the
+  // re-anchored 130K baseline growth is +90K >= 45K floor → passes. Without it
+  // the baseline would still be the 250K peak (growth −30K < floor) and the
+  // nudge would be suppressed straight into the emergency band — the exact
+  // #269 escalation.
+  branchEntries = [...bulk(), { type: "message", id: "c1", parentId: null, timestamp: "", message: { role: "toolResult", toolName: "compress", toolCallId: "tc1", content: [{ type: "text", text: COMPRESS_PANEL }], timestamp: Date.now() } }, anchor(220_000)];
+  const r3 = (await fire(handlers, branchEntries, 220_000, LIMIT_B)).messages;
   assert.equal(nudgeCount(r3), 1, "re-anchored baseline lets the regrown pressure nudge through");
 });
 
 test("emergency bypass is unchanged (95% injects on every event)", async () => {
+  const LIMIT_C = 180_000;
   stateFile = "/tmp/pai-acp-reinject-c.session.json";
   await rm(`${stateFile}.acp.json`, { force: true });
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: LIMIT })(api as any);
+  createAcpExtension({ modelContextLimit: LIMIT_C })(api as any);
 
   branchEntries = [...bulk(), anchor(175_000)];
-  const r1 = (await fire(handlers, branchEntries, 175_000)).messages;
+  const r1 = (await fire(handlers, branchEntries, 175_000, LIMIT_C)).messages;
   assert.equal(nudgeCount(r1), 1, "emergency injects");
-  const r2 = (await fire(handlers, branchEntries, 175_000)).messages;
+  const r2 = (await fire(handlers, branchEntries, 175_000, LIMIT_C)).messages;
   assert.equal(nudgeCount(r2), 1, "emergency keeps injecting without a growth floor");
 });

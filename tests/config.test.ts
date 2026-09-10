@@ -76,10 +76,10 @@ test("resolveConfig maps compress.nudgeGrowthTokens to both growthFloor and grow
   assert.equal(cfg.nudge.growthCap, 30000);
 });
 
-test("resolveConfig leaves growthFloor/growthCap at kernel defaults when compress.nudgeGrowthTokens omitted", () => {
+test("resolveConfig applies the Pi host default growth step (100000, #359) when compress.nudgeGrowthTokens omitted", () => {
   const cfg = resolveConfig(EMPTY, 1_000_000);
-  assert.equal(cfg.nudge.growthFloor, 50000);
-  assert.equal(cfg.nudge.growthCap, 50000);
+  assert.equal(cfg.nudge.growthFloor, 100000);
+  assert.equal(cfg.nudge.growthCap, 100000);
 });
 
 test("resolveConfig maps compress.minPressureBenefitTokens to kernel nudge (0 = legacy any-pending)", () => {

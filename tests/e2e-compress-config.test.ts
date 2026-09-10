@@ -95,7 +95,7 @@ test("e2e compress config: without a config file the kernel defaults apply", asy
         const cfg = runtime.configFor(ctxFor("anthropic", "claude-sonnet-4-5", 200_000));
         assert.equal(cfg.nudge.maxContextLimitPct, 0.75, "kernel default maxContextLimitPct");
         assert.equal(cfg.nudge.emergencyThresholdPct, 0.95, "kernel default emergencyThresholdPct");
-        assert.equal(cfg.nudge.growthFloor, 50000, "kernel default growthFloor");
+        assert.equal(cfg.nudge.growthFloor, 100000, "Pi host default growthFloor (#359)");
     });
     process.env.HOME = savedHome;
 });

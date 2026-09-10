@@ -49,7 +49,7 @@ Create `~/.pi/acp.json` (or `<project>/.pi/acp.json`) and drop in whichever keys
   "compress": {
     "maxContextLimit": "75%",
     "emergencyThresholdPercent": "95%",
-    "nudgeGrowthTokens": 50000,
+    "nudgeGrowthTokens": 100000,
     "reasoning": { "drop": true, "threshold": 2048 }
   }
 }
@@ -146,7 +146,7 @@ All keys below are currently **ACTIVE**.
 |-----|------|---------|--------|-------------|
 | `compress.maxContextLimit` | number \| string | `"75%"` | 🟢 ACTIVE | Context threshold that triggers forced compression nudges. |
 | `compress.emergencyThresholdPercent` | number \| string | `"95%"` | 🟢 ACTIVE | Context threshold that triggers emergency truncation. |
-| `compress.nudgeGrowthTokens` | number | `50000` | 🟢 ACTIVE | Token growth step for soft compression nudges. |
+| `compress.nudgeGrowthTokens` | number | `100000` | 🟢 ACTIVE | Token growth step for soft compression nudges. |
 | `compress.reasoning` | object | `{ "drop": true, "threshold": 2048 }` | 🟢 ACTIVE | Drop oversized thinking from historical `compress` calls (request-time; persisted history untouched). |
 
 **Prompts keys**
@@ -512,10 +512,12 @@ The flow is:
 ### `compress.nudgeGrowthTokens`
 
 - **Type:** `number`
-- **Default:** `50000`
+- **Default:** `100000` (Pi host; the kernel's own default is `50000`)
 - **Status:** 🟢 ACTIVE
 - **Description:** The token-growth threshold that controls the cadence of **soft** compression nudges. A soft nudge fires roughly every time this many tokens of new compressible content accumulate. A lower value means the model is nudged to compress more often; a higher value means less frequent nudges. This only governs *growth-driven* nudges — once usage crosses `compress.maxContextLimit`, forced nudges take over regardless of this setting. Maps to the kernel settings `nudge.growthFloor` and `nudge.growthCap`.
-- **Same-turn re-inject:** within one user turn a nudge injects at most once, but once the context has since grown by a full growth floor (mirroring the kernel's anti-thrashing cadence: `max(minGrowthFloor, minGrowthRatio × adaptiveGrowth)` — 22.5K tokens with defaults) a fresh reminder re-injects in the same turn (issue #269: a model that ignored a 78% nudge used to stay silent until the 95% emergency truncation). After a successful compress the growth baseline re-anchors to the new (smaller) scale, so post-compress regrowth into the pressure band is not held against the pre-compress peak.
+- **Why 100K (fold-cadence economics, #359):** every fold has a one-time cost — the non-hit tail of the post-fold view is re-paid at write price once, and the fold's summary is generated at output price (≈3–5× input) — while the reclaimed tokens pay back in only a few turns (measured break-even ≈ 4–6 turns vs ~20-turn fold intervals, i.e. folds are net-positive even at a slow cadence). Doubling the step from the kernel's 50K halves interruption frequency and per-fold summary output without going net-negative. This is the Pi host's product choice; the kernel's own default stays 50K for other hosts. Set `nudgeGrowthTokens` explicitly to override.
+- **Observability (#359):** each successful fold logs its invalidation geometry to `acp.log`: `event=applied … firstFoldStartPct=<f> retainedPctUpperBound=<g>`. `firstFoldStartPct` = earliest fold start / pre-fold view ≈ expected first-round prompt-cache hit fraction after the fold; `retainedPctUpperBound` = afterTokens/beforeTokens, an upper bound on how much of the prefix can remain cache-warm (longest common prefix ≤ surviving token fraction).
+- **Same-turn re-inject:** within one user turn a nudge injects at most once, but once the context has since grown by a full growth floor (mirroring the kernel's anti-thrashing cadence: `max(minGrowthFloor, minGrowthRatio × adaptiveGrowth)` — 45K tokens with defaults) a fresh reminder re-injects in the same turn (issue #269: a model that ignored a 78% nudge used to stay silent until the 95% emergency truncation). After a successful compress the growth baseline re-anchors to the new (smaller) scale, so post-compress regrowth into the pressure band is not held against the pre-compress peak.
 
 ### `compress.reasoning`
 
@@ -551,7 +553,7 @@ The provider key is the **Pi provider name** (e.g. `"anthropic"`, `"openai"`, `"
   "compress": {
     "maxContextLimit": "75%",
     "emergencyThresholdPercent": "95%",
-    "nudgeGrowthTokens": 50000,
+    "nudgeGrowthTokens": 100000,
     "providers": {
       "anthropic": {
         "maxContextLimit": "80%",

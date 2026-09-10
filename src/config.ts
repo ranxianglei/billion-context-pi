@@ -121,8 +121,12 @@ export interface CompressSettings {
    *  Default: 0.95. Must be >= maxContextLimit. Maps to kernel
    *  nudge.emergencyThresholdPct + truncate.threshold. */
   emergencyThresholdPercent?: number | string;
-  /** Token growth threshold for soft compression nudges. Default: 50000.
-   *  Maps to kernel nudge.growthFloor + nudge.growthCap. */
+  /** Token growth threshold for soft compression nudges. Default: 100000
+   *  (Pi host default — 2× the kernel's 50000, raised per #359 fold-cadence
+   *  economics: each fold pays a one-time non-hit re-pay plus its summary at
+   *  output price, while paying back in only a few turns, so a slower cadence
+   *  is net-positive and halves interruption/output overhead). Maps to kernel
+   *  nudge.growthFloor + nudge.growthCap. */
   nudgeGrowthTokens?: number;
   /** Minimum reclaimable tokens for a pressure-band nudge (kernel #198).
    *  Default: max(5000, round(limit×0.01)). Explicit 0 restores the legacy
@@ -402,6 +406,12 @@ export function resolveCompress(
   return mergeCompress(compress, prov, model);
 }
 
+// #359: Pi host default for the soft-nudge growth step. The kernel's own
+// default (50K) is left intact for other hosts; for windows ≤1M tokens the
+// kernel's adaptive formula resolves the effective step to growthFloor anyway
+// (growthRatio 0.05 × limit < floor), so this cleanly doubles the cadence.
+export const DEFAULT_NUDGE_GROWTH_TOKENS = 100_000;
+
 export function resolveConfig(adapter: AdapterConfig, liveContextLimit: number, provider?: string, modelId?: string): Config {
   const envLimit = process.env.ACP_MODEL_CONTEXT_LIMIT;
   const envLimitNum = envLimit ? Number(envLimit) : NaN;
@@ -429,6 +439,9 @@ export function resolveConfig(adapter: AdapterConfig, liveContextLimit: number, 
   if (c.nudgeGrowthTokens !== undefined) {
     config.nudge.growthFloor = c.nudgeGrowthTokens;
     config.nudge.growthCap = c.nudgeGrowthTokens;
+  } else {
+    config.nudge.growthFloor = DEFAULT_NUDGE_GROWTH_TOKENS;
+    config.nudge.growthCap = DEFAULT_NUDGE_GROWTH_TOKENS;
   }
   if (c.minPressureBenefitTokens !== undefined) {
     config.nudge.minPressureBenefitTokens = c.minPressureBenefitTokens;
