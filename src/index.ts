@@ -46,6 +46,14 @@ import { UNSUPPORTED_HOST_MESSAGE } from "./omp.js";
 import { isUnsupportedHost } from "./host.js";
 import { isBiliProxyBaseUrl, PROXY_STAND_DOWN_MESSAGE } from "./proxy-detect.js";
 
+// Host-facing API for multi-session hosts (docs/host-adapter.md, #367): the
+// extension keeps its own runtime instance private; hosts build their own via
+// createRuntime — derivation works across instances because it only touches
+// on-disk sidecars through session refs.
+export { createRuntime } from "./runtime.js";
+export type { AcpRuntime, SessionRef } from "./runtime.js";
+export { deriveChildState } from "./state.js";
+
 type AgentMessage = SessionMessageEntry["message"];
 
 declare const CURRENT_VERSION: string;

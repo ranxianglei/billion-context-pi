@@ -101,18 +101,26 @@ Reset (the child starts its own clock):
 
 ### API surfaces
 
-1. **Pure transformation** — `deriveChildState(parentState)` exported from `src/state.js`:
+Both surfaces are exported from the **package entrypoint** (`import ... from "billion-context-pi"`);
+no subpath imports and no access to the extension factory's internal instance:
+
+1. **Pure transformation** — `deriveChildState(parentState)`:
    `CompressionState → CompressionState`. For hosts that manage state objects themselves.
-2. **Orchestrated** — `runtime.deriveChildState(childRef, parentRef) → Promise<boolean>` on
-   the extension runtime, where a ref is `{ sessionId: string; sessionFile?: string }`.
-   It loads the parent state, applies the pure transformation, writes the one-time marker,
-   and persists to the child sidecar. Because it operates on on-disk sidecars through
-   session refs (no live contexts needed), it works even when the two sessions belong to
-   different runtime instances.
+2. **Orchestrated** — `createRuntime(adapter)` returns an `AcpRuntime`; call
+   `runtime.deriveChildState(childRef, parentRef) → Promise<boolean>` on it, where a ref is
+   `{ sessionId: string; sessionFile?: string }` (`SessionRef`). It loads the parent state,
+   applies the pure transformation, writes the one-time marker, and persists to the child
+   sidecar. Because it operates on on-disk sidecars through session refs (no live contexts
+   needed), it works even when the two sessions belong to different runtime instances —
+   including the extension's own private instance. Pass the same `AdapterConfig` you would
+   give `createAcpExtension` (an empty object suffices for derivation alone).
 
 Host-side usage (once, before the child's first context event):
 
 ```ts
+import { createRuntime } from "billion-context-pi";
+
+const runtime = createRuntime(adapter); // same AdapterConfig as createAcpExtension; {} also works
 await runtime.deriveChildState(
   { sessionId: childSm.getSessionId(), sessionFile: childSm.getSessionFile() ?? undefined },
   { sessionId: parentSm.getSessionId(), sessionFile: parentSm.getSessionFile() ?? undefined },
