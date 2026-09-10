@@ -7,7 +7,9 @@ import type {
 import type { AcpRuntime } from "./runtime.js";
 import { MAX_COMPRESS_ATTEMPTS } from "./runtime.js";
 import { debug, logError, logInfo, logThrow, logWarn } from "./log.js";
-import { estimateTokens, collectCoveredMessageIds, collectImageTokens, modelSupportsImages, lastUserMessageId, adjustedTokenCount } from "./tokens.js";
+import { estimateTokens, collectCoveredMessageIds, collectImageTokens, modelSupportsImages, adjustedTokenCount } from "./tokens.js";
+import { lastTurnBoundaryId } from "./turn-boundary.js";
+import { resolveHostSession } from "./config.js";
 import { defaultCountTokens, parseCompressArgs, viableRanges, formatRanges, type CompressionBlock, type CompressionState, type CompressParseDiagnostics, type NudgeDecision } from "acp-kernel";
 import { countUnicodeEscapes, findUnverifiableUserQuote, sanitizeSummary } from "./summary-sanitize.js";
 import { getSystemPromptText } from "./compat.js";
@@ -339,7 +341,7 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
     }
     return s.text === r.summary ? r : { ...r, summary: s.text };
   });
-  const turnKey = lastUserMessageId(entries) ?? sid;
+  const turnKey = lastTurnBoundaryId(entries, resolveHostSession(runtime.adapter)) ?? sid;
   const snapshot = compressibleSnapshotText(turn.nudge);
   if (runtime.compressRetryCappedFor(sid, turnKey)) {
     logWarn("compress", { sid, event: "capped-reject", turnKey });

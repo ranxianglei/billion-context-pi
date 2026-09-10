@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { homedir } from "node:os";
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 import type { Prompts } from "acp-kernel";
-import type { AdapterConfig, CompressConfig, DelegateConfig, RepetitionGuardConfig } from "./config.js";
+import type { AdapterConfig, CompressConfig, DelegateConfig, HostSessionConfig, RepetitionGuardConfig } from "./config.js";
 import type { DegenerationGuardConfig } from "./degeneration.js";
 import type { ThrottleRetryConfig } from "./throttle-retry.js";
 import { debug, logWarn } from "./log.js";
@@ -27,6 +27,7 @@ export interface UserAcpConfig {
   displayUsage?: "merged" | "separate";
   prompts?: Partial<Prompts>;
   acknowledgePromptsRisk?: boolean;
+  hostSession?: boolean | HostSessionConfig;
 }
 
 /** Read global + project acp.json, project overrides global. Returns {} on any
@@ -64,6 +65,7 @@ const KNOWN = new Set([
   "outputHeadroomMaxPct",
   "repetitionGuard", "degenerationGuard",
   "prompts", "acknowledgePromptsRisk",
+  "hostSession",
 ]);
 
 function pickKnown(parsed: Record<string, unknown>): UserAcpConfig {

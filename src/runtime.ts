@@ -1,4 +1,5 @@
 import type { ExtensionContext, SessionEntry, SessionMessageEntry } from "@earendil-works/pi-coding-agent";
+import { readFileSync } from "node:fs";
 import {
   createCore,
   defaultCountTokens,
@@ -11,7 +12,7 @@ import {
 import { resolveCompress, resolveConfig, type AdapterConfig } from "./config.js";
 import { resolveReasoningDrop, type CompressReasoningConfig } from "./reasoning-drop.js";
 import { entriesToCoreMessages, extractText, matchesStoredText, messageIdentity, messageRef } from "./messages.js";
-import { SessionStateStore, type LiveRefOrigin } from "./state.js";
+import { SessionStateStore, deriveChildState, type LiveRefOrigin } from "./state.js";
 import { hasCompressHistory, rebuildStateFromLog } from "./state-rebuild.js";
 import { loadUserConfig, applyUserConfig } from "./user-config.js";
 import { ThrottleEpisode } from "./throttle-retry.js";
@@ -38,6 +39,14 @@ export function readContextEntries(sm: ExtensionContext["sessionManager"]): Sess
 export function isPiHost(sm: ExtensionContext["sessionManager"]): boolean {
   const source = sm as unknown as SessionEntrySource;
   return typeof source.buildContextEntries === "function";
+}
+
+/** Minimal identity of a session for state operations that don't need a live
+ *  ExtensionContext (hosts deriving inline child sessions build these from
+ *  whatever session handles they hold). */
+export interface SessionRef {
+  sessionId: string;
+  sessionFile?: string;
 }
 
 export interface AcpRuntime {
@@ -103,6 +112,16 @@ export interface AcpRuntime {
   reloadConfig(cwd: string): Promise<void>;
   stateFor(ctx: ExtensionContext, liveMessages?: AgentMessage[]): Promise<{ state: CompressionState; coreMessages: ReturnType<typeof entriesToCoreMessages>; entries: SessionEntry[] }>;
   save(state: CompressionState, ctx: ExtensionContext): Promise<void>;
+  /** #364 inline child sessions (same process, e.g. Prime RLM): derive the
+   *  child's compression state from another session's. Inherits blocks /
+   *  message refs / token snapshot so decompress + search_context keep working
+   *  on inherited blocks; resets every rhythm ledger (nudge cadence, stats,
+   *  absorb). One-time: writes a derivation marker into the child sidecar and
+   *  refuses to run again; also refuses when the child already owns real
+   *  (non-derived) blocks or when the parent has no blocks. Separate-process
+   *  pi-native delegates must NOT call this — their parentSession header
+   *  already inherits verbatim. Returns true when the child state was derived. */
+  deriveChildState(child: SessionRef, parent: SessionRef): Promise<boolean>;
   acquireLock(sid: string): Promise<() => void>;
   /** Per-session overflow self-heal state (learned window + armed emergency).
    *  Keyed by session id so concurrent sessions cannot share an episode. */
@@ -496,6 +515,36 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     await store.save(state, sm.getSessionFile() ?? undefined, sm.getSessionId());
   }
 
+  // Own-sidecar check (not cache/load) because load() may have already filled
+  // the slot via implicit parentSession-header inheritance — that implicit
+  // state is replaceable by an explicit derivation, but real self-compressed
+  // blocks are not.
+  function ownSidecarHasBlocks(sessionFile: string): boolean {
+    try {
+      const parsed = JSON.parse(readFileSync(`${sessionFile}.acp.json`, "utf8")) as { blocks?: unknown };
+      return Array.isArray(parsed.blocks) && parsed.blocks.length > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  async function deriveChild(child: SessionRef, parent: SessionRef): Promise<boolean> {
+    if (!child.sessionFile) return false;
+    if (ownSidecarHasBlocks(child.sessionFile)) return false;
+    // Materialize the child cache slot (also surfaces any implicit header
+    // inheritance or a marker persisted by an earlier process) so the marker
+    // below has a slot to attach to and save() persists it.
+    await store.load(child.sessionFile, child.sessionId);
+    if (store.getDerivedFrom(child.sessionFile, child.sessionId)) return false;
+    const parentState = await store.load(parent.sessionFile, parent.sessionId);
+    if (parentState.blocks.length === 0) return false;
+    const derived = deriveChildState(parentState);
+    store.setDerivedFrom(child.sessionFile, child.sessionId, { parentSessionId: parent.sessionId, derivedAt: Date.now() });
+    await store.save(derived, child.sessionFile, child.sessionId);
+    logInfo("state", { sid: child.sessionId, event: "child-state-derived", parentSid: parent.sessionId, blocks: derived.blocks.length });
+    return true;
+  }
+
   let refused = false;
   let refusalMessage: string | null = null;
-  return { core, store, get refused() { return refused; }, set refused(v: boolean) { refused = v; }, get refusalMessage() { return refusalMessage; }, set refusalMessage(v: string | null) { refusalMessage = v; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown, nudgeShownFor, nudgeShownTokensFor, clearNudgeTracking, clearNudgeTokenStamps, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reasoningDropFor, reloadConfig, stateFor, save, acquireLock, overflowFor, overflowDrop, noteDeadCompress, clearDeadCompress, throttleFor, throttleDrop , noteTokenScale, dropTokenScale };}
+  return { core, store, get refused() { return refused; }, set refused(v: boolean) { refused = v; }, get refusalMessage() { return refusalMessage; }, set refusalMessage(v: string | null) { refusalMessage = v; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown, nudgeShownFor, nudgeShownTokensFor, clearNudgeTracking, clearNudgeTokenStamps, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reasoningDropFor, reloadConfig, stateFor, save, deriveChildState: deriveChild, acquireLock, overflowFor, overflowDrop, noteDeadCompress, clearDeadCompress, throttleFor, throttleDrop , noteTokenScale, dropTokenScale };}

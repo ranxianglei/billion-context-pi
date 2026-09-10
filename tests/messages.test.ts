@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { entriesToCoreMessages, coreOutToAgentMessages, matchesStoredText, messageIdentity, ACP_STATUS_CUSTOM_TYPE } from "../src/messages.js";
+import { entriesToCoreMessages, coreOutToAgentMessages, matchesStoredText, messageIdentity } from "../src/messages.js";
+import { ACP_STATUS_CUSTOM_TYPE } from "../src/turn-boundary.js";
 import type { CoreMessage } from "acp-kernel";
 import type { SessionEntry, SessionMessageEntry } from "@earendil-works/pi-coding-agent";
 

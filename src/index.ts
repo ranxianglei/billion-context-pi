@@ -10,7 +10,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { CoreMessage, NudgeDecision, CompressionBlock, Prompts } from "acp-kernel";
 import { renderNudgeText, resolvePrompts, defaultPrompts, viableRanges } from "acp-kernel";
-import { type AdapterConfig, resolveDelegate, DEFAULT_DELEGATE_POLICY } from "./config.js";
+import { type AdapterConfig, resolveDelegate, resolveHostSession, DEFAULT_DELEGATE_POLICY } from "./config.js";
 import { createRuntime, type AcpRuntime } from "./runtime.js";
 import { makeCompressTool, isCompressSuccessText, isCompressNoopText } from "./compress-tool.js";
 import { makeDecompressTool } from "./decompress-tool.js";
@@ -26,7 +26,8 @@ import { delegateStatusWidget } from "./fleet-widget.js";
 import { openFleetInspector } from "./fleet-inspector.js";
 import { wireToolGuardrails } from "./tool-guardrails.js";
 import { debug, logError, logInfo, logWarn, logThrow, closeLogStream } from "./log.js";
-import { collectCoveredMessageIds, estimateTokens, lastUserMessageId, collectImageTokens, modelSupportsImages, sentViewTokenCount } from "./tokens.js";
+import { collectCoveredMessageIds, estimateTokens, collectImageTokens, modelSupportsImages, sentViewTokenCount } from "./tokens.js";
+import { lastTurnBoundaryId, lastTurnBoundaryIndex } from "./turn-boundary.js";
 import { usageAnchorPredatesCompression } from "./floor-stale.js";
 import { checkForUpdate } from "./update.js";
 import {
@@ -464,7 +465,10 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     }
     const debugOn = debug.enabled;
 
-    const turnKey = lastUserMessageId(entries) ?? sid;
+    // #364: one policy for all turn-boundary decisions this event (turnKey +
+    // outcome scoping); default-off keeps pi-native boundaries.
+    const turnPolicy = resolveHostSession(runtime.adapter);
+    const turnKey = lastTurnBoundaryId(entries, turnPolicy) ?? sid;
 
     // Compress-outcome tracking feeds ONLY the nudge circuit breaker below:
     // failed/no-op attempts are counted (capped at MAX_COMPRESS_ATTEMPTS per
@@ -476,7 +480,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     // CURRENT user turn are considered; processed BEFORE the nudge block so
     // the cap suppression sees the newest outcome (a success on this fire
     // must lift the cap on this same fire).
-    const compressOutcomes = collectCompressOutcomes(entries, turnStartIndex(entries));
+    const compressOutcomes = collectCompressOutcomes(entries, lastTurnBoundaryIndex(entries, turnPolicy));
     const outcome = compressOutcomes.length > 0 ? runtime.noteCompressOutcomes(sid, turnKey, compressOutcomes) : null;
 
     // Growth-aware re-inject bookkeeping (issue #269) runs on EVERY context
@@ -732,16 +736,6 @@ function collectOriginals(entries: Array<{ type: string; id: string; message?: A
     }
   }
   return map;
-}
-
-// Index of the last user-role entry — the start of the current turn.
-// Everything strictly AFTER this index belongs to the current turn; -1 when
-// the session has no user message yet.
-function turnStartIndex(entries: Array<{ type: string; message?: { role?: string } }>): number {
-  for (let i = entries.length - 1; i >= 0; i--) {
-    if (entries[i]!.message?.role === "user") return i;
-  }
-  return -1;
 }
 
 // Compress toolResults from the CURRENT user turn only — the raw material for

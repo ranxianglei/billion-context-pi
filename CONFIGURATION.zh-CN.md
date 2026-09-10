@@ -104,6 +104,7 @@
 | `throttleRetry` | boolean \| object | `true` | 🟢 ACTIVE | 自动重试 provider 侧 token 限流错误（递进退避）。 |
 | `repetitionGuard` | boolean \| object | `true` | 🟢 ACTIVE | 打断字节级完全相同的工具调用死循环（连续 3 次告警，连续 5 次拦截并中止本轮）。 |
 | `degenerationGuard` | boolean \| object | `true` | 🟢 ACTIVE | 折叠出站视图中 assistant text/thinking 里的单字符退化连击（如 4655×「【」）并注入一次性恢复通知——打破 pi 每轮请求都回传退化 thinking 导致的连环 abort 死循环（#351）。 |
+| `hostSession` | boolean \| object | `false` | 🟢 ACTIVE | 多会话宿主的回合边界策略：是否把注入的 `custom_message` 计为回合起点。默认关闭（pi 原生行为）。 |
 
 **delegate 键**
 
@@ -474,6 +475,38 @@
 - **默认值：** `200`
 - **状态：** 🟢 ACTIVE
 - **说明：** 单 codepoint 连击（按 codepoint 计数，代理对安全）达到该长度才判定为退化。编码会话中的合法连击（markdown 分隔线、点线引导符）远低于此值；实测退化前漂移最大约 60，随后才是 4655 的灾难性连击。小于 8 的值会被抬到 8（保证折叠标记自身不会被二次扫描命中）；非法值回退 200 并记日志警告。
+
+---
+
+## 宿主多会话
+
+`hostSession` 键控制**回合边界判定**，面向在单进程内运行多个会话的宿主（如 Prime 的内联 RLM 子/兄弟会话）。完整契约——包括子会话状态派生（`deriveChildState`）——见 **[docs/host-adapter.md](./docs/host-adapter.md)**。
+
+**背景。** ACP 的按回合账本（nudge 已展示追踪、compress 重试上限、结果归口）以"当前回合起点"为键。pi 原生语义下，只有真正的 user-role 消息开启新回合。内联多会话宿主还会把 agent 回合以 `custom_message` 条目注入会话日志；这些条目会进入 LLM 上下文（pi 原生投影），但在默认策略下**不开启回合**——多个真实宿主回合塌缩进同一个 turnKey：nudge 节奏格子错位、按回合 compress 重试上限跨回合失真、节流/溢出周期统计失真。适配器中所有回合边界判定都走同一谓词 `isTurnBoundary(entry, policy)`（`src/turn-boundary.ts`）。
+
+### `hostSession`
+
+- **类型：** boolean \| object
+- **默认值：** `false`（关闭）
+- **状态：** 🟢 ACTIVE
+- **说明：** 宿主注入消息的回合边界策略。`hostSession: true` 等价于 `{ "countCustomMessages": true }`。object 形式（任意子集）：
+
+  ```json
+  {
+    "hostSession": {
+      "countCustomMessages": true
+    }
+  }
+  ```
+
+  **默认关闭保证存量单会话行为逐字节不变**——只有当你的宿主确实向会话日志注入 agent 回合时才启用。
+
+### `hostSession.countCustomMessages`
+
+- **类型：** boolean
+- **默认值：** `false`
+- **状态：** 🟢 ACTIVE
+- **说明：** 把宿主注入的 `custom_message` 条目（UI-only 的 `acp-status` 面板除外）计为所有按回合账本的回合起点。不改变 LLM 上下文投影——这些条目的 user-role 投影本就是 pi 原生行为。
 
 ---
 
