@@ -17,7 +17,7 @@ import { createAcpExtension } from "../src/index.js";
 
 // Test 1 needs a wide window: at the 45K re-inject floor the first pressure
 // injection (≥75%) and the re-inject point (+45K, <95%) must both fit inside
-// the pressure band — impossible under 233K windows.
+// the pressure band — impossible at windows ≤225K (0.75L + 45K < 0.95L ⟹ L > 225K).
 function captureApi() {
   const handlers = new Map<string, ((event: any, ctx: any) => any)[]>();
   const api = {
