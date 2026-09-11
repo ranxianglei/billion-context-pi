@@ -1,30 +1,18 @@
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { isPiHost } from "./runtime.js";
-
 /**
- * Positive OMP (oh-my-pi) host detection.
+ * Shown (and logged) when the extension detects an unsupported host and stands down.
  *
- * pi exposes `sessionManager.buildContextEntries()`; omp only exposes
- * `getBranch()`. `isPiHost` feature-detects the former, so its negation is the
- * established "omp path" used throughout the adapter (see runtime.stateFor).
- * We reuse that semantic so the refusal and the (now dormant) best-effort omp
- * path can never disagree about which host we are on.
+ * Unsupported = no Pi `buildContextEntries()` API AND no `PI_ACP_FORK_HOST` declaration
+ * (see ./host.ts). OMP (oh-my-pi) falls into this by default: its in-process live-entries
+ * integration diverges the nudge's example refs from the session's real refs, so compress
+ * calls fail with "does not exist in this session" ([#234]). The billion-context proxy runs
+ * compression server-side (it owns the ref coordinate space) and works on OMP.
  */
-export function isOmpHost(sm: ExtensionContext["sessionManager"]): boolean {
-  return !isPiHost(sm);
-}
-
-/**
- * Shown (and logged) when the extension detects an OMP host and stands down.
- * OMP's in-process live-entries integration is unreliable: the nudge's example
- * refs diverge from the session's real refs, so compress calls fail with
- * "does not exist in this session". The billion-context proxy runs compression
- * server-side (it owns the ref coordinate space) and works on OMP.
- */
-export const OMP_UNSUPPORTED_MESSAGE = [
-  "[billion-context-pi] This host is OMP (oh-my-pi), which is NOT supported — ACP has been disabled for this session.",
-  "The in-process compression path is unreliable on OMP: the nudge's example refs diverge from the session's real refs, so compress calls fail with \"does not exist in this session\".",
-  "Use the billion-context proxy instead — it runs compression server-side and works on OMP:",
+export const UNSUPPORTED_HOST_MESSAGE = [
+  "[billion-context-pi] Unsupported host: no buildContextEntries() API and no PI_ACP_FORK_HOST declaration — ACP has been disabled for this session.",
+  "Pi-compatible fork (e.g. Prime) running sessions in-process? Opt in explicitly:",
+  "  PI_ACP_FORK_HOST=1 <your host command>",
+  "Contract: docs/host-adapter.md → \"Supported-host detection\".",
+  "OMP (oh-my-pi)? Use the billion-context proxy instead — it runs compression server-side and works on OMP:",
   "  npm install -g billion-context",
   "  bili omp",
   "Docs: https://github.com/ranxianglei/billion-context",

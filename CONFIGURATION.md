@@ -165,6 +165,7 @@ All keys below are currently **ACTIVE**.
 | `ACP_MODEL_CONTEXT_LIMIT` | Override the context limit (takes highest precedence). |
 | `ACP_DEBUG` | Set to `1` / `true` to enable debug logging. |
 | `ACP_LOG_FILE` | Override the log file path (default `~/.pi/acp.log`). |
+| `PI_ACP_FORK_HOST` | Set to `1` / `true` to declare a Pi-compatible fork host (no `buildContextEntries()`) as supported. OMP stays refused by default. See [docs/host-adapter.md](./docs/host-adapter.md). |
 | `PI_ACP_DELEGATE_MAX_DEPTH` | Override `delegate.maxDepth`. |
 | `PI_ACP_DELEGATE_SYNC_TIMEOUT_MINUTES` | Override `delegate.syncTimeoutMinutes`; `0` disables the sync hard timeout. |
 | `PI_ACP_DELEGATE_IDLE_TIMEOUT_MINUTES` | Override `delegate.idleTimeoutMinutes`; `0` disables the idle watchdog. |
@@ -514,7 +515,7 @@ The `hostSession` key controls **turn-boundary detection** for hosts that run se
 - **Type:** boolean
 - **Default:** `false`
 - **Status:** 🟢 ACTIVE
-- **Description:** Count host-injected `custom_message` entries (except UI-only `acp-status` panels) as turn boundaries for all per-turn ledgers. Does not change LLM-context projection — those entries were already projected as user-role messages under Pi-native semantics.
+- **Description:** Count host-injected `custom_message` entries with non-empty text (except UI-only `acp-status` panels) as turn boundaries for all per-turn ledgers; empty injections are pure control signals and start no turn. Does not change LLM-context projection — those entries were already projected as user-role messages under Pi-native semantics.
 
 ---
 

@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { entriesToCoreMessages, coreOutToAgentMessages, matchesStoredText, messageIdentity } from "../src/messages.js";
-import { ACP_STATUS_CUSTOM_TYPE } from "../src/turn-boundary.js";
+import { entriesToCoreMessages, coreOutToAgentMessages, isCustomMessageEntry, matchesStoredText, messageIdentity } from "../src/messages.js";
+import { ACP_STATUS_CUSTOM_TYPE } from "../src/messages.js";
+import { isTurnBoundary } from "../src/turn-boundary.js";
 import type { CoreMessage } from "acp-kernel";
 import type { SessionEntry, SessionMessageEntry } from "@earendil-works/pi-coding-agent";
 
@@ -172,6 +173,15 @@ test("entriesToCoreMessages drops custom_message with empty content", () => {
   const core = entriesToCoreMessages(entries);
 
   assert.deepEqual(core.map((m) => m.id), ["a", "c"], "empty custom_message skipped");
+});
+
+test("empty custom_message neither projects nor starts a turn (#364 acceptance c)", () => {
+  const empty = customEntry("b", "subagent_result", "");
+  assert.equal(isCustomMessageEntry(empty), false, "not a context-participating entry");
+  assert.equal(isTurnBoundary(empty, { countCustomMessages: true }), false, "empty control signal starts no turn");
+  const full = customEntry("d", "subagent_result", "injected agent turn");
+  assert.equal(isCustomMessageEntry(full), true);
+  assert.equal(isTurnBoundary(full, { countCustomMessages: true }), true, "non-empty injected turn starts a turn");
 });
 
 test("entriesToCoreMessages extracts only text blocks from array content", () => {

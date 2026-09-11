@@ -4,7 +4,7 @@ import type {
   ExtensionFactory,
   SessionMessageEntry,
 } from "@earendil-works/pi-coding-agent";
-import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
+import { CONFIG_DIR_NAME } from "./config-dir.js";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -42,7 +42,8 @@ import {
 import { defaultCountTokens } from "acp-kernel";
 import { formatSystemPromptForEvent, getSystemPromptText } from "./compat.js";
 import { applyOutputHeadroom, inspectOverflowMessage, resolveOutputHeadroomCap } from "./overflow-selfheal.js";
-import { isOmpHost, OMP_UNSUPPORTED_MESSAGE } from "./omp.js";
+import { UNSUPPORTED_HOST_MESSAGE } from "./omp.js";
+import { isUnsupportedHost } from "./host.js";
 import { isBiliProxyBaseUrl, PROXY_STAND_DOWN_MESSAGE } from "./proxy-detect.js";
 
 type AgentMessage = SessionMessageEntry["message"];
@@ -159,20 +160,23 @@ function wireDelegateReadTracking(pi: ExtensionAPI): void {
 function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIfProxied: (ctx: ExtensionContext) => boolean): void {
   let ompWarned = false;
   pi.on("session_start", async (_event, ctx) => {
-    // OMP (oh-my-pi) is not supported: its in-process live-entries integration
-    // diverges the nudge's example refs from the session's real refs, so
-    // compress calls fail with "does not exist in this session". Stand down —
-    // refuse service and point the user at the billion-context proxy. session_start
-    // always precedes the first context/before_agent_start event, so setting
-    // `refused` here reliably gates every downstream handler for the session.
-    if (isOmpHost(ctx.sessionManager)) {
+    // Unsupported hosts stand down (#234 / #364): any host without Pi's
+    // buildContextEntries() API is refused unless it declared itself a
+    // Pi-compatible fork via PI_ACP_FORK_HOST=1. OMP (oh-my-pi) stays blocked
+    // by default — its in-process live-entries integration diverges the nudge's
+    // example refs from the session's real refs, so compress calls fail with
+    // "does not exist in this session". Refuse service and point the user at
+    // the fork opt-in or the billion-context proxy. session_start always
+    // precedes the first context/before_agent_start event, so setting `refused`
+    // here reliably gates every downstream handler for the session.
+    if (isUnsupportedHost(ctx.sessionManager)) {
       runtime.refused = true;
       if (!ompWarned) {
         ompWarned = true;
         const sid = ctx.sessionManager.getSessionId();
-        logWarn("host", { event: "omp-unsupported", sid, action: "refused" });
-        if (ctx.hasUI) ctx.ui.notify(OMP_UNSUPPORTED_MESSAGE, "warning");
-        else console.error(OMP_UNSUPPORTED_MESSAGE);
+        logWarn("host", { event: "host-unsupported", sid, action: "refused" });
+        if (ctx.hasUI) ctx.ui.notify(UNSUPPORTED_HOST_MESSAGE, "warning");
+        else console.error(UNSUPPORTED_HOST_MESSAGE);
       }
       return;
     }

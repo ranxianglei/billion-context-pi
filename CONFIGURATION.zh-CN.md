@@ -164,6 +164,7 @@
 | `ACP_MODEL_CONTEXT_LIMIT` | 覆盖上下文窗口大小（优先级最高）。 |
 | `ACP_DEBUG` | 设为 `1` / `true` 开启调试日志。 |
 | `ACP_LOG_FILE` | 覆盖日志文件路径（默认 `~/.pi/acp.log`）。 |
+| `PI_ACP_FORK_HOST` | 设为 `1` / `true` 声明当前宿主是兼容 Pi 的 fork（无 `buildContextEntries()`），使其被识别为受支持宿主。OMP 默认仍被拒绝。见 [docs/host-adapter.md](./docs/host-adapter.md)。 |
 | `PI_ACP_DELEGATE_MAX_DEPTH` | 覆盖 `delegate.maxDepth`。 |
 | `PI_ACP_DELEGATE_SYNC_TIMEOUT_MINUTES` | 覆盖 `delegate.syncTimeoutMinutes`；`0` 禁用同步硬超时。 |
 | `PI_ACP_DELEGATE_IDLE_TIMEOUT_MINUTES` | 覆盖 `delegate.idleTimeoutMinutes`；`0` 禁用闲置看门狗。 |
@@ -506,7 +507,7 @@
 - **类型：** boolean
 - **默认值：** `false`
 - **状态：** 🟢 ACTIVE
-- **说明：** 把宿主注入的 `custom_message` 条目（UI-only 的 `acp-status` 面板除外）计为所有按回合账本的回合起点。不改变 LLM 上下文投影——这些条目的 user-role 投影本就是 pi 原生行为。
+- **说明：** 把宿主注入的非空文本 `custom_message` 条目（UI-only 的 `acp-status` 面板除外）计为所有按回合账本的回合起点；空内容注入是纯控制信号，不开启回合。不改变 LLM 上下文投影——这些条目的 user-role 投影本就是 pi 原生行为。
 
 ---
 

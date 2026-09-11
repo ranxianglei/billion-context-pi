@@ -4,7 +4,7 @@ import { searchBlocks, type SearchResult } from "acp-kernel";
 import type { AcpRuntime } from "./runtime.js";
 import { buildSearchDocs } from "./search-index.js";
 import { logThrow } from "./log.js";
-import { OMP_UNSUPPORTED_MESSAGE } from "./omp.js";
+import { UNSUPPORTED_HOST_MESSAGE } from "./omp.js";
 
 const SearchParams = Type.Object({
     query: Type.String({ description: "Keywords to locate detail folded into compressed summaries or historical messages." }),
@@ -27,7 +27,7 @@ export function makeSearchTool(runtime: AcpRuntime): ToolDefinition<typeof Searc
         ],
         parameters: SearchParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {
-        if (runtime.refused) return { details: undefined, content: [{ type: "text", text: runtime.refusalMessage ?? OMP_UNSUPPORTED_MESSAGE }] };
+        if (runtime.refused) return { details: undefined, content: [{ type: "text", text: runtime.refusalMessage ?? UNSUPPORTED_HOST_MESSAGE }] };
         let result: string;
         try {
             result = await handleSearch(params as SearchArgs, runtime, ctx);

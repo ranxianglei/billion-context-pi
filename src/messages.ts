@@ -1,7 +1,7 @@
 import type { SessionEntry, SessionMessageEntry } from "@earendil-works/pi-coding-agent";
 import { defaultCountTokens, type CoreMessage } from "acp-kernel";
 import { rewriteTagTokens } from "./tag-tokens.js";
-import { ACP_STATUS_CUSTOM_TYPE, isCustomMessageEntry } from "./turn-boundary.js";
+import type { TurnBoundaryEntry } from "./turn-boundary.js";
 
 type AgentMessage = SessionMessageEntry["message"];
 
@@ -18,6 +18,25 @@ type AnyMessage = {
 const REF_TAG_SOURCE = "(?:\x3cacp\\s[^>]*\x3em\\d{5}\x3c/acp\x3e|\\[m\\d{1,5}\\])";
 const REF_TAG = new RegExp(`^${REF_TAG_SOURCE}\\s?\\n?`);
 const TRAILING_REF_TAG = new RegExp(`\\n*${REF_TAG_SOURCE}\\s*$`);
+
+/** Host-injected status-panel custom messages (written by src/commands.ts) —
+ *  UI-only, never projected into LLM context, so never user-like entries. */
+export const ACP_STATUS_CUSTOM_TYPE = "acp-status";
+
+/** True for host-injected custom_message entries that participate in LLM
+ *  context: non-empty custom_message except UI-only acp-status panels
+ *  (Pi-native projection semantics, session-manager.d.ts). The non-empty gate
+ *  uses the exact same extractText check as the projection below, so an entry
+ *  either enters context or it doesn't — and only entries that enter context
+ *  can delimit a turn (#364 acceptance c: empty control signals start none).
+ *  Shared by the turn-boundary predicate in src/turn-boundary.ts so the two
+ *  views can never drift apart; defined here (not there) because it needs
+ *  extractText — importing that back would create a cycle. */
+export function isCustomMessageEntry(entry: TurnBoundaryEntry): entry is TurnBoundaryEntry & { type: "custom_message" } {
+  return entry.type === "custom_message"
+    && entry.customType !== ACP_STATUS_CUSTOM_TYPE
+    && extractText(entry.content).length > 0;
+}
 
 export function entriesToCoreMessages(entries: SessionEntry[]): CoreMessage[] {
   const out: CoreMessage[] = [];

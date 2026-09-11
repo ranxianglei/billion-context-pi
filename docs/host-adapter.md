@@ -31,9 +31,11 @@ message" can never drift apart again.
 
 1. A genuine **user-role message always starts a turn** (Pi-native; unaffected by policy).
 2. Assistant / toolResult / compaction / branch-summary entries never start a turn.
-3. Host-injected `custom_message` entries start a turn **only when the policy opts in**.
-   UI-only `acp-status` panels (the `/acp` slash-command output) are excluded even under
-   the opt-in — they never enter LLM context either.
+3. Host-injected `custom_message` entries start a turn **only when the policy opts in**,
+   and only if they carry non-empty text (the same `extractText` gate projection uses).
+   Empty injections are pure control signals: they never enter LLM context, so they
+   start no turn either. UI-only `acp-status` panels (the `/acp` slash-command output)
+   are excluded even under the opt-in.
 4. LLM-context projection is **independent of this policy**: `custom_message` entries were
    and remain projected as user-role messages (Pi-native semantics). The policy only changes
    *turn accounting*, not what the model sees.
@@ -136,3 +138,72 @@ The child keeps its own independent sidecar — `~/.pi/agent/sessions/<child-ses
 — written atomically like every other sidecar. The parent file is never touched. Subsequent
 loads of the child read the derived sidecar normally (marker included); no further action
 required.
+
+---
+
+## 3. Supported-host detection & entry sources
+
+### Detection order (at `session_start`)
+
+1. **Pi** — `sessionManager.buildContextEntries()` exists → fully supported, native path.
+2. **Declared Pi-compatible fork** — no `buildContextEntries()`, but the process declared
+   itself via the environment variable `PI_ACP_FORK_HOST=1` (or `true`) → supported, with
+   the entry-source semantics below.
+3. **Everything else** — refused: one warning per process (UI notification, or stderr in
+   headless one-shot mode), all four ACP tools return guidance instead of acting, system-prompt
+   injection is skipped, the context transform is a no-op, and the host's own compaction is
+   not cancelled. OMP (oh-my-pi) falls here by default — see [omp.md](./omp.md).
+
+### Why shape alone cannot decide
+
+OMP and Prime are both **Pi forks**, and both expose only `getBranch()` (no
+`buildContextEntries()`). The SessionManager shape therefore cannot distinguish an
+unsupported host from a supported one — which is why step 2 is an explicit declaration
+rather than a fingerprint list. Setting `PI_ACP_FORK_HOST` is the operator's assertion that
+their build's `getBranch()` entry source matches the contract below. Do not stub
+`buildContextEntries` with an empty array just to pass the gate: that would silently disable
+the live-message merge and reintroduce the branch-lag bug.
+
+### Entry-source semantics
+
+| Host | Entry source | Live-message merge | Delegate CLI flags |
+|---|---|---|---|
+| Pi | `buildContextEntries()` — the effective context, always current including the in-flight message | not needed | pi flags (`--mode json`, `--session`) |
+| Declared fork (Prime…) | `getBranch()` — raw branch chronology, **lags one message** (the current user message persists only after transform) | adapter merges each context event's `event.messages` into state building (`runtime.stateFor` live merge) | disabled — spawned children get no pi-only flags |
+
+Consequences for hosts:
+
+- Under a declared fork, refs injected during turn N become visible to branch reads from
+  turn N+1 onward; the live merge compensates for exactly this lag. This merge fires for
+  *any* non-Pi-shaped session manager (`!isPiHost`), which is what makes declared forks work.
+- Delegation (`acp_delegate`) spawns real pi CLI processes. On non-Pi hosts the delegate
+  tool refuses to spawn with pi-only flags, regardless of the declaration. Hosts that run
+  sub-agents natively (e.g. Prime RLM) should set `"delegate": false` in acp.json so the
+  model is not offered a tool whose children cannot run.
+
+Fixtures: `tests/host-detection.test.ts` (Prime-shaped host = `{ getBranch }` only) and
+`tests/omp-refuse.test.ts` (refusal behavior + the opt-in test).
+
+---
+
+## 4. Config directory (CONFIG_DIR_NAME)
+
+The extension resolves its config directory from the host's export of `CONFIG_DIR_NAME`
+(Pi exports `.pi`). A host that aliases `@earendil-works/pi-coding-agent` to its own build
+must either:
+
+1. **re-export `CONFIG_DIR_NAME`** (preferred — keeps paths exact if the fork renames its
+   directory), or
+2. accept the fallback: the adapter feature-detects a missing or invalid export and falls
+   back to Pi's canonical value `.pi` (`src/config-dir.ts`).
+
+Responsibility boundary: the *export* belongs to the host (only it knows its own directory
+name); the *fallback* belongs to the adapter (it must not crash at load time because of a
+missing named export). A missing export fails differently per resolver — plain Node
+ESM→CJS interop throws a link-time `SyntaxError: Named export 'CONFIG_DIR_NAME' not found`,
+while loader-based aliasing (Prime's loader) surfaces it as `undefined` at runtime, which
+previously broke `path.join()` outright. The adapter therefore imports the pi package as a
+**namespace** in `src/config-dir.ts` (safe under both resolvers) and feature-detects the
+property; it is the only value import from the pi package — every other import is type-only
+and erased at build time. All config/log/session paths flow through the single constant
+there.

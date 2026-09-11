@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
 import { homedir } from "node:os";
 import { createHash } from "node:crypto";
-import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
+import { CONFIG_DIR_NAME } from "./config-dir.js";
 import { debug, logInfo, logWarn } from "./log.js";
 
 declare const CURRENT_VERSION: string;

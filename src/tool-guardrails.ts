@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import {
-  isToolCallEventType,
   type ExtensionAPI,
+  type ToolCallEvent,
   type ToolResultEvent,
 } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_TOOL_BASH_TIMEOUT, DEFAULT_TOOL_OUTPUT_MAX_BYTES, resolveRepetitionGuard } from "./config.js";
@@ -14,6 +14,14 @@ import type { AcpRuntime } from "./runtime.js";
 export type BashToolResultEvent = Extract<ToolResultEvent, { toolName: "bash" }>;
 export function isBashToolResult(e: ToolResultEvent): e is BashToolResultEvent {
   return e.toolName === "bash";
+}
+
+// Vendored locally rather than imported: pi exports isToolCallEventType, but
+// aliased host bundles (Prime) may not re-export it, and a missing named export
+// fails module load (#364). The body is just event.toolName === "bash".
+type BashToolCallEvent = Extract<ToolCallEvent, { toolName: "bash" }>;
+function isBashToolCall(event: ToolCallEvent): event is BashToolCallEvent {
+  return event.toolName === "bash";
 }
 
 type ContentPart = ToolResultEvent["content"][number];
@@ -194,7 +202,7 @@ export function wireToolGuardrails(pi: ExtensionAPI, runtime: AcpRuntime): void 
   const pendingWarns = new Map<string, number>();
 
   pi.on("tool_call", (event, ctx) => {
-    if (isToolCallEventType("bash", event)) {
+    if (isBashToolCall(event)) {
       const t = resolveBashTimeout(event.input, runtime.adapter.toolBashDefaultTimeout);
       if (t !== undefined) {
         event.input.timeout = t;

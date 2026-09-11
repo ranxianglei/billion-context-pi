@@ -1,8 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { ACP_STATUS_CUSTOM_TYPE, isCustomMessageEntry } from "../src/messages.js";
 import {
-  ACP_STATUS_CUSTOM_TYPE,
-  isCustomMessageEntry,
   isTurnBoundary,
   lastTurnBoundaryId,
   lastTurnBoundaryIndex,
@@ -44,6 +43,12 @@ test("isCustomMessageEntry: matches the context-projection condition exactly", (
   assert.equal(isCustomMessageEntry(custom("a")), true);
   assert.equal(isCustomMessageEntry(statusPanel("b")), false);
   assert.equal(isCustomMessageEntry(user("c")), false);
+});
+
+test("isCustomMessageEntry: empty content never enters context, so never counts (#364 c)", () => {
+  assert.equal(isCustomMessageEntry(custom("e1", "")), false);
+  assert.equal(isCustomMessageEntry(custom("e2", [{ type: "image" }])), false);
+  assert.equal(isTurnBoundary(custom("e1", ""), { countCustomMessages: true }), false, "empty control signal starts no turn even under policy");
 });
 
 // Interleaved battery covering every entry kind, used for the cross-view
