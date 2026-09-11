@@ -1,0 +1,50 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/ranxianglei/billion-context-pi/schema/bcp-block-v1.json",
+  "title": "BcpBlockV1",
+  "description": "One ACP compression block as persisted in a <session>.acp.json sidecar (an element of its top-level \"blocks\" array). Only the listed properties are part of the v1 stability contract: evolution is additive-only (new optional fields may appear), and renaming/removing/re-semanticking a listed field requires bumping the sidecar's schemaVersion. additionalProperties are permitted because real blocks carry extra internal pruning/index fields that are intentionally outside the contract.",
+  "type": "object",
+  "properties": {
+    "blockId": {
+      "type": "string",
+      "description": "Idempotency key. Stable across restarts; never reused."
+    },
+    "summary": {
+      "type": "string",
+      "description": "The final accepted summary text."
+    },
+    "tier": {
+      "type": "integer",
+      "enum": [1, 2, 3],
+      "description": "Compression tier."
+    },
+    "compressedTokens": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Tokens of original content compressed by this block."
+    },
+    "createdAt": {
+      "type": "integer",
+      "description": "Creation time, epoch MILLISECONDS (not an ISO string)."
+    },
+    "topic": {
+      "type": "string",
+      "description": "Short human label for the compressed range."
+    },
+    "startRef": {
+      "type": "string",
+      "description": "Model-facing start ref, e.g. m00005. Absent when unknown."
+    },
+    "endRef": {
+      "type": "string",
+      "description": "Model-facing end ref, e.g. m00020. Absent when unknown."
+    },
+    "effectiveMessageIds": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Raw message ids covered by this block (authoritative coverage set)."
+    }
+  },
+  "required": ["blockId", "summary", "tier", "compressedTokens", "createdAt"],
+  "additionalProperties": true
+}

@@ -52,6 +52,38 @@ test("save then load round-trips state", async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
+test("save writes schemaVersion + producer envelope to the sidecar (#368)", async () => {
+  const dir = await tempDir();
+  const file = path.join(dir, "session.json");
+  const store = new SessionStateStore();
+  const state = createInitialState();
+  state.blocks.push(makeBlock("b0"));
+  await store.save(state, file, "sid");
+
+  const raw = JSON.parse(await fs.readFile(`${file}.acp.json`, "utf8"));
+  assert.equal(raw.schemaVersion, 1);
+  assert.equal(raw.producer.name, "billion-context-pi");
+  assert.ok(Array.isArray(raw.blocks));
+  assert.equal(raw.blocks[0].blockId, "b0");
+  await rm(dir, { recursive: true, force: true });
+});
+
+test("load tolerates a higher schemaVersion: warns once, still loads known fields (#368)", async () => {
+  const dir = await tempDir();
+  const file = path.join(dir, "session.jsonl");
+  await writeAcpState(file, [makeBlock("b0")], 2);
+  const acpFile = `${file}.acp.json`;
+  const bumped = JSON.parse(await fs.readFile(acpFile, "utf8"));
+  bumped.schemaVersion = 999;
+  await fs.writeFile(acpFile, JSON.stringify(bumped), "utf8");
+
+  const store = new SessionStateStore();
+  const state = await store.load(file, "sid");
+  assert.equal(state.blocks.length, 1, "known fields still load despite unknown-higher version");
+  assert.equal(state.blocks[0]!.blockId, "b0");
+  await rm(dir, { recursive: true, force: true });
+});
+
 test("load merges forward-compat: missing fields filled from fresh state", async () => {
   const dir = await tempDir();
   const file = path.join(dir, "session.json");
