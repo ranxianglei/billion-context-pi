@@ -22,6 +22,12 @@
 
 > **宿主支持:** 本插件面向 **Pi**。它**不支持 OMP(oh-my-pi)** —— 在 OMP 宿主上会拒绝运行。OMP 用户请直接改用 [billion-context](https://github.com/ranxianglei/billion-context)(启动命令 bili omp);其他客户端的完整对照见[该选哪个?](#该选哪个)。OMP 详细说明:[docs/omp.zh-CN.md](./docs/omp.zh-CN.md)。
 
+## 社区
+
+交流、求助与更新都在 QQ——同一个群覆盖三个项目(`billion-context`、`billion-context-pi`、`opencode-acp`):
+
+**QQ 群:1056132097**
+
 ## 为什么选择 billion-context
 
 当对话变长,模型的上下文会耗尽。多数工具采用硬截断 —— 静默丢弃早期消息。**billion-context** 把 `compress` 工具交给模型:由 LLM 决定**何时**压缩、压缩**什么**,将内容压缩成高保真摘要,在回收上下文空间的同时保留关键细节(文件路径、决策、错误字符串)。
@@ -245,12 +251,6 @@ cp -r ~/.pi/agent/sessions  <备份>/pi-sessions
 ## 基于 acp-kernel
 
 压缩引擎是 [`acp-kernel`](https://github.com/ranxianglei/acp-kernel) — 平台无关、MIT 许可的库,有 208 个测试。它被内联打包进 `dist/index.js`,因此零运行时依赖。
-
-## 社区
-
-交流、求助与更新都在 QQ——同一个群覆盖三个项目(`billion-context`、`billion-context-pi`、`opencode-acp`):
-
-**QQ 群:1056132097**
 
 ## 许可证
 

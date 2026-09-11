@@ -24,6 +24,12 @@ The model decides <em>when</em> and <em>what</em> to compress — not a hard lim
 
 > **Host support:** this plugin is for **Pi**. It does **not** support **OMP (oh-my-pi)** — on an OMP host it refuses to run. OMP users: use [billion-context](https://github.com/ranxianglei/billion-context) instead (`bili omp`, built-in plugin). Full client → package table: see [Which do I need?](#which-do-i-need); OMP details: [docs/omp.md](./docs/omp.md).
 
+## Community
+
+Discussion, help, and updates on QQ — one group covers all three projects (`billion-context`, `billion-context-pi`, `opencode-acp`):
+
+**QQ Group: 1056132097**
+
 ## Why?
 
 When conversations get long, the model runs out of context. Most tools hard-truncate — silently dropping earlier messages. **billion-context** gives the model a `compress` tool: the LLM decides **when** and **what** to compress into high-fidelity summaries, preserving critical details (file paths, decisions, error strings) while reclaiming context space.
@@ -245,12 +251,6 @@ Restore them next to each other on the target machine. For clone/fork children, 
 ## Built on acp-kernel
 
 The compression engine is [`acp-kernel`](https://github.com/ranxianglei/acp-kernel) — a platform-agnostic, MIT-licensed library with 208 tests. It's bundled inline into `dist/index.js`, so there are zero runtime dependencies.
-
-## Community
-
-Discussion, help, and updates on QQ — one group covers all three projects (`billion-context`, `billion-context-pi`, `opencode-acp`):
-
-**QQ Group: 1056132097**
 
 ## License
 
