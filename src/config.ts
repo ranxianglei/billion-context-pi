@@ -490,7 +490,7 @@ export function scaleNudgeGrowthToWindow(limit: number): number {
 export function resolveConfig(adapter: AdapterConfig, liveContextLimit: number, provider?: string, modelId?: string): Config {
   const envLimit = process.env.ACP_MODEL_CONTEXT_LIMIT;
   const envLimitNum = envLimit ? Number(envLimit) : NaN;
-  const FALLBACK_LIMIT = 150_000;
+  const FALLBACK_LIMIT = ADAPTIVE_GROWTH_WINDOW_MAX;
   const limit =
     !Number.isNaN(envLimitNum) && envLimitNum > 0
       ? envLimitNum
