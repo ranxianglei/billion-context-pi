@@ -17,6 +17,14 @@ import { CONFIG_DIR_NAME } from "./config-dir.js";
 /** The four ACP tools to ensure on every pi-subagents builtin agent. */
 export const ACP_TOOLS = ["compress", "decompress", "search_context", "acp_status"] as const;
 
+/** Printed/logged once per process when acp_delegate stands down because
+ *  pi-subagents is installed (issue #415). Same shape as PROXY_STAND_DOWN_MESSAGE. */
+export const DELEGATE_STAND_DOWN_MESSAGE = [
+  "[billion-context-pi] pi-subagents detected — acp_delegate has been automatically disabled to avoid two overlapping sub-agent systems.",
+  "pi-subagents' agents do NOT get ACP context compression by default. Run /acp-subagents to inject compress/decompress/search_context/acp_status into its agent overrides.",
+  'To keep acp_delegate despite pi-subagents being installed, set "delegate": { "forceEnable": true } in acp.json.',
+].join("\n");
+
 export interface SetupResult {
   path: string;
   action: "skipped" | "updated" | "failed";

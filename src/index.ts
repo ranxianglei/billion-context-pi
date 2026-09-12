@@ -47,6 +47,7 @@ import { applyOutputHeadroom, inspectOverflowMessage, resolveOutputHeadroomCap }
 import { UNSUPPORTED_HOST_MESSAGE } from "./omp.js";
 import { isUnsupportedHost } from "./host.js";
 import { isBiliProxyBaseUrl, PROXY_STAND_DOWN_MESSAGE } from "./proxy-detect.js";
+import { findPiSubagentsInstall, resolveAgentDir, DELEGATE_STAND_DOWN_MESSAGE } from "./setup-subagent-tools.js";
 
 // Host-facing API for multi-session hosts (docs/host-adapter.md, #367): the
 // extension keeps its own runtime instance private; hosts build their own via
@@ -170,6 +171,7 @@ function wireDelegateReadTracking(pi: ExtensionAPI): void {
 
 function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIfProxied: (ctx: ExtensionContext) => boolean): void {
   let ompWarned = false;
+  let subagentStandDownWarned = false;
   pi.on("session_start", async (_event, ctx) => {
     // Unsupported hosts stand down (#234 / #364): any host without Pi's
     // buildContextEntries() API is refused unless it declared itself a
@@ -206,6 +208,7 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     // misconfigurations.
     const modelInfo = ctx.model as { id?: string; contextWindow?: number; api?: string } | undefined;
     logInfo("session", { event: "start", sid, cwd: ctx.cwd, debug: runtime.adapter.debug ?? null, version: typeof CURRENT_VERSION !== "undefined" ? CURRENT_VERSION : null, model: modelInfo?.id ?? null, modelApi: modelInfo?.api ?? null, contextWindow: modelInfo?.contextWindow ?? null });
+    let delegateStoodDown = false;
     try {
       await runtime.reloadConfig(ctx.cwd);
       const delegateCfg = resolveDelegate(runtime.adapter);
@@ -213,16 +216,37 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
       setDelegatePolicy(delegateCfg);
       setDelegateDefaults({ thinkingLevel: delegateCfg.thinkingLevel, agents: delegateCfg.agents });
       setDelegateNotifyIfRead(delegateCfg.notifyIfRead);
+      // Third-party subagent overlap guard (#415): pi-subagents ships its own
+      // sub-agent system (own fleet checker, spawn path, inspector shortcut —
+      // the ctrl+alt+f clash behind #412). Running both fleets confuses the
+      // model, and pi-subagents' agents never get ACP compression unless
+      // /acp-subagents injects the tools into their overrides. Stand
+      // acp_delegate down (tool registration below + system-prompt section)
+      // unless delegate.forceEnable opts back in. Cheap fs probe once per
+      // session — same pattern as the proxy stand down above.
+      if (delegateCfg.enabled) {
+        const thirdParty = findPiSubagentsInstall(resolveAgentDir(), ctx.cwd ?? process.cwd());
+        if (thirdParty && !delegateCfg.forceEnable) {
+          delegateStoodDown = true;
+          logWarn("delegate", { event: "third-party-subagent-detected", sid, install: thirdParty, action: "stand-down", hint: "run /acp-subagents to give its agents ACP compression tools; delegate.forceEnable=true keeps acp_delegate" });
+          if (!subagentStandDownWarned) {
+            subagentStandDownWarned = true;
+            if (ctx.hasUI) ctx.ui.notify(DELEGATE_STAND_DOWN_MESSAGE, "warning");
+            else console.error(DELEGATE_STAND_DOWN_MESSAGE);
+          }
+        }
+      }
     } catch (e) {
       logThrow("config", e, { sid, phase: "session_start" });
     }
+    runtime.delegateStoodDown = delegateStoodDown;
     try {
       runtime.setPrompts(resolvePrompts(runtime.adapter.prompts, { acknowledgeRisk: runtime.adapter.acknowledgePromptsRisk === true }));
     } catch (e) {
       logWarn("config", { event: "prompts-resolve-failed", error: e instanceof Error ? e.message : String(e) });
       runtime.setPrompts(defaultPrompts);
     }
-    if (resolveDelegate(runtime.adapter).enabled) {
+    if (resolveDelegate(runtime.adapter).enabled && !runtime.delegateStoodDown) {
       pi.registerTool(makeDelegateTool(pi));
       pi.registerTool(makeDelegateWaitTool(pi));
       pi.registerTool(makeDelegateCancelTool(pi));
@@ -634,7 +658,7 @@ function wireSystemPrompt(pi: ExtensionAPI, runtime: AcpRuntime): void {
       }
       runtime.setPrompts(defaultPrompts);
     }
-    const delegate = resolveDelegate(runtime.adapter).enabled;
+    const delegate = resolveDelegate(runtime.adapter).enabled && !runtime.delegateStoodDown;
     const acp = buildAcpSystemPrompt(runtime.prompts, merged.promptSections);
     const delegateText = merged.delegatePrompt !== undefined ? merged.delegatePrompt : ACP_DELEGATE_PROMPT;
     const prompt = delegate && delegateText !== null ? `${acp}\n${delegateText}` : acp;

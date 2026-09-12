@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,6 +8,7 @@ import { createAcpExtension } from "../src/index.js";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 import { setRunNpmForTest } from "../src/update.js";
+import { DELEGATE_STAND_DOWN_MESSAGE } from "../src/setup-subagent-tools.js";
 
 // Headless handlers await the update check — keep every test hermetic by
 // resolving it through this fake (no network, no update available).
@@ -884,5 +886,120 @@ test("TUI (hasUI=true) context handler resolves without waiting for the update c
   } finally {
     delete process.env.ACP_LOG_FILE;
     await rm(logFile, { force: true });
+  }
+});
+
+// ─── #415: third-party subagent (pi-subagents) auto stand-down ──────────────
+
+function standDownFixture(withPiSubagents: boolean) {
+  const tmp = mkdtempSync(join(tmpdir(), "acp-standdown-"));
+  const agentDir = join(tmp, "agent");
+  const cwd = join(tmp, "proj");
+  mkdirSync(agentDir, { recursive: true });
+  mkdirSync(cwd, { recursive: true });
+  if (withPiSubagents) {
+    const pkg = join(agentDir, "npm", "node_modules", "pi-subagents");
+    mkdirSync(pkg, { recursive: true });
+    writeFileSync(join(pkg, "package.json"), JSON.stringify({ name: "pi-subagents", version: "0.53.0" }));
+  }
+  return { tmp, agentDir, cwd, cleanup: () => rmSync(tmp, { recursive: true, force: true }) };
+}
+
+async function withAgentDir(agentDir: string, fn: () => Promise<void>): Promise<void> {
+  const prev = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  try {
+    await fn();
+  } finally {
+    if (prev === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = prev;
+  }
+}
+
+function piSessionCtx(tmp: string, cwd: string, extra?: Record<string, unknown>) {
+  const base = fakeCtx([], join(tmp, "state.json"));
+  // session_start refuses OMP hosts (feature-detect: no buildContextEntries) —
+  // give the fake the pi shape so the stand-down gate under test is the only gate.
+  return { ...base, cwd, hasUI: true, sessionManager: { ...base.sessionManager, buildContextEntries: () => [] }, ...extra };
+}
+
+test("#415: pi-subagents detected → acp_delegate stands down (tools, shortcut, prompt section) + reminder points to /acp-subagents", async () => {
+  const fx = standDownFixture(true);
+  try {
+    await withAgentDir(fx.agentDir, async () => {
+      const { api, handlers } = captureApi();
+      const shortcuts: string[] = [];
+      (api as any).registerShortcut = (key: string) => { shortcuts.push(key); };
+      createAcpExtension()(api as any);
+
+      const notified: string[] = [];
+      const ctx = piSessionCtx(fx.tmp, fx.cwd, {
+        ui: { notify: (msg: string) => { notified.push(msg); }, confirm: async () => true, select: async () => undefined, input: async () => "", setStatus: () => {} },
+      });
+
+      await handlers.get("session_start")![0]!({}, ctx);
+
+      const toolNames = api.tools.map((t) => t.name);
+      assert.ok(!toolNames.includes("acp_delegate"), "acp_delegate not registered while stood down");
+      assert.ok(!toolNames.includes("acp_delegate_wait"), "acp_delegate_wait not registered while stood down");
+      assert.ok(!toolNames.includes("acp_delegate_cancel"), "acp_delegate_cancel not registered while stood down");
+      assert.ok(toolNames.includes("compress"), "core ACP tools still registered");
+      assert.deepEqual(shortcuts, [], "ctrl+alt+f shortcut not registered while stood down");
+
+      const promptResult = handlers.get("before_agent_start")![0]!({ systemPrompt: "" }, {});
+      assert.ok(!promptResult.systemPrompt.includes("ACP_DELEGATE NOTIFICATIONS"), "delegate prompt section omitted while stood down");
+      assert.ok(promptResult.systemPrompt.includes("ACP TAGS"), "core ACP prompt still present");
+
+      assert.ok(notified.some((m) => m === DELEGATE_STAND_DOWN_MESSAGE), "stand-down reminder surfaced via ui.notify");
+    });
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("#415: delegate.forceEnable keeps acp_delegate despite pi-subagents", async () => {
+  const fx = standDownFixture(true);
+  try {
+    await withAgentDir(fx.agentDir, async () => {
+      const { api, handlers } = captureApi();
+      const shortcuts: string[] = [];
+      (api as any).registerShortcut = (key: string) => { shortcuts.push(key); };
+      createAcpExtension({ delegate: { forceEnable: true } })(api as any);
+
+      const ctx = piSessionCtx(fx.tmp, fx.cwd);
+      await handlers.get("session_start")![0]!({}, ctx);
+
+      const toolNames = api.tools.map((t) => t.name);
+      assert.ok(toolNames.includes("acp_delegate"), "acp_delegate registered with forceEnable");
+      assert.ok(toolNames.includes("acp_delegate_wait"), "acp_delegate_wait registered with forceEnable");
+      assert.ok(toolNames.includes("acp_delegate_cancel"), "acp_delegate_cancel registered with forceEnable");
+      assert.deepEqual(shortcuts, ["ctrl+alt+f"], "shortcut registered with forceEnable");
+
+      const promptResult = handlers.get("before_agent_start")![0]!({ systemPrompt: "" }, {});
+      assert.ok(promptResult.systemPrompt.includes("ACP_DELEGATE NOTIFICATIONS"), "delegate prompt section present with forceEnable");
+    });
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("#415: no pi-subagents → acp_delegate registers normally (regression guard)", async () => {
+  const fx = standDownFixture(false);
+  try {
+    await withAgentDir(fx.agentDir, async () => {
+      const { api, handlers } = captureApi();
+      const shortcuts: string[] = [];
+      (api as any).registerShortcut = (key: string) => { shortcuts.push(key); };
+      createAcpExtension()(api as any);
+
+      const ctx = piSessionCtx(fx.tmp, fx.cwd);
+      await handlers.get("session_start")![0]!({}, ctx);
+
+      const toolNames = api.tools.map((t) => t.name);
+      assert.ok(toolNames.includes("acp_delegate"), "acp_delegate registered when no third-party subagent is installed");
+      assert.deepEqual(shortcuts, ["ctrl+alt+f"], "shortcut registered by default");
+    });
+  } finally {
+    fx.cleanup();
   }
 });

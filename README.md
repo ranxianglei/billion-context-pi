@@ -80,6 +80,8 @@ That's it. The extension auto-loads on next Pi startup. No configuration needed 
 > ```bash
 > pi remove npm:pi-subagents
 > ```
+>
+> Keeping both is also supported: when billion-context-pi detects an installed `pi-subagents` it automatically stands `acp_delegate` down (a reminder tells you how to give pi-subagents' agents ACP compression via `/acp-subagents`). Set `"delegate": { "forceEnable": true }` in `~/.pi/acp.json` to keep `acp_delegate` active anyway.
 
 ## How it works
 
