@@ -12,7 +12,8 @@
 		"./contract": {
 			"types": "./dist/contract.d.ts",
 			"import": "./dist/contract.js"
-		}
+		},
+		"./schema/bcp-block-v1.json": "./schema/bcp-block-v1.json"
 	},
 	"pi": {
 		"extensions": [
