@@ -244,6 +244,8 @@ The `delegate` sub-object controls the `acp_delegate` sub-agent tool family (`ac
 - **Default:** `true`
 - **Status:** 🟢 ACTIVE
 - **Description:** Enable the `acp_delegate` tools (`acp_delegate`, `acp_delegate_wait`, `acp_delegate_cancel`) and the system-prompt section that describes them. Set to `false` to skip registering them entirely — for example, if you use a different sub-agent extension, or when running headless where async result injection adds no value.
+- **Timing:** The tools (and the `ctrl+alt+f` shortcut) register at session start, so toggling takes effect on the next session/restart; the system-prompt section is re-resolved every turn and changes immediately within a session. Mid-session edits can therefore briefly desynchronize the two surfaces.
+- **Pi's `--exclude-tools` is not a substitute:** the native tool denylist hides the tools but not the prompt section — the section is driven by this key alone, so the model would still receive `ACP_DELEGATE NOTIFICATIONS` describing tools it cannot call. Use `"delegate": false`; use `delegatePrompt: null` instead if you want to keep the tools but remove only the prompt section.
 
 ### `delegate.displayUsage`
 

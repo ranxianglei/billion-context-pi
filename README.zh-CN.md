@@ -65,10 +65,9 @@ pi install npm:billion-context-pi
 
 完成。扩展在下次 Pi 启动时自动加载。无需配置 —— 它会自动读取模型的上下文窗口。
 
-> **建议先卸载 `pi-subagents`(可选,推荐)。** billion-context-pi 自带 `acp_delegate` 子代理工具(见下文),以极低的上下文成本(~600 tok vs ~7K tok/轮)替代 pi-subagents。如果你已安装 pi-subagents,卸载它以避免重复的委派工具:
-> ```bash
-> pi remove npm:pi-subagents
-> ```
+> **正在使用其他子代理扩展?** 选一套委派工具集,避免模型在两套之间摇摆:
+> - **改用 ACP 的 `acp_delegate`**(默认,推荐)— 卸载另一个,例如 `pi remove npm:pi-subagents`。它以极低的上下文成本(~600 tok vs ~7K tok/轮)替代 pi-subagents,见下文。
+> - **保留你自己的子代理** — 在 `.pi/acp.json`(项目级)或 `~/.pi/acp.json`(全局)中设 `"delegate": false`:ACP 不再注册任何 `acp_delegate*` 工具,也不注入委派提示段。见[使用你自己的子代理](#使用你自己的子代理)。
 
 ## 工作原理
 
@@ -122,6 +121,8 @@ billion-context-pi 面向 **Pi** 编码代理(`@earendil-works/pi-coding-agent`)
 | `acp_delegate_wait` | 阻塞等待委派任务完成(返回结果,否则超时) |
 | `acp_delegate_cancel` | 按 runId 取消正在运行的委派任务 |
 
+三行 `acp_delegate*` 工具可用 `acp.json` 中的 `"delegate": false` 整体移除——见[使用你自己的子代理](#使用你自己的子代理)。
+
 ### acp_delegate — 干净上下文委派
 
 把一个自包含的任务交给一个运行在干净上下文中的新 pi 进程。五个内置角色,各自有系统提示和**软工具护栏**:
@@ -144,6 +145,22 @@ Worker 运行在 Pi 的完整默认工具集上 - 不应用 `--tools` 白名单,
 - **Print / JSON 模式**(`pi -p`、SDK):`async:true` 自动降级为**同步** — 结果在同一轮作为工具结果返回(父进程一轮后即退出,后台注入会丢失)。
 
 在**交互 TUI** 中,异步运行还会在编辑器下方显示一个实时状态 widget(角色、已运行秒数、任务预览),让你随时知道什么在跑、跑了多久。RPC/print/JSON 模式自动禁用。
+
+#### 使用你自己的子代理
+
+如果你保留自己的子代理扩展(pi-subagents、pi-lens 等),不想再叠加 ACP 的委派工具集,关掉它:
+
+```json
+{ "delegate": false }
+```
+
+写入 `.pi/acp.json`(项目级)或 `~/.pi/acp.json`(全局);项目级覆盖全局。`"delegate": false` 与 `"delegate": { "enabled": false }` 等价——其余键(`displayUsage`、超时等)保持默认值,只是禁用期间不生效。
+
+关闭的具体面:`acp_delegate*` 三个工具、`ctrl+alt+f` 快捷键、系统提示中的 `ACP_DELEGATE NOTIFICATIONS` 段。其余功能(compress / decompress / search_context / acp_status、prune、nudge)不受影响。
+
+生效时机:工具在会话开始时注册,改动在**下一个会话**生效(重启 Pi 或开新会话);提示段每回合重新解析,会在当前会话内立即变化。因此会话中途改配置时两个面可能短暂不同步(开启后提示先于工具出现;关闭后提示先消失而工具保留到重启)。
+
+相关开关:`delegatePrompt: null` 只摘除提示段、保留工具——与 `"delegate": false` 全关正好相反。不要用 Pi 的 `--exclude-tools acp_delegate,...` 替代 `"delegate": false`:denylist 只让工具消失,提示段只由配置驱动——模型仍会被告知 `acp_delegate_wait` 等它调不到的工具。
 
 ## `/acp` 命令
 

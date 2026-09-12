@@ -66,10 +66,9 @@ pi install npm:billion-context-pi
 
 That's it. The extension auto-loads on next Pi startup. No configuration needed — it reads your model's context window automatically.
 
-> **Uninstall `pi-subagents` first (optional, recommended).** billion-context-pi ships its own `acp_delegate` sub-agent tool (see below) that replaces pi-subagents at a fraction of the context cost (~600 tok vs ~7K tok/turn). If you have pi-subagents installed, remove it to avoid duplicate delegation tools:
-> ```bash
-> pi remove npm:pi-subagents
-> ```
+> **Already using another sub-agent extension?** Pick one delegation toolset so the model doesn't waffle between two:
+> - **Use ACP's `acp_delegate` instead** (default, recommended) — uninstall the other one, e.g. `pi remove npm:pi-subagents`. It replaces pi-subagents at a fraction of the context cost (~600 tok vs ~7K tok/turn); see below.
+> - **Keep your own sub-agents** — set `"delegate": false` in `.pi/acp.json` (project) or `~/.pi/acp.json` (global): ACP then registers no `acp_delegate*` tools and injects no delegation prompt. See [Using your own sub-agents](#using-your-own-sub-agents).
 
 ## How it works
 
@@ -123,6 +122,8 @@ billion-context-pi is built for the **Pi** coding agent (`@earendil-works/pi-cod
 | `acp_delegate_wait` | Block until a delegate run finishes (returns its result; times out otherwise) |
 | `acp_delegate_cancel` | Cancel a running delegate by runId |
 
+The three `acp_delegate*` rows can be removed entirely with `"delegate": false` in `acp.json` — see [Using your own sub-agents](#using-your-own-sub-agents).
+
 ### acp_delegate — clean-context delegation
 
 Hand a self-contained task to a fresh pi process running in a clean context. Five built-in roles, each with a system prompt and a **soft tool guardrail**:
@@ -146,6 +147,22 @@ The full delegate result is saved to a file (`/tmp/acp-delegate/<runId>.out`); t
 - **Failures are loud, never silent.** A run that fails (nonzero exit, spawn error, watchdog timeout) injects a `FAILED ⚠️` notification carrying a short error excerpt, so a failed delegate cannot hide among sibling completions. If a notification cannot be delivered at all, a recovery notice is attached to the next delegate notification or the next `acp_delegate` / `acp_delegate_wait` / `acp_delegate_cancel` tool result — a dispatched run's failure always reaches the model before it wraps up.
 
 In the **interactive TUI**, async runs also show a live status widget below the editor (agent, elapsed seconds, task preview), so you always know what's running and for how long. Disabled automatically in RPC/print/JSON.
+
+#### Using your own sub-agents
+
+If you keep your own sub-agent extension (pi-subagents, pi-lens, ...) and don't want ACP's delegation toolset on top of it, disable it:
+
+```json
+{ "delegate": false }
+```
+
+in `.pi/acp.json` (project) or `~/.pi/acp.json` (global); project overrides global. `"delegate": false` is equivalent to `"delegate": { "enabled": false }` — the other keys (`displayUsage`, timeouts, ...) keep their defaults, they just go unused while disabled.
+
+What turns off: the three `acp_delegate*` tools, the `ctrl+alt+f` shortcut, and the `ACP_DELEGATE NOTIFICATIONS` system-prompt section. Everything else (compress / decompress / search_context / acp_status, pruning, nudges) is unaffected.
+
+Timing: tools are registered at session start, so the change takes effect on the **next session** (restart Pi or start a new session); the prompt section is re-resolved every turn and changes immediately within a session. Mid-session edits can therefore briefly desynchronize the two surfaces (enabling shows the prompt before the tools exist; disabling hides the prompt while the tools stay registered until restart).
+
+Related knobs: `delegatePrompt: null` removes only the prompt section and keeps the tools — the inverse of `"delegate": false`, which removes both. Don't use Pi's `--exclude-tools acp_delegate,...` as a substitute for `"delegate": false`: the denylist hides the tools, but the prompt section is driven by config only — the model would still be told about `acp_delegate_wait` etc. even though it cannot call them.
 
 ## `/acp` command
 

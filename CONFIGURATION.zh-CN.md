@@ -240,6 +240,8 @@
 - **默认值：** `true`
 - **状态：** 🟢 ACTIVE
 - **说明：** 启用 `acp_delegate` 工具（`acp_delegate`、`acp_delegate_wait`、`acp_delegate_cancel`）及其对应的系统提示部分。设为 `false` 可完全跳过注册——例如你使用了其他子代理扩展，或者在无头环境下运行时异步结果注入没有意义。
+- **生效时机：** 工具（与 `ctrl+alt+f` 快捷键）在会话开始时注册，切换在下一个会话/重启后生效；系统提示部分每回合重新解析，会在当前会话内立即变化。会话中途修改配置因此可能短暂使两个面不同步。
+- **Pi 的 `--exclude-tools` 不能替代本键：** 原生工具 denylist 只隐藏工具，不隐藏提示段——提示段只由本键驱动，模型仍会收到描述其调不到的工具的 `ACP_DELEGATE NOTIFICATIONS`。请设 `"delegate": false`；若只想摘除提示段而保留工具，改用 `delegatePrompt: null`。
 
 ### `delegate.displayUsage`
 
