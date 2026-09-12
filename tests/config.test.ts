@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { resolveConfig, resolveCompress, mergeCompress, resolveDelegate, resolveRepetitionGuard, resolveHostSession, REPETITION_GUARD_DEFAULTS, type AdapterConfig } from "../src/config.js";
+import { resolveConfig, resolveCompress, mergeCompress, resolveDelegate, resolveRepetitionGuard, resolveHostSession, REPETITION_GUARD_DEFAULTS, scaleNudgeGrowthToWindow, type AdapterConfig } from "../src/config.js";
 
 const EMPTY: AdapterConfig = {};
 
@@ -80,6 +80,33 @@ test("resolveConfig leaves growthFloor/growthCap at kernel defaults when compres
   const cfg = resolveConfig(EMPTY, 1_000_000);
   assert.equal(cfg.nudge.growthFloor, 50000);
   assert.equal(cfg.nudge.growthCap, 50000);
+});
+
+test("scaleNudgeGrowthToWindow: a third of the window under 150K, kernel default otherwise (#398)", () => {
+  assert.equal(scaleNudgeGrowthToWindow(1_000_000), 50_000, "1M window keeps the kernel default");
+  assert.equal(scaleNudgeGrowthToWindow(150_000), 50_000, "150K boundary keeps the kernel default");
+  assert.equal(scaleNudgeGrowthToWindow(100_000), 33_333);
+  assert.equal(scaleNudgeGrowthToWindow(50_000), 16_667, "50K window: soft cadence from ~52% usage");
+  assert.equal(scaleNudgeGrowthToWindow(30_000), 10_000);
+  assert.equal(scaleNudgeGrowthToWindow(20_000), 8_000, "below 24K the floor clamps");
+  assert.equal(scaleNudgeGrowthToWindow(0), 50_000, "unknown window keeps the kernel default");
+  assert.equal(scaleNudgeGrowthToWindow(Number.NaN), 50_000);
+});
+
+test("resolveConfig scales the unset growth band to sub-150K windows (#398)", () => {
+  const cfg = resolveConfig(EMPTY, 50_000);
+  assert.equal(cfg.nudge.growthFloor, 16_667);
+  assert.equal(cfg.nudge.growthCap, 16_667);
+  assert.equal(resolveConfig(EMPTY, 149_999).nudge.growthFloor, 50_000, "just under the boundary scales but clamps to the kernel default");
+  assert.equal(resolveConfig({ modelContextLimit: 50_000 }, 1_000_000).nudge.growthFloor, 16_667, "adapter limit drives the scale too");
+});
+
+test("resolveConfig: explicit nudgeGrowthTokens beats window scaling on small windows (#398)", () => {
+  const cfg = resolveConfig({ compress: { nudgeGrowthTokens: 30_000 } }, 50_000);
+  assert.equal(cfg.nudge.growthFloor, 30_000);
+  assert.equal(cfg.nudge.growthCap, 30_000);
+  const cascaded = resolveConfig({ compress: { providers: { qwen: { nudgeGrowthTokens: 12_000 } } } }, 50_000, "qwen", "m1");
+  assert.equal(cascaded.nudge.growthFloor, 12_000, "provider-level explicit still wins");
 });
 
 test("resolveConfig maps compress.minPressureBenefitTokens to kernel nudge (0 = legacy any-pending)", () => {
