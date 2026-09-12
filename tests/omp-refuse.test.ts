@@ -1,7 +1,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { createAcpExtension } from "../src/index.js";
-import { OMP_UNSUPPORTED_MESSAGE } from "../src/omp.js";
+import { UNSUPPORTED_HOST_MESSAGE } from "../src/omp.js";
 import { setRunNpmForTest } from "../src/update.js";
 
 // Hermetic session_start: the pi (non-OMP) path runs the auto-update check, so
@@ -9,6 +9,7 @@ import { setRunNpmForTest } from "../src/update.js";
 setRunNpmForTest(async (args) => ({ code: 0, stdout: args[0] === "view" ? "0.0.1\n" : "", stderr: "" }));
 process.env.ACP_AUTO_UPDATE = "false";
 delete process.env.BILLION_CONTEXT_PROXY;
+delete process.env.PI_ACP_FORK_HOST;
 
 // Mock Pi's ExtensionAPI — captures the event handlers + tools the factory wires.
 function captureApi() {
@@ -69,7 +70,7 @@ function piCtx(notify: Notify) {
 const startSession = (handlers: any, ctx: any) =>
   handlers.get("session_start")![0]!({ type: "session_start", reason: "startup" }, ctx);
 
-describe("OMP host refusal (issue #234)", () => {
+describe("Unsupported-host refusal (issue #234 / #364)", () => {
   test("detects OMP at session_start, refuses service, warns once via UI", async () => {
     const { api, handlers } = captureApi();
     createAcpExtension()(api as any);
@@ -80,7 +81,7 @@ describe("OMP host refusal (issue #234)", () => {
     await startSession(handlers, ctx);
 
     assert.equal(notes.length, 1, "warns exactly once");
-    assert.equal(notes[0]!.msg, OMP_UNSUPPORTED_MESSAGE);
+    assert.equal(notes[0]!.msg, UNSUPPORTED_HOST_MESSAGE);
     assert.equal(notes[0]!.type, "warning");
 
     // Stands down: does not cancel the host's own compaction.
@@ -106,7 +107,7 @@ describe("OMP host refusal (issue #234)", () => {
     await startSession(handlers, ctx);
 
     assert.equal(notes.length, 1, "second session_start must not re-warn");
-    assert.equal(notes[0], OMP_UNSUPPORTED_MESSAGE);
+    assert.equal(notes[0], UNSUPPORTED_HOST_MESSAGE);
   });
 
   test("all four ACP tools refuse service on OMP", async () => {
@@ -119,7 +120,7 @@ describe("OMP host refusal (issue #234)", () => {
       const tool = api.tools.find((t: any) => t.name === name);
       assert.ok(tool, `${name} tool is registered`);
       const res = await (tool as any).execute("t1", {}, undefined, undefined, ctx);
-      assert.equal((res.content[0] as any).text, OMP_UNSUPPORTED_MESSAGE, `${name} refuses service`);
+      assert.equal((res.content[0] as any).text, UNSUPPORTED_HOST_MESSAGE, `${name} refuses service`);
     }
   });
 
@@ -140,7 +141,7 @@ describe("OMP host refusal (issue #234)", () => {
     }
 
     assert.equal(errs.length, 1, "exactly one stderr line");
-    assert.equal(errs[0], OMP_UNSUPPORTED_MESSAGE);
+    assert.equal(errs[0], UNSUPPORTED_HOST_MESSAGE);
   });
 
   test("does NOT refuse on a pi host (buildContextEntries present)", async () => {
@@ -152,10 +153,28 @@ describe("OMP host refusal (issue #234)", () => {
 
     await startSession(handlers, ctx);
 
-    assert.equal(notes.filter((m) => m === OMP_UNSUPPORTED_MESSAGE).length, 0, "no OMP warning on a pi host");
+    assert.equal(notes.filter((m) => m === UNSUPPORTED_HOST_MESSAGE).length, 0, "no OMP warning on a pi host");
     assert.deepEqual(handlers.get("session_before_compact")![0]!({}, {}), { cancel: true });
     const sp = handlers.get("before_agent_start")![0]!({ systemPrompt: "BASE" }, {});
     assert.ok(sp.systemPrompt.startsWith("BASE"));
     assert.ok(sp.systemPrompt.includes("compress"));
+  });
+
+  test("declared Pi-compatible fork (PI_ACP_FORK_HOST=1) is NOT refused (#364)", async () => {
+    const { api, handlers } = captureApi();
+    createAcpExtension()(api as any);
+    const notes: string[] = [];
+    const notify: Notify = (msg) => notes.push(msg);
+    const ctx = ompCtx(notify, true);
+
+    process.env.PI_ACP_FORK_HOST = "1";
+    try {
+      await startSession(handlers, ctx);
+    } finally {
+      delete process.env.PI_ACP_FORK_HOST;
+    }
+
+    assert.equal(notes.filter((m) => m === UNSUPPORTED_HOST_MESSAGE).length, 0, "no refusal when fork declared");
+    assert.deepEqual(handlers.get("session_before_compact")![0]!({}, {}), { cancel: true });
   });
 });

@@ -82,7 +82,7 @@ test("/acp-decompress returns a block's content and stays repeatable (append mod
     ctx,
   );
   const compressText = (compressRes.content[0] as any).text as string;
-  assert.match(compressText, /1 block/, "compress created a block");
+  assert.match(compressText, /blocks: b\d+=/, "compress created a block");
 
   // 3) Run /acp-decompress b1 — returns content, does NOT deactivate.
   notifies.length = 0;

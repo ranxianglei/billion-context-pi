@@ -61,12 +61,12 @@ function userMsg(id: string, text: string) {
   return { type: "message", id, parentId: null, timestamp: "", message: { role: "user", content: text, timestamp: Date.now() } };
 }
 
- test("factory registers the compress tool and 6 flat commands", () => {
+ test("factory registers the compress tool and 7 flat commands", () => {
   const { api, handlers } = captureApi();
   createAcpExtension()(api as any);
 
   assert.ok(api.tools.some((t) => t.name === "compress"), "compress tool registered");
-  assert.deepEqual([...api.commands.keys()].sort(), ["acp", "acp-decompress", "acp-fleet", "acp-search", "acp-status", "acp-subagents"]);
+  assert.deepEqual([...api.commands.keys()].sort(), ["acp", "acp-decompress", "acp-export", "acp-fleet", "acp-search", "acp-status", "acp-subagents"]);
   assert.ok(handlers.has("context"), "context event wired");
   assert.ok(handlers.has("session_before_compact"), "compaction-disable wired");
   assert.ok(handlers.has("before_agent_start"), "system-prompt wired");
@@ -362,7 +362,7 @@ test("omp matches emergency-truncated tool results before compression", async (t
   const targetRef = transformed.messages[0].content.find((block: { type: string; text: string }) => block.type === "text").text.match(/m\d{5}/)![0];
   const compressTool = api.tools.find((tool: { name: string }) => tool.name === "compress")!;
   const result = await compressTool.execute("tc-omp-truncation", { content: [{ startId: targetRef, endId: targetRef, summary: "This large tool result was emergency-truncated in provider context and is now safely compressed from the original entry." }] }, undefined, undefined, ctx);
-  assert.match(result.content[0].text, /1 block/, result.content[0].text);
+  assert.match(result.content[0].text, /blocks: b\d+=/, result.content[0].text);
 });
 
 test("omp does not collapse distinct multimodal user messages with identical text (images survive)", async () => {
@@ -448,7 +448,7 @@ test("acp_status refs remain usable by the next compress call", async () => {
   const targetRef = status.content[0].text.match(/m\d{5}/)![0];
   const compressTool = api.tools.find((tool: { name: string }) => tool.name === "compress")!;
   const result = await compressTool.execute("tc-status-compress", { content: [{ startId: targetRef, endId: targetRef, summary: "This range was selected by acp_status and is now safely compressed from the original entry." }] }, undefined, undefined, ctx);
-  assert.match(result.content[0].text, /1 block/, result.content[0].text);
+  assert.match(result.content[0].text, /blocks: b\d+=/, result.content[0].text);
 });
 
 test("omp rebuilds refs after stale live state before status compression", async () => {
@@ -470,7 +470,7 @@ test("omp rebuilds refs after stale live state before status compression", async
   assert.equal(targetRef, "m00001", status.content[0].text);
   const compressTool = api.tools.find((tool: { name: string }) => tool.name === "compress")!;
   const result = await compressTool.execute("tc-stale-live-compress", { content: [{ startId: targetRef, endId: targetRef, summary: "This stale live range was rebuilt against stable persisted entries and is now safely compressed." }] }, undefined, undefined, ctx);
-  assert.match(result.content[0].text, /1 block/, result.content[0].text);
+  assert.match(result.content[0].text, /blocks: b\d+=/, result.content[0].text);
 });
 
 test("system prompt sources compression rules from acp-kernel (no hardcoded drift, no markers)", () => {
@@ -655,7 +655,7 @@ test("omp keeps compression blocks active when provider context has an extra pre
     undefined,
     ctx,
   );
-  assert.match(compressed.content[0].text, /1 block/);
+  assert.match(compressed.content[0].text, /blocks: b\d+=/);
 
   const next = await handlers.get("context")![0]!(
     {
@@ -704,7 +704,7 @@ test("omp keeps compression active when persisted and provider tails diverge", a
     undefined,
     ctx,
   );
-  assert.match(compressed.content[0].text, /1 block/);
+  assert.match(compressed.content[0].text, /blocks: b\d+=/);
 
   const activeUserText = "current user on the active branch";
   persisted = [...persisted, userMsg("e-active-user", activeUserText)];

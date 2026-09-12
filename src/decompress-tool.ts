@@ -1,10 +1,11 @@
 import { Type, type Static } from "typebox";
 import type { AgentToolResult, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { AcpRuntime } from "./runtime.js";
+import { applyToolPromptOverrides, type ToolPromptOverrides } from "./surface.js";
 import { debug, logError, logInfo, logThrow } from "./log.js";
 import { parseBlockIdArg, collectBlockContent, type CompressionBlock } from "acp-kernel";
 import { entriesToCoreMessages } from "./messages.js";
-import { OMP_UNSUPPORTED_MESSAGE } from "./omp.js";
+import { UNSUPPORTED_HOST_MESSAGE } from "./omp.js";
 import { writeFile, mkdir } from "node:fs/promises";
 import { existsSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
 import { resolve, relative, isAbsolute, join, basename, dirname } from "node:path";
@@ -31,8 +32,8 @@ const DecompressParams = Type.Object({
 
 type DecompressArgs = Static<typeof DecompressParams>;
 
-export function makeDecompressTool(runtime: AcpRuntime): ToolDefinition<typeof DecompressParams> {
-  return {
+export function makeDecompressTool(runtime: AcpRuntime, overrides?: ToolPromptOverrides): ToolDefinition<typeof DecompressParams> {
+  return applyToolPromptOverrides({
     name: "decompress",
     label: "Decompress",
     description:
@@ -46,7 +47,7 @@ export function makeDecompressTool(runtime: AcpRuntime): ToolDefinition<typeof D
     ],
     parameters: DecompressParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {
-      if (runtime.refused) return { details: undefined, content: [{ type: "text", text: runtime.refusalMessage ?? OMP_UNSUPPORTED_MESSAGE }] };
+      if (runtime.refused) return { details: undefined, content: [{ type: "text", text: runtime.refusalMessage ?? UNSUPPORTED_HOST_MESSAGE }] };
       let result: string;
       try {
         result = await handleDecompress(params as DecompressArgs, runtime, ctx);
@@ -56,7 +57,7 @@ export function makeDecompressTool(runtime: AcpRuntime): ToolDefinition<typeof D
       }
       return { details: undefined, content: [{ type: "text", text: result }] };
     },
-  };
+  }, overrides);
 }
 
 /** Allowed roots for toFile paths. Keeps user-supplied paths from escaping to

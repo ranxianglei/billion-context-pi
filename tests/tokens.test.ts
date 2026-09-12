@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { estimateTokens, lastUserMessageId } from "../src/tokens.js";
+import { estimateTokens } from "../src/tokens.js";
 
 test("estimateTokens matches kernel defaultCountTokens (CJK 1:1 + chars/4)", () => {
   const msgs = [
@@ -38,32 +38,4 @@ test("estimateTokens skips covered (already-compressed) message ids", () => {
   assert.equal(estimateTokens(msgs, covered), 4);
 });
 
-test("lastUserMessageId returns the id of the last user-role entry", () => {
-  const entries = [
-    { id: "a", message: { role: "user" } },
-    { id: "b", message: { role: "assistant" } },
-    { id: "c", message: { role: "user" } },
-    { id: "d", message: { role: "toolResult" } },
-  ];
-  assert.equal(lastUserMessageId(entries), "c", "last user message is c");
-});
 
-test("lastUserMessageId returns undefined when no user message exists", () => {
-  const entries = [
-    { id: "a", message: { role: "assistant" } },
-    { id: "b", message: { role: "toolResult" } },
-  ];
-  assert.equal(lastUserMessageId(entries), undefined);
-});
-
-test("lastUserMessageId returns undefined for empty entries", () => {
-  assert.equal(lastUserMessageId([]), undefined);
-});
-
-test("lastUserMessageId handles entries without message field", () => {
-  const entries = [
-    { id: "a" },
-    { id: "b", message: { role: "user" } },
-  ];
-  assert.equal(lastUserMessageId(entries), "b", "skips entries without message");
-});

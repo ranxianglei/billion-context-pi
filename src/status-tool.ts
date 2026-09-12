@@ -1,6 +1,7 @@
 import { Type, type Static } from "typebox";
 import type { AgentToolResult, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { AcpRuntime } from "./runtime.js";
+import { applyToolPromptOverrides, type ToolPromptOverrides } from "./surface.js";
 import { buildStatusReport, defaultCountTokens, formatRanges, viableRanges } from "acp-kernel";
 import { estimateTokens, collectCoveredMessageIds, collectImageTokens, modelSupportsImages, adjustedTokenCount } from "./tokens.js";
 import { usageAnchorPredatesCompression } from "./floor-stale.js";
@@ -9,7 +10,7 @@ import { getSystemPromptText } from "./compat.js";
 import { logThrow } from "./log.js";
 import { getDelegateUsage } from "./delegate-tool.js";
 import { resolveDelegate } from "./config.js";
-import { OMP_UNSUPPORTED_MESSAGE } from "./omp.js";
+import { UNSUPPORTED_HOST_MESSAGE } from "./omp.js";
 
 const StatusParams = Type.Object({
   scope: Type.Optional(Type.Union([Type.Literal("compressed"), Type.Literal("uncompressed")], { description: '"compressed" = drill into blocks; "uncompressed" = show visible messages/ranges. Default: overview.' })),
@@ -21,8 +22,8 @@ const StatusParams = Type.Object({
 
 type StatusArgs = Static<typeof StatusParams>;
 
-export function makeStatusTool(runtime: AcpRuntime): ToolDefinition<typeof StatusParams> {
-  return {
+export function makeStatusTool(runtime: AcpRuntime, overrides?: ToolPromptOverrides): ToolDefinition<typeof StatusParams> {
+  return applyToolPromptOverrides({
     name: "acp_status",
     label: "ACP Status",
     description:
@@ -35,7 +36,7 @@ export function makeStatusTool(runtime: AcpRuntime): ToolDefinition<typeof Statu
     ],
     parameters: StatusParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {
-      if (runtime.refused) return { details: undefined, content: [{ type: "text", text: runtime.refusalMessage ?? OMP_UNSUPPORTED_MESSAGE }] };
+      if (runtime.refused) return { details: undefined, content: [{ type: "text", text: runtime.refusalMessage ?? UNSUPPORTED_HOST_MESSAGE }] };
       let result: string;
       try {
         result = await handleStatus(params as StatusArgs, runtime, ctx);
@@ -45,7 +46,7 @@ export function makeStatusTool(runtime: AcpRuntime): ToolDefinition<typeof Statu
       }
       return { details: undefined, content: [{ type: "text", text: result }] };
     },
-  };
+  }, overrides);
 }
 
 async function handleStatus(args: StatusArgs, runtime: AcpRuntime, ctx: ExtensionContext): Promise<string> {

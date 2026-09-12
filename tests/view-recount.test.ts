@@ -98,7 +98,7 @@ test("#289 Fix A: sent-view recount suppresses spurious emergency", async () => 
 
     const out: any = await compressTool.execute("tc1", { content: [{ startId: refC1, endId: refC1, summary: "s".repeat(300) }] }, undefined, undefined, ctx);
     const text = typeof out === "string" ? out : out.content?.[0]?.text ?? String(out);
-    assert.match(text, /1 block/, `expected successful compress, got: ${text}`);
+    assert.match(text, /blocks: b\d+=/, `expected successful compress, got: ${text}`);
 
     // Session realism: the compress toolResult lands in the transcript.
     branchEntries.push(msg("cr1", "toolResult", [{ type: "text", text: "▣ ACP | 81.7K → 72.2K tokens (~9.5K reclaimed, 1 block)" }], { toolName: "compress", toolCallId: "tc1" }));

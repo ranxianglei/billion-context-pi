@@ -118,6 +118,19 @@ test("loadUserConfig reads outputHeadroomMaxPct (ratio and percent string)", asy
   }
 });
 
+test("loadUserConfig reads hostSession (object form survives pickKnown)", async () => {
+  const tmpDir = path.join(os.tmpdir(), `acp-test-hostsession-${Date.now()}`);
+  await fs.mkdir(tmpDir, { recursive: true });
+  await writeConfig(tmpDir, { hostSession: { countCustomMessages: true }, unknownKey: "nope" });
+  try {
+    const config = await loadUserConfig(tmpDir);
+    assert.deepEqual(config.hostSession, { countCustomMessages: true }, "hostSession is a known key");
+    assert.equal((config as Record<string, unknown>).unknownKey, undefined, "unknown keys still filtered");
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
 test("loadUserConfig ignores unknown keys", async () => {
   const tmpDir = path.join(os.tmpdir(), `acp-test-unknown-${Date.now()}`);
   await fs.mkdir(tmpDir, { recursive: true });

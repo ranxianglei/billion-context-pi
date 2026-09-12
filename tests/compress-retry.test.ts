@@ -95,47 +95,47 @@ test("noteCompressOutcomes: counts, caps, resets on success, resets per turn, ne
   const success = (id: string) => ({ toolCallId: id, isError: false, success: true });
   const neutral = (id: string) => ({ toolCallId: id, isError: false, success: false });
 
-  let r = rt.noteCompressOutcomes("u1", [fail("t0")]);
+  let r = rt.noteCompressOutcomes("s", "u1", [fail("t0")]);
   assert.equal(r.count, 1);
   assert.equal(r.cappedNow, false);
 
   // idempotent re-fire (same toolCallIds): count frozen
-  r = rt.noteCompressOutcomes("u1", [fail("t0")]);
+  r = rt.noteCompressOutcomes("s", "u1", [fail("t0")]);
   assert.equal(r.count, 1, "no double count on re-fire");
 
   // neutral outcome: no reset
-  r = rt.noteCompressOutcomes("u1", [fail("t0"), neutral("n1")]);
+  r = rt.noteCompressOutcomes("s", "u1", [fail("t0"), neutral("n1")]);
   assert.equal(r.count, 1, "neutral does not reset the counter");
 
   // a NEW failure after a neutral one: attempt 2, not 1 — neutral cannot
   // bypass the cap by resetting between failures
-  r = rt.noteCompressOutcomes("u1", [fail("t0"), neutral("n1"), fail("t9")]);
+  r = rt.noteCompressOutcomes("s", "u1", [fail("t0"), neutral("n1"), fail("t9")]);
   assert.equal(r.count, 2);
 
   // third distinct failure → cap, cappedNow fires once
-  r = rt.noteCompressOutcomes("u1", [fail("t0"), neutral("n1"), fail("t9"), fail("tc")]);
+  r = rt.noteCompressOutcomes("s", "u1", [fail("t0"), neutral("n1"), fail("t9"), fail("tc")]);
   assert.equal(r.count, 3);
   assert.equal(r.cappedNow, true);
-  r = rt.noteCompressOutcomes("u1", [fail("t0"), neutral("n1"), fail("t9"), fail("tc")]);
+  r = rt.noteCompressOutcomes("s", "u1", [fail("t0"), neutral("n1"), fail("t9"), fail("tc")]);
   assert.equal(r.cappedNow, false, "cap notification is one-shot");
   assert.equal(MAX_COMPRESS_ATTEMPTS, 3);
 
   // success resets the counter
-  r = rt.noteCompressOutcomes("u1", [fail("t0"), neutral("n1"), fail("t9"), fail("tc"), success("ts")]);
+  r = rt.noteCompressOutcomes("s", "u1", [fail("t0"), neutral("n1"), fail("t9"), fail("tc"), success("ts")]);
   assert.equal(r.count, 0);
 
   // a NEW failure after success counts a fresh cycle
-  r = rt.noteCompressOutcomes("u1", [fail("t0"), neutral("n1"), fail("t9"), fail("tc"), success("ts"), fail("td")]);
+  r = rt.noteCompressOutcomes("s", "u1", [fail("t0"), neutral("n1"), fail("t9"), fail("tc"), success("ts"), fail("td")]);
   assert.equal(r.count, 1);
 
   // new user turn → fresh counter even without a success in between
-  r = rt.noteCompressOutcomes("u1", [fail("t0"), neutral("n1"), fail("t9"), fail("tc"), success("ts"), fail("td"), fail("te"), fail("tf")]);
+  r = rt.noteCompressOutcomes("s", "u1", [fail("t0"), neutral("n1"), fail("t9"), fail("tc"), success("ts"), fail("td"), fail("te"), fail("tf")]);
   assert.equal(r.count, 3, "back at cap");
-  r = rt.noteCompressOutcomes("u2", [fail("x0")]);
+  r = rt.noteCompressOutcomes("s", "u2", [fail("x0")]);
   assert.equal(r.count, 1);
 
   // a deduped stale failure must not count against a new turn
-  r = rt.noteCompressOutcomes("u3", [fail("x0")]);
+  r = rt.noteCompressOutcomes("s", "u3", [fail("x0")]);
   assert.equal(r.count, 0, "stale id deduped, count stays 0 after turn change");
 });
 
@@ -280,22 +280,22 @@ test("noteCompressOutcomes: no-op panels advance the counter toward the cap", ()
   const rt = createRuntime({});
   const noop = (id: string) => ({ toolCallId: id, isError: false, success: false, noop: true });
 
-  let r = rt.noteCompressOutcomes("u1", [noop("t0")]);
+  let r = rt.noteCompressOutcomes("s", "u1", [noop("t0")]);
   assert.equal(r.count, 1);
 
-  r = rt.noteCompressOutcomes("u1", [noop("t0"), noop("t1")]);
+  r = rt.noteCompressOutcomes("s", "u1", [noop("t0"), noop("t1")]);
   assert.equal(r.count, 2);
 
-  r = rt.noteCompressOutcomes("u1", [noop("t0"), noop("t1"), noop("t2")]);
+  r = rt.noteCompressOutcomes("s", "u1", [noop("t0"), noop("t1"), noop("t2")]);
   assert.equal(r.count, 3);
   assert.equal(r.cappedNow, true);
-  assert.equal(rt.compressRetryCappedFor("u1"), true, "capped state is queryable per turn");
-  assert.equal(rt.compressRetryCappedFor("u2"), false, "other turns are unaffected");
+  assert.equal(rt.compressRetryCappedFor("s", "u1"), true, "capped state is queryable per turn");
+  assert.equal(rt.compressRetryCappedFor("s", "u2"), false, "other turns are unaffected");
 
   const success = (id: string) => ({ toolCallId: id, isError: false, success: true, noop: false });
-  r = rt.noteCompressOutcomes("u1", [noop("t0"), noop("t1"), noop("t2"), success("ts")]);
+  r = rt.noteCompressOutcomes("s", "u1", [noop("t0"), noop("t1"), noop("t2"), success("ts")]);
   assert.equal(r.count, 0, "genuine success lifts the cap");
-  assert.equal(rt.compressRetryCappedFor("u1"), false);
+  assert.equal(rt.compressRetryCappedFor("s", "u1"), false);
 });
 
 test("emergency nudge stops re-injecting once the turn's cap is burned (issue #6 loop breaker)", async () => {
@@ -335,4 +335,40 @@ test("emergency nudge stops re-injecting once the turn's cap is burned (issue #6
   const rRe = await fire(handlers, ctx);
   assert.ok(nudgeCount(rRe) >= 1, "after a successful compress the emergency nudge may resume");
   await rm(`${stateFile}.acp.json`, { force: true });
+});
+
+test("noteCompressOutcomes: concurrent sessions keep independent counters on the same turn (#317)", () => {
+  const rt = createRuntime({});
+  const fail = (id: string) => ({ toolCallId: id, isError: true, success: false });
+
+  assert.equal(rt.noteCompressOutcomes("A", "u1", [fail("a0")]).count, 1);
+  assert.equal(rt.noteCompressOutcomes("A", "u1", [fail("a0"), fail("a1")]).count, 2);
+  assert.equal(rt.noteCompressOutcomes("B", "u1", [fail("b0")]).count, 1, "B has its own counter");
+
+  const ra = rt.noteCompressOutcomes("A", "u1", [fail("a0"), fail("a1"), fail("a2")]);
+  assert.equal(ra.count, 3, "A reaches its own cap");
+  assert.equal(rt.compressRetryCappedFor("A", "u1"), true, "A capped independently");
+  assert.equal(rt.compressRetryCappedFor("B", "u1"), false, "B not capped by A's failures");
+});
+
+test("clearCompressRetryTracking: drops one session only; siblings survive (#317)", () => {
+  const rt = createRuntime({});
+  const fail = (id: string) => ({ toolCallId: id, isError: true, success: false });
+  rt.noteCompressOutcomes("A", "u1", [fail("a0"), fail("a1"), fail("a2")]);
+  rt.noteCompressOutcomes("B", "u1", [fail("b0")]);
+  rt.clearCompressRetryTracking("A");
+  assert.equal(rt.compressRetryCappedFor("A", "u1"), false, "A cleared");
+  assert.equal(rt.noteCompressOutcomes("B", "u1", [fail("b0"), fail("b1")]).count, 2, "B unaffected by A's clear");
+});
+
+test("nudge ledger: per-session mark/query/clear isolation (#317)", () => {
+  const rt = createRuntime({});
+  rt.markNudgeShown("A", "u1");
+  assert.equal(rt.nudgeShownFor("A", "u1"), true);
+  assert.equal(rt.nudgeShownFor("B", "u1"), false, "B unaffected by A's nudge record");
+  rt.clearNudgeTracking("A");
+  assert.equal(rt.nudgeShownFor("A", "u1"), false, "A cleared");
+  rt.markNudgeShown("A", "u2");
+  assert.equal(rt.nudgeShownFor("A", "u2"), true);
+  assert.equal(rt.nudgeShownFor("B", "u2"), false);
 });

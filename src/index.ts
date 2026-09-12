@@ -4,13 +4,13 @@ import type {
   ExtensionFactory,
   SessionMessageEntry,
 } from "@earendil-works/pi-coding-agent";
-import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
+import { CONFIG_DIR_NAME } from "./config-dir.js";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { CoreMessage, NudgeDecision, CompressionBlock, Prompts } from "acp-kernel";
 import { renderNudgeText, resolvePrompts, defaultPrompts, viableRanges } from "acp-kernel";
-import { type AdapterConfig, resolveDelegate, DEFAULT_DELEGATE_POLICY } from "./config.js";
+import { type AdapterConfig, resolveDelegate, resolveHostSession, DEFAULT_DELEGATE_POLICY } from "./config.js";
 import { createRuntime, type AcpRuntime } from "./runtime.js";
 import { makeCompressTool, isCompressSuccessText, isCompressNoopText } from "./compress-tool.js";
 import { makeDecompressTool } from "./decompress-tool.js";
@@ -18,6 +18,8 @@ import { makeSearchTool } from "./search-tool.js";
 import { makeStatusTool } from "./status-tool.js";
 import { makeDelegateTool, makeDelegateWaitTool, makeDelegateCancelTool, runningRunsSnapshot, resetDelegateUsage, setDelegateDisplayUsage, setDelegatePolicy, setDelegateDefaults, setDelegateNotifyIfRead, markDelegateResultRead, markDelegateRunReadByCommand } from "./delegate-tool.js";
 import { makeCommands } from "./commands.js";
+import { mergeSurface, readToolSurfaceWithPacks, resolveActivePack } from "./prompt-pack.js";
+import type { NudgeSectionsConfig } from "./surface.js";
 import { coreOutToAgentMessages, extractText } from "./messages.js";
 import { countThinkingChars, dropCompressReasoning } from "./reasoning-drop.js";
 import { collapseAssistantDegeneration, degenerationNotice, lastAssistantRuns, resolveDegenerationGuard } from "./degeneration.js";
@@ -26,7 +28,8 @@ import { delegateStatusWidget } from "./fleet-widget.js";
 import { openFleetInspector } from "./fleet-inspector.js";
 import { wireToolGuardrails } from "./tool-guardrails.js";
 import { debug, logError, logInfo, logWarn, logThrow, closeLogStream } from "./log.js";
-import { collectCoveredMessageIds, estimateTokens, lastUserMessageId, collectImageTokens, modelSupportsImages, sentViewTokenCount } from "./tokens.js";
+import { collectCoveredMessageIds, estimateTokens, collectImageTokens, modelSupportsImages, sentViewTokenCount } from "./tokens.js";
+import { lastTurnBoundaryId, lastTurnBoundaryIndex } from "./turn-boundary.js";
 import { usageAnchorPredatesCompression } from "./floor-stale.js";
 import { checkForUpdate } from "./update.js";
 import {
@@ -41,9 +44,18 @@ import {
 import { defaultCountTokens } from "acp-kernel";
 import { formatSystemPromptForEvent, getSystemPromptText } from "./compat.js";
 import { applyOutputHeadroom, inspectOverflowMessage, resolveOutputHeadroomCap } from "./overflow-selfheal.js";
-import { isOmpHost, OMP_UNSUPPORTED_MESSAGE } from "./omp.js";
+import { UNSUPPORTED_HOST_MESSAGE } from "./omp.js";
+import { isUnsupportedHost } from "./host.js";
 import { isBiliProxyBaseUrl, PROXY_STAND_DOWN_MESSAGE } from "./proxy-detect.js";
 import { findPiSubagentsInstall, resolveAgentDir, DELEGATE_STAND_DOWN_MESSAGE } from "./setup-subagent-tools.js";
+
+// Host-facing API for multi-session hosts (docs/host-adapter.md, #367): the
+// extension keeps its own runtime instance private; hosts build their own via
+// createRuntime — derivation works across instances because it only touches
+// on-disk sidecars through session refs.
+export { createRuntime } from "./runtime.js";
+export type { AcpRuntime, SessionRef } from "./runtime.js";
+export { deriveChildState } from "./state.js";
 
 type AgentMessage = SessionMessageEntry["message"];
 
@@ -89,10 +101,11 @@ export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactor
     wireToolGuardrails(pi, runtime);
     wireOverflowSelfHeal(pi, runtime);
     wireThrottleRetry(pi, runtime);
-    pi.registerTool(makeCompressTool(runtime));
-    pi.registerTool(makeDecompressTool(runtime));
-    pi.registerTool(makeSearchTool(runtime));
-    pi.registerTool(makeStatusTool(runtime));
+    const toolSurface = readToolSurfaceWithPacks(process.cwd());
+    pi.registerTool(makeCompressTool(runtime, toolSurface.compress));
+    pi.registerTool(makeDecompressTool(runtime, toolSurface.decompress));
+    pi.registerTool(makeSearchTool(runtime, toolSurface.search_context));
+    pi.registerTool(makeStatusTool(runtime, toolSurface.acp_status));
     for (const { name, options } of makeCommands(runtime, pi)) {
       pi.registerCommand(name, options);
     }
@@ -160,28 +173,31 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
   let ompWarned = false;
   let subagentStandDownWarned = false;
   pi.on("session_start", async (_event, ctx) => {
-    // OMP (oh-my-pi) is not supported: its in-process live-entries integration
-    // diverges the nudge's example refs from the session's real refs, so
-    // compress calls fail with "does not exist in this session". Stand down —
-    // refuse service and point the user at the billion-context proxy. session_start
-    // always precedes the first context/before_agent_start event, so setting
-    // `refused` here reliably gates every downstream handler for the session.
-    if (isOmpHost(ctx.sessionManager)) {
+    // Unsupported hosts stand down (#234 / #364): any host without Pi's
+    // buildContextEntries() API is refused unless it declared itself a
+    // Pi-compatible fork via PI_ACP_FORK_HOST=1. OMP (oh-my-pi) stays blocked
+    // by default — its in-process live-entries integration diverges the nudge's
+    // example refs from the session's real refs, so compress calls fail with
+    // "does not exist in this session". Refuse service and point the user at
+    // the fork opt-in or the billion-context proxy. session_start always
+    // precedes the first context/before_agent_start event, so setting `refused`
+    // here reliably gates every downstream handler for the session.
+    if (isUnsupportedHost(ctx.sessionManager)) {
       runtime.refused = true;
       if (!ompWarned) {
         ompWarned = true;
         const sid = ctx.sessionManager.getSessionId();
-        logWarn("host", { event: "omp-unsupported", sid, action: "refused" });
-        if (ctx.hasUI) ctx.ui.notify(OMP_UNSUPPORTED_MESSAGE, "warning");
-        else console.error(OMP_UNSUPPORTED_MESSAGE);
+        logWarn("host", { event: "host-unsupported", sid, action: "refused" });
+        if (ctx.hasUI) ctx.ui.notify(UNSUPPORTED_HOST_MESSAGE, "warning");
+        else console.error(UNSUPPORTED_HOST_MESSAGE);
       }
       return;
     }
     if (standDownIfProxied(ctx)) return;
     runtime.store.invalidate();
-    runtime.clearNudgeTracking();
+    runtime.clearNudgeTracking(ctx.sessionManager.getSessionId());
     runtime.throttleFor(ctx.sessionManager.getSessionId()).reset();
-    runtime.clearCompressRetryTracking();
+    runtime.clearCompressRetryTracking(ctx.sessionManager.getSessionId());
     resetDelegateUsage();
     setDelegateDisplayUsage("separate");
     setDelegatePolicy(DEFAULT_DELEGATE_POLICY);
@@ -257,8 +273,11 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     delegateStatusWidget.setContext(ctx, runningRunsSnapshot);
   });
   pi.on("session_shutdown", (_event, ctx) => {
-    runtime.clearDeadCompress(ctx.sessionManager.getSessionId());
-    runtime.dropTokenScale(ctx.sessionManager.getSessionId());
+    const sid = ctx.sessionManager.getSessionId();
+    runtime.clearDeadCompress(sid);
+    runtime.dropTokenScale(sid);
+    runtime.clearNudgeTracking(sid);
+    runtime.clearCompressRetryTracking(sid);
     delegateStatusWidget.dispose();
     closeLogStream();
   });
@@ -377,7 +396,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
         state.nudge.lastNudgeShownTokens = 0;
         state.nudge.lastPerMessageNudgeTokens = 0;
         state.nudge.lastShownByTier = {};
-        runtime.clearNudgeTokenStamps();
+        runtime.clearNudgeTokenStamps(sid);
         logInfo("growth-scale", { sid, event: "scale-flip-reset", anchorStale: !hostFloorActive });
       }
       debug.event("context-in", {
@@ -422,7 +441,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
         prunedMsgs: coreMessages.length - turn.messages.length + turn.messages.filter((m) => m.id.startsWith("acp_summary")).length,
         nudgeShouldInject: turn.nudge?.shouldInject ?? false,
         nudgeReason: turn.nudge?.reason ?? null,
-        nudgeVoice: turn.nudge ? renderNudgeText(turn.nudge, runtime.prompts).voice : null,
+        nudgeVoice: turn.nudge ? renderNudgeText(turn.nudge, runtime.prompts, activeNudgeSections(runtime, ctx)).voice : null,
       nudgePct: turn.nudge ? Math.round(turn.nudge.contextUsage * 100) : null,
       nudgeTier: turn.nudge?.tier ?? null,
       nudgeCompressibleCount: turn.nudge?.compressibleRanges.length ?? 0,
@@ -485,7 +504,10 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     }
     const debugOn = debug.enabled;
 
-    const turnKey = lastUserMessageId(entries) ?? sid;
+    // #364: one policy for all turn-boundary decisions this event (turnKey +
+    // outcome scoping); default-off keeps pi-native boundaries.
+    const turnPolicy = resolveHostSession(runtime.adapter);
+    const turnKey = lastTurnBoundaryId(entries, turnPolicy) ?? sid;
 
     // Compress-outcome tracking feeds ONLY the nudge circuit breaker below:
     // failed/no-op attempts are counted (capped at MAX_COMPRESS_ATTEMPTS per
@@ -497,8 +519,8 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     // CURRENT user turn are considered; processed BEFORE the nudge block so
     // the cap suppression sees the newest outcome (a success on this fire
     // must lift the cap on this same fire).
-    const compressOutcomes = collectCompressOutcomes(entries, turnStartIndex(entries));
-    const outcome = compressOutcomes.length > 0 ? runtime.noteCompressOutcomes(turnKey, compressOutcomes) : null;
+    const compressOutcomes = collectCompressOutcomes(entries, lastTurnBoundaryIndex(entries, turnPolicy));
+    const outcome = compressOutcomes.length > 0 ? runtime.noteCompressOutcomes(sid, turnKey, compressOutcomes) : null;
 
     // Growth-aware re-inject bookkeeping (issue #269) runs on EVERY context
     // event, not only when the kernel wants to inject: the drop re-anchor
@@ -517,14 +539,14 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
             Math.max(config.nudge.growthFloor, Math.round(config.modelContextLimit * config.nudge.growthRatio)),
           );
     const reInjectFloor = Math.max(config.nudge.minGrowthFloor, config.nudge.minGrowthRatio * adaptiveGrowth);
-    let shownAt = runtime.nudgeShownTokensFor(turnKey);
+    let shownAt = runtime.nudgeShownTokensFor(sid, turnKey);
     if (shownAt !== undefined && tokenCount < shownAt - adaptiveGrowth) {
       // Mirror the kernel's drop re-anchor (nudgeNode): after a successful
       // compress the meter collapses; growth since the last shown must
       // restart from the new baseline, not from the old peak.
       logInfo("nudge", { sid: ctx.sessionManager.getSessionId(), event: "drop-reanchor", turnKey, from: shownAt, to: tokenCount });
       shownAt = tokenCount;
-      runtime.markNudgeShown(turnKey, tokenCount);
+      runtime.markNudgeShown(sid, turnKey, tokenCount);
     }
 
     if (turn.nudge?.shouldInject) {
@@ -562,12 +584,12 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
       // keeps usage pinned at emergency). Once this turn burned
       // MAX_COMPRESS_ATTEMPTS attempts, stop re-injecting the nudge — the
       // kernel's emergency truncation still shrinks context mechanically.
-      const retryCapped = runtime.compressRetryCappedFor(turnKey);
+      const retryCapped = runtime.compressRetryCappedFor(sid, turnKey);
       const reInjectReady = shownAt === undefined || tokenCount - shownAt >= reInjectFloor;
-      const alreadyShown = retryCapped || (!emergency && runtime.nudgeShownFor(turnKey) && !reInjectReady);
+      const alreadyShown = retryCapped || (!emergency && runtime.nudgeShownFor(sid, turnKey) && !reInjectReady);
       if (!alreadyShown) {
-        rebuilt.push(nudgeMessage(turn.nudge, turn.state.blocks.filter((b) => b.active), runtime.prompts));
-        const rendered = renderNudgeText(turn.nudge, runtime.prompts);
+        rebuilt.push(nudgeMessage(turn.nudge, turn.state.blocks.filter((b) => b.active), runtime.prompts, activeNudgeSections(runtime, ctx)));
+        const rendered = renderNudgeText(turn.nudge, runtime.prompts, activeNudgeSections(runtime, ctx));
         const top = [...turn.nudge.compressibleRanges].sort((a, b) => b.tokens - a.tokens)[0];
         const example = top ? `\n\nExample: compress({ content: [{ startId: "${top.startRef}", endId: "${top.endRef}", summary: "..." }] })` : "";
         if (emergency) {
@@ -576,7 +598,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
         if (debugOn && ctx.hasUI) {
           ctx.ui.notify(`[ACP nudge → context]${emergency ? " [EMERGENCY]" : ""}\n${rendered.text}${example}`);
         }
-        if (!emergency) runtime.markNudgeShown(turnKey, tokenCount);
+        if (!emergency) runtime.markNudgeShown(sid, turnKey, tokenCount);
         debug.event("nudge-injected", { sid: ctx.sessionManager.getSessionId(), voice: rendered.voice, channels: ["context", debugOn ? "terminal" : null].filter(Boolean), emergency, turnKey, reInject: shownAt !== undefined, text: rendered.text + example });
       } else {
         debug.event("nudge-suppressed", { sid: ctx.sessionManager.getSessionId(), turnKey, reason: turn.nudge.reason, shownAt: shownAt ?? null, tokenCount, adaptiveGrowth, reInjectFloor });
@@ -614,16 +636,41 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
   });
 }
 
+let lastPackPromptGateKeys: string | null = null;
+
 function wireSystemPrompt(pi: ExtensionAPI, runtime: AcpRuntime): void {
-  pi.on("before_agent_start", (event) => {
+  pi.on("before_agent_start", (event, ctx) => {
     // Refused host (OMP): don't inject the ACP system prompt — the model must
     // not learn about compress/decompress on a host where they can't work.
     if (runtime.refused) return;
+    const m = ctx?.model as { provider?: string; id?: string } | undefined;
+    const cwd = ctx?.cwd ?? process.cwd();
+    const merged = mergeSurface(resolveActivePack(runtime.adapter, cwd, m?.provider, m?.id), runtime.adapter);
+    // Unconditional: switching to a model/pack without prompt overrides must
+    // reset the rules to kernel defaults, not keep the previous pack's.
+    try {
+      runtime.setPrompts(resolvePrompts(merged.prompts, { acknowledgeRisk: runtime.adapter.acknowledgePromptsRisk === true }));
+    } catch (e) {
+      const keys = Object.keys(merged.prompts).sort().join(",");
+      if (keys !== lastPackPromptGateKeys) {
+        lastPackPromptGateKeys = keys;
+        logWarn("config", { event: "pack-prompts-gated", keys, error: e instanceof Error ? e.message : String(e) });
+      }
+      runtime.setPrompts(defaultPrompts);
+    }
     const delegate = resolveDelegate(runtime.adapter).enabled && !runtime.delegateStoodDown;
-    const acp = buildAcpSystemPrompt(runtime.prompts);
-    const prompt = delegate ? `${acp}\n${ACP_DELEGATE_PROMPT}` : acp;
+    const acp = buildAcpSystemPrompt(runtime.prompts, merged.promptSections);
+    const delegateText = merged.delegatePrompt !== undefined ? merged.delegatePrompt : ACP_DELEGATE_PROMPT;
+    const prompt = delegate && delegateText !== null ? `${acp}\n${delegateText}` : acp;
     return { systemPrompt: formatSystemPromptForEvent(event.systemPrompt, prompt) };
   });
+}
+
+function activeNudgeSections(runtime: AcpRuntime, ctx?: ExtensionContext): NudgeSectionsConfig {
+  const m = ctx?.model as { provider?: string; id?: string } | undefined;
+  const cwd = ctx?.cwd ?? process.cwd();
+  const pack = resolveActivePack(runtime.adapter, cwd, m?.provider, m?.id);
+  return mergeSurface(pack, runtime.adapter).nudgeSections;
 }
 
 // Context-overflow self-heal: when the model API rejects a request because the
@@ -755,16 +802,6 @@ function collectOriginals(entries: Array<{ type: string; id: string; message?: A
   return map;
 }
 
-// Index of the last user-role entry — the start of the current turn.
-// Everything strictly AFTER this index belongs to the current turn; -1 when
-// the session has no user message yet.
-function turnStartIndex(entries: Array<{ type: string; message?: { role?: string } }>): number {
-  for (let i = entries.length - 1; i >= 0; i--) {
-    if (entries[i]!.message?.role === "user") return i;
-  }
-  return -1;
-}
-
 // Compress toolResults from the CURRENT user turn only — the raw material for
 // the nudge circuit breaker above. Scoping matters: feeding the whole session
 // would keep an old failure counting against the current turn's budget
@@ -782,8 +819,8 @@ function collectCompressOutcomes(entries: Array<{ type: string; id: string; mess
   return out;
 }
 
-function nudgeMessage(nudge: NudgeDecision, blocks: CompressionBlock[], prompts: Prompts): AgentMessage {
-  const rendered = renderNudgeText(nudge, prompts);
+function nudgeMessage(nudge: NudgeDecision, blocks: CompressionBlock[], prompts: Prompts, sections?: NudgeSectionsConfig): AgentMessage {
+  const rendered = renderNudgeText(nudge, prompts, sections);
   const lines = [rendered.text];
 
   if (blocks.length > 0) {

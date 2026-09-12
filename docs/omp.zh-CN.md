@@ -22,8 +22,10 @@ OMP 暴露的是另一套进程内会话 API。扩展注入的引用可能与会
 ## 在 OMP 宿主上会发生什么
 
 会话开始时,扩展通过特性检测识别宿主(Pi 暴露
-`sessionManager.buildContextEntries()`,OMP 只暴露 `getBranch()`)。检测到 OMP 时,
-扩展会"让位":
+`sessionManager.buildContextEntries()`,OMP 只暴露 `getBranch()`)。任何缺少该 API 的宿主
+都会被"让位",除非它通过 `PI_ACP_FORK_HOST=1` 声明自己是兼容 Pi 的 fork(见
+[host-adapter.md](./host-adapter.md))——该声明面向 `getBranch()` 符合上述契约的 fork,
+不适用于 OMP,因此 OMP 始终"让位":
 
 - **每个进程只警告一次**(TUI/RPC 下用 UI 通知;headless 一次性模式下用
   `console.error` 输出到 stderr),并指向受支持的替代方案;

@@ -25,8 +25,10 @@ so OMP is no longer an actively supported host for this plugin.
 ## What happens on an OMP host
 
 At session start the extension feature-detects the host (Pi exposes
-`sessionManager.buildContextEntries()`; OMP only exposes `getBranch()`). When it
-detects OMP it stands down:
+`sessionManager.buildContextEntries()`; OMP only exposes `getBranch()`). Any host without
+that API stands down unless it declares itself a Pi-compatible fork via
+`PI_ACP_FORK_HOST=1` (see [host-adapter.md](./host-adapter.md)) — the declaration exists
+for forks whose `getBranch()` matches that contract, not for OMP, so OMP always stands down:
 
 - warns **once per process** (UI notification in TUI/RPC; `console.error` to
   stderr in headless one-shot mode) pointing at the supported alternative,

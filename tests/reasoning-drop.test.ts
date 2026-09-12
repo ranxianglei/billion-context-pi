@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { SessionMessageEntry } from "@earendil-works/pi-coding-agent";
-import { DEFAULT_COMPRESS_REASONING, dropCompressReasoning, resolveReasoningDrop } from "../src/reasoning-drop.js";
+import { DEFAULT_COMPRESS_REASONING, applyStrictReasoningGate, dropCompressReasoning, isStrictReasoningEcho, resolveReasoningDrop } from "../src/reasoning-drop.js";
 import { resolveCompress } from "../src/config.js";
 
 type AgentMessage = SessionMessageEntry["message"];
@@ -183,4 +183,35 @@ test("three-level merge: model > provider > global, field-wise", () => {
     undefined,
   );
   assert.deepEqual(provOnly.reasoning, { drop: false, threshold: 100 }); // provider only overrides drop
+});
+
+test("isStrictReasoningEcho: deepseek detected via baseUrl or provider name, case-insensitive", () => {
+  assert.equal(isStrictReasoningEcho(undefined, "https://api.deepseek.com/v1"), true);
+  assert.equal(isStrictReasoningEcho(undefined, "https://api.deepseek.com/beta/chat/completions"), true);
+  assert.equal(isStrictReasoningEcho("deepseek", undefined), true);
+  assert.equal(isStrictReasoningEcho("DeepSeek-Pro", "https://example.com"), true);
+});
+
+test("isStrictReasoningEcho: non-deepseek upstreams are not auto-detected", () => {
+  assert.equal(isStrictReasoningEcho("anthropic", "https://api.anthropic.com"), false);
+  assert.equal(isStrictReasoningEcho("openai", "https://api.openai.com/v1"), false);
+  // GLM-thinking / QwQ are strict-echo too but keyed by other hosts; they use the
+  // documented manual drop:false override so their non-thinking models keep the pass.
+  assert.equal(isStrictReasoningEcho("zhipu", "https://open.bigmodel.cn/api/paas/v4"), false);
+  assert.equal(isStrictReasoningEcho("qwen", "https://dashscope.aliyuncs.com/compatible-mode/v1"), false);
+  assert.equal(isStrictReasoningEcho(), false);
+  assert.equal(isStrictReasoningEcho(undefined, undefined), false);
+});
+
+test("applyStrictReasoningGate: forces drop off on a strict-echo upstream, preserves threshold", () => {
+  const base = resolveReasoningDrop(undefined);
+  assert.deepEqual(applyStrictReasoningGate(base, "deepseek", "https://api.deepseek.com/v1"), { drop: false, threshold: 2048 });
+  assert.deepEqual(applyStrictReasoningGate(base, undefined, "https://api.deepseek.com/v1"), { drop: false, threshold: 2048 });
+});
+
+test("applyStrictReasoningGate: no-op for non-strict-echo and already-disabled configs (same reference)", () => {
+  const base = resolveReasoningDrop(undefined);
+  assert.equal(applyStrictReasoningGate(base, "openai", "https://api.openai.com/v1"), base);
+  const off = resolveReasoningDrop({ drop: false });
+  assert.equal(applyStrictReasoningGate(off, "deepseek", "https://api.deepseek.com/v1"), off);
 });

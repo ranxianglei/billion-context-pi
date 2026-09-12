@@ -12,7 +12,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
+import { CONFIG_DIR_NAME } from "./config-dir.js";
 
 /** The four ACP tools to ensure on every pi-subagents builtin agent. */
 export const ACP_TOOLS = ["compress", "decompress", "search_context", "acp_status"] as const;

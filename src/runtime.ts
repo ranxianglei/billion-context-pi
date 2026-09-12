@@ -1,4 +1,5 @@
 import type { ExtensionContext, SessionEntry, SessionMessageEntry } from "@earendil-works/pi-coding-agent";
+import { readFileSync } from "node:fs";
 import {
   createCore,
   defaultCountTokens,
@@ -9,11 +10,12 @@ import {
   type Prompts,
 } from "acp-kernel";
 import { resolveCompress, resolveConfig, type AdapterConfig } from "./config.js";
-import { resolveReasoningDrop, type CompressReasoningConfig } from "./reasoning-drop.js";
+import { applyStrictReasoningGate, resolveReasoningDrop, type CompressReasoningConfig } from "./reasoning-drop.js";
 import { entriesToCoreMessages, extractText, matchesStoredText, messageIdentity, messageRef } from "./messages.js";
-import { SessionStateStore, type LiveRefOrigin } from "./state.js";
+import { SessionStateStore, deriveChildState, type LiveRefOrigin } from "./state.js";
 import { hasCompressHistory, rebuildStateFromLog } from "./state-rebuild.js";
 import { loadUserConfig, applyUserConfig } from "./user-config.js";
+import { sanitizeSurfaceConfig } from "./surface.js";
 import { ThrottleEpisode } from "./throttle-retry.js";
 import { logInfo, logWarn, setDebugEnabled } from "./log.js";
 import { findUniqueLongestRun, type MatchRange } from "./sequence-match.js";
@@ -38,6 +40,14 @@ export function readContextEntries(sm: ExtensionContext["sessionManager"]): Sess
 export function isPiHost(sm: ExtensionContext["sessionManager"]): boolean {
   const source = sm as unknown as SessionEntrySource;
   return typeof source.buildContextEntries === "function";
+}
+
+/** Minimal identity of a session for state operations that don't need a live
+ *  ExtensionContext (hosts deriving inline child sessions build these from
+ *  whatever session handles they hold). */
+export interface SessionRef {
+  sessionId: string;
+  sessionFile?: string;
 }
 
 export interface AcpRuntime {
@@ -77,25 +87,25 @@ export interface AcpRuntime {
   setAdapter(adapter: AdapterConfig): void;
   prompts: Prompts;
   setPrompts(prompts: Prompts): void;
-  markNudgeShown(turnKey: string, tokenCount?: number): void;
-  nudgeShownFor(turnKey: string): boolean;
+  markNudgeShown(sid: string, turnKey: string, tokenCount?: number): void;
+  nudgeShownFor(sid: string, turnKey: string): boolean;
   /** tokenCount at the last actual nudge injection for this turn, for growth-aware re-inject (issue #269). */
-  nudgeShownTokensFor(turnKey: string): number | undefined;
+  nudgeShownTokensFor(sid: string, turnKey: string): number | undefined;
   /** Clears the token-count stamps recorded by markNudgeShown — used on a token-scale flip (issue #267) so the same-turn re-inject floor (#269 / PR #316) is not computed against an old-scale stamp. */
-  clearNudgeTokenStamps(): void;
+  clearNudgeTokenStamps(sid: string): void;
   /** Process compress toolResults for the CURRENT user turn only (the caller
    *  scopes the list — see collectCompressOutcomes in src/index.ts); idempotent
    *  per toolCallId. Outcome classes: isError or noop (0-block panel) →
    *  failure (count++), success panel (>= 1 block) → reset, other non-error
     *  text → neutral (count unchanged). Returns the failure count and
     *  whether the cap was just reached. */
-  noteCompressOutcomes(turnKey: string, outcomes: ReadonlyArray<{ toolCallId: string; isError: boolean; success: boolean; noop?: boolean }>): { count: number; cappedNow: boolean };
+  noteCompressOutcomes(sid: string, turnKey: string, outcomes: ReadonlyArray<{ toolCallId: string; isError: boolean; success: boolean; noop?: boolean }>): { count: number; cappedNow: boolean };
   /** True when this turn already burned MAX_COMPRESS_ATTEMPTS failed/no-op
    *  compress calls — used to stop re-injecting the (dedup-exempt) emergency
    *  nudge that would otherwise keep looping no-op compressions (issue #6). */
-  compressRetryCappedFor(turnKey: string): boolean;
-  clearNudgeTracking(): void;
-  clearCompressRetryTracking(): void;
+  compressRetryCappedFor(sid: string, turnKey: string): boolean;
+  clearNudgeTracking(sid: string): void;
+  clearCompressRetryTracking(sid: string): void;
   liveContextLimit(ctx: ExtensionContext): number;
   configFor(ctx: ExtensionContext): Config;
   /** [#336] Effective compress.reasoning drop settings for the active model
@@ -108,6 +118,16 @@ export interface AcpRuntime {
   reloadConfig(cwd: string): Promise<void>;
   stateFor(ctx: ExtensionContext, liveMessages?: AgentMessage[]): Promise<{ state: CompressionState; coreMessages: ReturnType<typeof entriesToCoreMessages>; entries: SessionEntry[] }>;
   save(state: CompressionState, ctx: ExtensionContext): Promise<void>;
+  /** #364 inline child sessions (same process, e.g. Prime RLM): derive the
+   *  child's compression state from another session's. Inherits blocks /
+   *  message refs / token snapshot so decompress + search_context keep working
+   *  on inherited blocks; resets every rhythm ledger (nudge cadence, stats,
+   *  absorb). One-time: writes a derivation marker into the child sidecar and
+   *  refuses to run again; also refuses when the child already owns real
+   *  (non-derived) blocks or when the parent has no blocks. Separate-process
+   *  pi-native delegates must NOT call this — their parentSession header
+   *  already inherits verbatim. Returns true when the child state was derived. */
+  deriveChildState(child: SessionRef, parent: SessionRef): Promise<boolean>;
   acquireLock(sid: string): Promise<() => void>;
   /** Per-session overflow self-heal state (learned window + armed emergency).
    *  Keyed by session id so concurrent sessions cannot share an episode. */
@@ -277,8 +297,31 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   let adapterRef = adapter;
   let lastUserConfigKey: string | undefined;
   let promptsRef: Prompts = defaultPrompts;
-  const nudgeShownTurns = new Set<string>();
-  const nudgeShownTokens = new Map<string, number>();
+  const nudgeShownTurns = new Map<string, Set<string>>();
+  const nudgeShownTokens = new Map<string, Map<string, number>>();
+  function markNudgeShown(sid: string, turnKey: string, tokenCount?: number): void {
+    let turns = nudgeShownTurns.get(sid);
+    if (!turns) { turns = new Set(); nudgeShownTurns.set(sid, turns); }
+    turns.add(turnKey);
+    if (tokenCount !== undefined) {
+      let toks = nudgeShownTokens.get(sid);
+      if (!toks) { toks = new Map(); nudgeShownTokens.set(sid, toks); }
+      toks.set(turnKey, tokenCount);
+    }
+  }
+  function nudgeShownFor(sid: string, turnKey: string): boolean {
+    return nudgeShownTurns.get(sid)?.has(turnKey) ?? false;
+  }
+  function nudgeShownTokensFor(sid: string, turnKey: string): number | undefined {
+    return nudgeShownTokens.get(sid)?.get(turnKey);
+  }
+  function clearNudgeTracking(sid: string): void {
+    nudgeShownTurns.delete(sid);
+    nudgeShownTokens.delete(sid);
+  }
+  function clearNudgeTokenStamps(sid: string): void {
+    nudgeShownTokens.delete(sid);
+  }
   // Per-session overflow self-heal state (learned window + armed emergency).
   const overflowEpisodes = new Map<string, OverflowEpisode>();
   function overflowFor(sid: string): OverflowEpisode {
@@ -327,6 +370,10 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     tokenScaleStale.delete(sid);
   }
 
+  // [#361] session ids already logged for the strict-echo auto-disable, so the
+  // info event fires once per session rather than once per LLM call.
+  const strictEchoLogged = new Set<string>();
+
   // Compress-failure tracking (see wireContextTransform): counts FAILED/no-op
   // compress calls per user turn so the nudge circuit breaker can stop
   // re-injecting the nudge at a model that answers every nudge with another
@@ -336,38 +383,46 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   // caller feeds only CURRENT-turn outcomes; success resets the counter,
   // neutral outcomes (non-error text that is not a success panel) leave it
   // frozen so mixed failure modes cannot bypass the cap.
-  const compressOutcomeSeen = new Set<string>();
-  let compressFailTurnKey: string | null = null;
-  let compressFailCount = 0;
+  interface CompressOutcomeTracker {
+    seen: Set<string>;
+    failTurnKey: string | null;
+    failCount: number;
+  }
+  const compressOutcomes = new Map<string, CompressOutcomeTracker>();
+  function compressTrackerFor(sid: string): CompressOutcomeTracker {
+    let t = compressOutcomes.get(sid);
+    if (!t) { t = { seen: new Set(), failTurnKey: null, failCount: 0 }; compressOutcomes.set(sid, t); }
+    return t;
+  }
 
-  function noteCompressOutcomes(turnKey: string, outcomes: ReadonlyArray<{ toolCallId: string; isError: boolean; success: boolean; noop?: boolean }>): { count: number; cappedNow: boolean } {
-    if (compressFailTurnKey !== turnKey) {
-      compressFailTurnKey = turnKey;
-      compressFailCount = 0;
+  function noteCompressOutcomes(sid: string, turnKey: string, outcomes: ReadonlyArray<{ toolCallId: string; isError: boolean; success: boolean; noop?: boolean }>): { count: number; cappedNow: boolean } {
+    const t = compressTrackerFor(sid);
+    if (t.failTurnKey !== turnKey) {
+      t.failTurnKey = turnKey;
+      t.failCount = 0;
     }
-    const prevCount = compressFailCount;
+    const prevCount = t.failCount;
     for (const o of outcomes) {
-      if (compressOutcomeSeen.has(o.toolCallId)) continue;
-      compressOutcomeSeen.add(o.toolCallId);
+      if (t.seen.has(o.toolCallId)) continue;
+      t.seen.add(o.toolCallId);
       if (o.isError || o.noop === true) {
-        compressFailCount += 1;
+        t.failCount += 1;
       } else if (o.success) {
-        compressFailCount = 0;
+        t.failCount = 0;
       }
       // neutral: counter untouched
     }
-    const cappedNow = compressFailCount >= MAX_COMPRESS_ATTEMPTS && prevCount < MAX_COMPRESS_ATTEMPTS;
-    return { count: compressFailCount, cappedNow };
+    const cappedNow = t.failCount >= MAX_COMPRESS_ATTEMPTS && prevCount < MAX_COMPRESS_ATTEMPTS;
+    return { count: t.failCount, cappedNow };
   }
 
-  function compressRetryCappedFor(turnKey: string): boolean {
-    return compressFailTurnKey === turnKey && compressFailCount >= MAX_COMPRESS_ATTEMPTS;
+  function compressRetryCappedFor(sid: string, turnKey: string): boolean {
+    const t = compressOutcomes.get(sid);
+    return t !== undefined && t.failTurnKey === turnKey && t.failCount >= MAX_COMPRESS_ATTEMPTS;
   }
 
-  function clearCompressRetryTracking(): void {
-    compressOutcomeSeen.clear();
-    compressFailTurnKey = null;
-    compressFailCount = 0;
+  function clearCompressRetryTracking(sid: string): void {
+    compressOutcomes.delete(sid);
   }
 
   async function acquireLock(sid: string): Promise<() => void> {
@@ -392,8 +447,20 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   }
 
   function reasoningDropFor(ctx: ExtensionContext): Required<CompressReasoningConfig> {
-    const m = ctx.model as { provider?: string; id?: string } | undefined;
-    return resolveReasoningDrop(resolveCompress(adapterRef.compress, m?.provider, m?.id).reasoning);
+    const m = ctx.model as { provider?: string; id?: string; baseUrl?: string } | undefined;
+    const resolved = resolveReasoningDrop(resolveCompress(adapterRef.compress, m?.provider, m?.id).reasoning);
+    // [#361] strict-echo upstreams (DeepSeek thinking mode) must keep reasoning
+    // round-tripping or the rebuilt request 400s — force the pass off regardless
+    // of config so a thinking-mode session can't be broken by default drop:true.
+    const gated = applyStrictReasoningGate(resolved, m?.provider, m?.baseUrl);
+    if (resolved.drop && !gated.drop) {
+      const sid = ctx.sessionManager.getSessionId();
+      if (!strictEchoLogged.has(sid)) {
+        strictEchoLogged.add(sid);
+        logInfo("runtime", { sid, event: "compress-reasoning-auto-disabled", reason: "strict-echo-upstream", provider: m?.provider ?? null, issue: "#361" });
+      }
+    }
+    return gated;
   }
 
   async function reloadConfig(cwd: string): Promise<void> {
@@ -410,7 +477,7 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
       lastUserConfigKey = key;
       // Re-derive from the factory config (not adapterRef) so a key REMOVED from
       // acp.json actually reverts, instead of lingering from a prior apply.
-      adapterRef = applyUserConfig(factoryAdapter, user);
+      adapterRef = sanitizeSurfaceConfig(applyUserConfig(factoryAdapter, user));
       if (adapterRef.debug !== undefined) setDebugEnabled(adapterRef.debug);
       logInfo("runtime", { event: "config-reloaded", limit: adapterRef.modelContextLimit ?? null });
     } catch (e) {
@@ -470,7 +537,37 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     await store.save(state, sm.getSessionFile() ?? undefined, sm.getSessionId());
   }
 
+  // Own-sidecar check (not cache/load) because load() may have already filled
+  // the slot via implicit parentSession-header inheritance — that implicit
+  // state is replaceable by an explicit derivation, but real self-compressed
+  // blocks are not.
+  function ownSidecarHasBlocks(sessionFile: string): boolean {
+    try {
+      const parsed = JSON.parse(readFileSync(`${sessionFile}.acp.json`, "utf8")) as { blocks?: unknown };
+      return Array.isArray(parsed.blocks) && parsed.blocks.length > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  async function deriveChild(child: SessionRef, parent: SessionRef): Promise<boolean> {
+    if (!child.sessionFile) return false;
+    if (ownSidecarHasBlocks(child.sessionFile)) return false;
+    // Materialize the child cache slot (also surfaces any implicit header
+    // inheritance or a marker persisted by an earlier process) so the marker
+    // below has a slot to attach to and save() persists it.
+    await store.load(child.sessionFile, child.sessionId);
+    if (store.getDerivedFrom(child.sessionFile, child.sessionId)) return false;
+    const parentState = await store.load(parent.sessionFile, parent.sessionId);
+    if (parentState.blocks.length === 0) return false;
+    const derived = deriveChildState(parentState);
+    store.setDerivedFrom(child.sessionFile, child.sessionId, { parentSessionId: parent.sessionId, derivedAt: Date.now() });
+    await store.save(derived, child.sessionFile, child.sessionId);
+    logInfo("state", { sid: child.sessionId, event: "child-state-derived", parentSid: parent.sessionId, blocks: derived.blocks.length });
+    return true;
+  }
+
   let refused = false;
   let refusalMessage: string | null = null;
   let delegateStoodDown = false;
-  return { core, store, get refused() { return refused; }, set refused(v: boolean) { refused = v; }, get refusalMessage() { return refusalMessage; }, set refusalMessage(v: string | null) { refusalMessage = v; }, get delegateStoodDown() { return delegateStoodDown; }, set delegateStoodDown(v: boolean) { delegateStoodDown = v; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k, t) => { nudgeShownTurns.add(k); if (t !== undefined) nudgeShownTokens.set(k, t); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), nudgeShownTokensFor: (k) => nudgeShownTokens.get(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); nudgeShownTokens.clear(); }, clearNudgeTokenStamps: () => nudgeShownTokens.clear(), noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reasoningDropFor, reloadConfig, stateFor, save, acquireLock, overflowFor, overflowDrop, noteDeadCompress, clearDeadCompress, throttleFor, throttleDrop , noteTokenScale, dropTokenScale };}
+  return { core, store, get refused() { return refused; }, set refused(v: boolean) { refused = v; }, get refusalMessage() { return refusalMessage; }, set refusalMessage(v: string | null) { refusalMessage = v; }, get delegateStoodDown() { return delegateStoodDown; }, set delegateStoodDown(v: boolean) { delegateStoodDown = v; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown, nudgeShownFor, nudgeShownTokensFor, clearNudgeTracking, clearNudgeTokenStamps, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reasoningDropFor, reloadConfig, stateFor, save, deriveChildState: deriveChild, acquireLock, overflowFor, overflowDrop, noteDeadCompress, clearDeadCompress, throttleFor, throttleDrop , noteTokenScale, dropTokenScale };}

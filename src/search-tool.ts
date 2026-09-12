@@ -2,9 +2,10 @@ import { Type, type Static } from "typebox";
 import type { AgentToolResult, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { searchBlocks, type SearchResult } from "acp-kernel";
 import type { AcpRuntime } from "./runtime.js";
+import { applyToolPromptOverrides, type ToolPromptOverrides } from "./surface.js";
 import { buildSearchDocs } from "./search-index.js";
 import { logThrow } from "./log.js";
-import { OMP_UNSUPPORTED_MESSAGE } from "./omp.js";
+import { UNSUPPORTED_HOST_MESSAGE } from "./omp.js";
 
 const SearchParams = Type.Object({
     query: Type.String({ description: "Keywords to locate detail folded into compressed summaries or historical messages." }),
@@ -13,8 +14,8 @@ const SearchParams = Type.Object({
 
 type SearchArgs = Static<typeof SearchParams>;
 
-export function makeSearchTool(runtime: AcpRuntime): ToolDefinition<typeof SearchParams> {
-    return {
+export function makeSearchTool(runtime: AcpRuntime, overrides?: ToolPromptOverrides): ToolDefinition<typeof SearchParams> {
+    return applyToolPromptOverrides({
         name: "search_context",
         label: "Search Context",
         description:
@@ -27,7 +28,7 @@ export function makeSearchTool(runtime: AcpRuntime): ToolDefinition<typeof Searc
         ],
         parameters: SearchParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {
-        if (runtime.refused) return { details: undefined, content: [{ type: "text", text: runtime.refusalMessage ?? OMP_UNSUPPORTED_MESSAGE }] };
+        if (runtime.refused) return { details: undefined, content: [{ type: "text", text: runtime.refusalMessage ?? UNSUPPORTED_HOST_MESSAGE }] };
         let result: string;
         try {
             result = await handleSearch(params as SearchArgs, runtime, ctx);
@@ -37,7 +38,7 @@ export function makeSearchTool(runtime: AcpRuntime): ToolDefinition<typeof Searc
             }
             return { details: undefined, content: [{ type: "text", text: result }] };
         },
-    };
+    }, overrides);
 }
 
 async function handleSearch(args: SearchArgs, runtime: AcpRuntime, ctx: ExtensionContext): Promise<string> {

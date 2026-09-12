@@ -43,6 +43,32 @@ export function resolveReasoningDrop(cfg?: CompressReasoningConfig): Required<Co
   return { drop: cfg?.drop !== false, threshold };
 }
 
+/** [#361] Strict-echo thinking upstreams (DeepSeek thinking mode) require
+ *  `reasoning_content` to round-trip verbatim across tool-call turns; a rebuilt
+ *  request whose closed-round assistant messages lost their reasoning is rejected
+ *  with HTTP 400 ("reasoning_content ... must be passed back"). Detect statically
+ *  from the model's configured origin/name so the request-time drop pass stands
+ *  down. Mirrors the proxy-side billion-context#690 detector, adapted to pi's
+ *  signal sources: the in-process adapter does not own the HTTP layer, so there
+ *  is no learn-on-400 self-heal here — see CONFIGURATION.md for the manual
+ *  `drop:false` escape hatch (GLM-thinking / QwQ / self-hosted mirrors). */
+export function isStrictReasoningEcho(provider?: string, baseUrl?: string): boolean {
+  return /deepseek/i.test(baseUrl ?? "") || /deepseek/i.test(provider ?? "");
+}
+
+/** [#361] Force the drop pass off on a strict-echo upstream so its reasoning
+ *  round-trips unmodified. Pure: returns cfg unchanged when not strict-echo or
+ *  already disabled. Cost-free for non-thinking models on those hosts — they emit
+ *  no `thinking` parts, so the pass would be a no-op regardless. */
+export function applyStrictReasoningGate(
+  cfg: Required<CompressReasoningConfig>,
+  provider?: string,
+  baseUrl?: string,
+): Required<CompressReasoningConfig> {
+  if (!cfg.drop || !isStrictReasoningEcho(provider, baseUrl)) return cfg;
+  return { ...cfg, drop: false };
+}
+
 function isThinking(part: unknown): part is { type: "thinking"; thinking: string } {
   const p = part as { type?: string; thinking?: unknown };
   return p?.type === "thinking" && typeof p.thinking === "string";
