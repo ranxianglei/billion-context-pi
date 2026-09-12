@@ -479,6 +479,9 @@ const ADAPTIVE_GROWTH_WINDOW_MAX = 150_000;
  *  message (below ~24K windows the band is unreachable either way, matching
  *  the pre-#398 behavior where 50000 was equally unreachable). */
 const ADAPTIVE_GROWTH_MIN = 8_000;
+/** Kernel default of `nudge.minGrowthFloor` — the fixed floor of the
+ *  anti-thrashing re-arm gate (`max(minGrowthFloor, minGrowthRatio × band)`). */
+const KERNEL_MIN_GROWTH_FLOOR = 20_000;
 
 /** Effective nudge growth band for a context window when the user has not set
  *  `nudgeGrowthTokens`: `min(50000, max(8000, window / 3))` — the 5w default
@@ -524,6 +527,12 @@ export function resolveConfig(adapter: AdapterConfig, liveContextLimit: number, 
     const scaled = scaleNudgeGrowthToWindow(limit);
     config.nudge.growthFloor = scaled;
     config.nudge.growthCap = scaled;
+    // #406: scale the re-arm gate floor with the band — otherwise the kernel's
+    // fixed 20000 minGrowthFloor pins the same-turn re-inject gate at 20000
+    // even when the band is smaller, so an ignored nudge on sub-50K windows
+    // never gets a second chance before the 95% emergency band. No-op at the
+    // unscaled 50000 band (>=150K / unknown windows keep the kernel default).
+    config.nudge.minGrowthFloor = Math.min(KERNEL_MIN_GROWTH_FLOOR, scaled);
   }
   if (c.minPressureBenefitTokens !== undefined) {
     config.nudge.minPressureBenefitTokens = c.minPressureBenefitTokens;
