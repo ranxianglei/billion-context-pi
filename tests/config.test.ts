@@ -157,6 +157,17 @@ test("resolveDelegate: boolean shorthand leaves maxConcurrent unlimited", () => 
   assert.equal(r.maxConcurrent, Infinity);
 });
 
+test("resolveDelegate: forceEnable defaults to false", () => {
+  assert.equal(resolveDelegate({}).forceEnable, false);
+  assert.equal(resolveDelegate({ delegate: true }).forceEnable, false);
+  assert.equal(resolveDelegate({ delegate: { enabled: true } }).forceEnable, false);
+});
+
+test("resolveDelegate: forceEnable true is honored; explicit false stays off", () => {
+  assert.equal(resolveDelegate({ delegate: { forceEnable: true } }).forceEnable, true);
+  assert.equal(resolveDelegate({ delegate: { forceEnable: false } }).forceEnable, false);
+});
+
 test("resolveDelegate: legacy flat displayUsage still works with boolean delegate", () => {
   const r = resolveDelegate({ delegate: true, displayUsage: "merged" });
   assert.equal(r.enabled, true);

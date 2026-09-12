@@ -51,6 +51,11 @@ export interface AcpRuntime {
   /** User-facing reason shown when a refused ACP tool is invoked; null means
    *  the default OMP refusal text applies. Set together with `refused`. */
   refusalMessage: string | null;
+  /** True when acp_delegate stood down this session because a third-party
+   *  subagent extension (pi-subagents) is installed and delegate.forceEnable
+   *  is not set (#415). Gates delegate tool registration and the system-prompt
+   *  delegate section. Reset on every session_start. */
+  delegateStoodDown: boolean;
   /** Per-session provider-throttle retry episode (attempt budget + kick
    *  pacing), keyed by session id so concurrent sessions in one extension
    *  instance cannot share an episode. Reset on session_start and on any
@@ -467,4 +472,5 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
 
   let refused = false;
   let refusalMessage: string | null = null;
-  return { core, store, get refused() { return refused; }, set refused(v: boolean) { refused = v; }, get refusalMessage() { return refusalMessage; }, set refusalMessage(v: string | null) { refusalMessage = v; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k, t) => { nudgeShownTurns.add(k); if (t !== undefined) nudgeShownTokens.set(k, t); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), nudgeShownTokensFor: (k) => nudgeShownTokens.get(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); nudgeShownTokens.clear(); }, clearNudgeTokenStamps: () => nudgeShownTokens.clear(), noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reasoningDropFor, reloadConfig, stateFor, save, acquireLock, overflowFor, overflowDrop, noteDeadCompress, clearDeadCompress, throttleFor, throttleDrop , noteTokenScale, dropTokenScale };}
+  let delegateStoodDown = false;
+  return { core, store, get refused() { return refused; }, set refused(v: boolean) { refused = v; }, get refusalMessage() { return refusalMessage; }, set refusalMessage(v: string | null) { refusalMessage = v; }, get delegateStoodDown() { return delegateStoodDown; }, set delegateStoodDown(v: boolean) { delegateStoodDown = v; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k, t) => { nudgeShownTurns.add(k); if (t !== undefined) nudgeShownTokens.set(k, t); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), nudgeShownTokensFor: (k) => nudgeShownTokens.get(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); nudgeShownTokens.clear(); }, clearNudgeTokenStamps: () => nudgeShownTokens.clear(), noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reasoningDropFor, reloadConfig, stateFor, save, acquireLock, overflowFor, overflowDrop, noteDeadCompress, clearDeadCompress, throttleFor, throttleDrop , noteTokenScale, dropTokenScale };}

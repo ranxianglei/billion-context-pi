@@ -63,6 +63,8 @@ pi install npm:billion-context-pi
 > ```bash
 > pi remove npm:pi-subagents
 > ```
+>
+> 也可以两者共存:检测到已安装 `pi-subagents` 时,billion-context-pi 会自动停用 `acp_delegate`(并提醒你用 `/acp-subagents` 让 pi-subagents 的子代理获得 ACP 压缩)。在 `~/.pi/acp.json` 中设置 `"delegate": { "forceEnable": true }` 可强制保留 `acp_delegate`。
 
 ## 工作原理
 

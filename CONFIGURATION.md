@@ -111,6 +111,7 @@ All keys below are currently **ACTIVE**.
 | Key | Type | Default | Status | Description |
 |-----|------|---------|--------|-------------|
 | `delegate.enabled` | boolean | `true` | 🟢 ACTIVE | Enable the `acp_delegate` tools and their system-prompt section. |
+| `delegate.forceEnable` | boolean | `false` | 🟢 ACTIVE | Keep `acp_delegate` active even when the third-party `pi-subagents` extension is installed (default: `acp_delegate` stands down automatically when it detects one). |
 | `delegate.displayUsage` | string | `"separate"` | 🟢 ACTIVE | Controls how delegate sub-agent token usage is reported. |
 | `delegate.maxDepth` | number | `2` | 🟢 ACTIVE | Max nesting depth for `acp_delegate` (main session = depth 0; a session *at* this depth is a leaf and cannot delegate again). Set `1` so delegates never nest. |
 | `delegate.syncTimeoutMinutes` | number | `5` | 🟢 ACTIVE | Hard timeout for **synchronous** `acp_delegate` calls, in minutes. `0` / `null` disables it. |
@@ -242,6 +243,13 @@ The `delegate` sub-object controls the `acp_delegate` sub-agent tool family (`ac
 - **Default:** `true`
 - **Status:** 🟢 ACTIVE
 - **Description:** Enable the `acp_delegate` tools (`acp_delegate`, `acp_delegate_wait`, `acp_delegate_cancel`) and the system-prompt section that describes them. Set to `false` to skip registering them entirely — for example, if you use a different sub-agent extension, or when running headless where async result injection adds no value.
+
+### `delegate.forceEnable`
+
+- **Type:** `boolean`
+- **Default:** `false`
+- **Status:** 🟢 ACTIVE
+- **Description:** Keep `acp_delegate` active even when the third-party [`pi-subagents`](https://github.com/nicobailon/pi-subagents) extension is installed. By default (`false`), detecting an installed `pi-subagents` at session start makes `acp_delegate` stand down automatically — both extensions ship overlapping sub-agent systems (own fleet checker, spawn path, and the `ctrl+alt+f` inspector shortcut clash behind #412), and running two fleets confuses the model. When it stands down, a reminder explains that `pi-subagents`' agents do NOT get ACP context compression by default, and that running `/acp-subagents` injects `compress` / `decompress` / `search_context` / `acp_status` into its agent overrides. Ignored when `pi-subagents` is not installed or when `delegate.enabled` is `false`.
 
 ### `delegate.displayUsage`
 
