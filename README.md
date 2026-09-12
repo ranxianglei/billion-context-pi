@@ -158,7 +158,6 @@ The full delegate result is saved to a file (`/tmp/acp-delegate/<runId>.out`); t
 
 In the **interactive TUI**, async runs also show a live status widget below the editor (agent, elapsed seconds, task preview), so you always know what's running and for how long. Disabled automatically in RPC/print/JSON.
 
-
 #### Using your own sub-agent instead
 
 If you already run another sub-agent extension (pi-subagents, pi-lens, …), turn ACP's delegate off so the model is offered only one way to delegate. In `~/.pi/acp.json` (global) or `<project>/.pi/acp.json` (per project):
