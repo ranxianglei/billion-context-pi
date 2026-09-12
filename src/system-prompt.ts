@@ -11,6 +11,7 @@ export interface PiPromptSections {
   decompressPhilosophy?: SectionOverride;
   contextBreakdown?: SectionOverride;
   throttleRetry?: SectionOverride;
+  compressLoopGuard?: SectionOverride;
   philosophy?: null;
   howToCompress?: null;
   tier2?: null;
@@ -70,11 +71,15 @@ When context usage passes a threshold, the system appends a breakdown showing wh
 
 A provider rate-limit error (e.g. "Too many tokens, please wait before trying again.") may appear as a failed assistant response followed by a [ACP:provider-throttle] note. The interruption was transient and the system is retrying automatically. After such an interruption, resume the interrupted step exactly where it left off: do not re-run completed steps, do not re-read content already in context, and do not discuss the interruption unless asked.
 Retries are capped; when the cap is reached the error is surfaced to the user unchanged. If the user sends new input during a retry wait, the retry is cancelled.`],
+  ["compressLoopGuard", `COMPRESS LOOP GUARD
+
+If you see a note beginning with [ACP:compress-loop], you have been repeatedly issuing compress calls this turn without making progress (identical or already-compressed ranges). STOP calling compress immediately and do not try to "fix" it by re-issuing another compress call — that is exactly what is looping. Continue your actual task using the context you already have. Compressing becomes available again on the next user message.`],
 ];
 
 const PROMPT_SECTION_KEYS: ReadonlySet<string> = new Set([
   "acpTags", "summariesInContext", "tools", "whenToCompress", "whenNotToCompress",
   "multiTierIntro", "decompressPhilosophy", "contextBreakdown", "throttleRetry",
+  "compressLoopGuard",
 ]);
 
 const RULE_SLOT_KEYS: ReadonlySet<string> = new Set(["philosophy", "howToCompress", "tier2", "tier3"]);

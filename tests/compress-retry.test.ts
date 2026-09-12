@@ -372,3 +372,71 @@ test("nudge ledger: per-session mark/query/clear isolation (#317)", () => {
   assert.equal(rt.nudgeShownFor("A", "u2"), true);
   assert.equal(rt.nudgeShownFor("B", "u2"), false);
 });
+
+// ─── issue #330: semantic-level loop breaker ────────────────────────────────
+//
+// The #308/#6/#250 breakers stop the TOOL from doing damage but cannot stop the
+// MODEL from generating another ~10K-token repetitive compress turn under a
+// low-temp attractor. Two input-side additions close that gap:
+//   1. nudge suppression starts at the FIRST failure (not the MAX_COMPRESS_ATTEMPTS
+//      cap) — re-pushing "compress more" reinforces the loop; the failure
+//      toolResult already carries actionable refs.
+//   2. once in-turn failures reach COMPRESS_LOOP_CORRECT_THRESHOLD (2), an
+//      independent [ACP:compress-loop] user-role stop-signal is injected.
+// Both are driven by runtime.compressFailCountFor(sid, turnKey).
+
+test("compressFailCountFor: reports in-turn failures, 0 for other turns, resets on success/new turn (#330)", () => {
+  const rt = createRuntime({});
+  const fail = (id: string) => ({ toolCallId: id, isError: true, success: false });
+  const noop = (id: string) => ({ toolCallId: id, isError: false, success: false, noop: true });
+  const success = (id: string) => ({ toolCallId: id, isError: false, success: true });
+
+  assert.equal(rt.compressFailCountFor("S", "u1"), 0, "no outcomes yet → 0");
+  rt.noteCompressOutcomes("S", "u1", [fail("t0")]);
+  assert.equal(rt.compressFailCountFor("S", "u1"), 1);
+  assert.equal(rt.compressFailCountFor("S", "other"), 0, "unrelated turn → 0");
+  assert.equal(rt.compressFailCountFor("T", "u1"), 0, "unrelated session → 0 (sid-scoped per #317)");
+  rt.noteCompressOutcomes("S", "u1", [fail("t0"), noop("n0")]);
+  assert.equal(rt.compressFailCountFor("S", "u1"), 2, "error + no-op both advance the loop counter");
+  rt.noteCompressOutcomes("S", "u1", [fail("t0"), noop("n0"), success("s0")]);
+  assert.equal(rt.compressFailCountFor("S", "u1"), 0, "genuine success resets → suppression/correction clear");
+  rt.noteCompressOutcomes("S", "u2", [fail("a")]);
+  assert.equal(rt.compressFailCountFor("S", "u2"), 1);
+  assert.equal(rt.compressFailCountFor("S", "u1"), 0, "a new turn's failure does not leak into an old turn");
+});
+
+test("loop correction: [ACP:compress-loop] injected exactly once per event at ≥2 in-turn failures, self-clears on new turn (#330)", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+  const stateFile = "/tmp/pai-acp-loop-correct.session.json";
+  await rm(`${stateFile}.acp.json`, { force: true });
+
+  const loopMsgs = (r: any) =>
+    (r?.messages ?? []).filter((m: any) => m.role === "user" && /\[ACP:compress-loop\]/.test(JSON.stringify(m.content)));
+
+  let entries: any[] = [userMsg("e1", ZH)];
+  const ctx = fakeCtx(() => entries, stateFile);
+  await fire(handlers, ctx); // assign refs
+
+  // first failed compress → count 1 → below threshold → no correction yet
+  entries = [...entries, toolResultMsg("e2", "call_1", VALIDATION_ERR, true)];
+  const r1 = await fire(handlers, ctx);
+  assert.equal(loopMsgs(r1).length, 0, "1 failure < threshold 2 → no correction");
+
+  // second failed compress (no-op panel) → count 2 → correction fires
+  entries = [...entries, toolResultMsg("e3", "call_2", NOOP_PANEL, false)];
+  const r2 = await fire(handlers, ctx);
+  assert.equal(loopMsgs(r2).length, 1, "2 failures ≥ threshold 2 → one correction injected");
+  assert.match(JSON.stringify(loopMsgs(r2)[0]!.content), /STOP calling compress/, "carries an explicit stop instruction");
+
+  // third failure still yields exactly ONE correction per event (not cumulative)
+  entries = [...entries, toolResultMsg("e4", "call_3", VALIDATION_ERR, true)];
+  const r3 = await fire(handlers, ctx);
+  assert.equal(loopMsgs(r3).length, 1, "still exactly one correction per context event");
+
+  // new user turn → fresh budget → the stale correction does not linger
+  entries = [...entries, userMsg("e5", "now do something else")];
+  const r4 = await fire(handlers, ctx);
+  assert.equal(loopMsgs(r4).length, 0, "new turn resets the loop counter → no stale correction");
+  await rm(`${stateFile}.acp.json`, { force: true });
+});

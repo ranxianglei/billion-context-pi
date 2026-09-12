@@ -99,6 +99,11 @@ export interface AcpRuntime {
    *  compress calls — used to stop re-injecting the (dedup-exempt) emergency
    *  nudge that would otherwise keep looping no-op compressions (issue #6). */
   compressRetryCappedFor(sid: string, turnKey: string): boolean;
+  /** Failed/no-op compress calls counted for this turn, or 0 when turnKey does
+   *  not match the currently tracked turn (sid-scoped per #327). Distinguishes
+   *  "no failure yet" from "hard-capped" so nudge suppression can engage on the
+   *  first failed attempt rather than only at MAX_COMPRESS_ATTEMPTS (issue #330). */
+  compressFailCountFor(sid: string, turnKey: string): number;
   clearNudgeTracking(sid: string): void;
   clearCompressRetryTracking(sid: string): void;
   liveContextLimit(ctx: ExtensionContext): number;
@@ -416,6 +421,11 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     return t !== undefined && t.failTurnKey === turnKey && t.failCount >= MAX_COMPRESS_ATTEMPTS;
   }
 
+  function compressFailCountFor(sid: string, turnKey: string): number {
+    const t = compressTrackerFor(sid);
+    return t.failTurnKey === turnKey ? t.failCount : 0;
+  }
+
   function clearCompressRetryTracking(sid: string): void {
     compressOutcomes.delete(sid);
   }
@@ -564,4 +574,4 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
 
   let refused = false;
   let refusalMessage: string | null = null;
-  return { core, store, get refused() { return refused; }, set refused(v: boolean) { refused = v; }, get refusalMessage() { return refusalMessage; }, set refusalMessage(v: string | null) { refusalMessage = v; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown, nudgeShownFor, nudgeShownTokensFor, clearNudgeTracking, clearNudgeTokenStamps, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reasoningDropFor, reloadConfig, stateFor, save, deriveChildState: deriveChild, acquireLock, overflowFor, overflowDrop, noteDeadCompress, clearDeadCompress, throttleFor, throttleDrop , noteTokenScale, dropTokenScale };}
+  return { core, store, get refused() { return refused; }, set refused(v: boolean) { refused = v; }, get refusalMessage() { return refusalMessage; }, set refusalMessage(v: string | null) { refusalMessage = v; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown, nudgeShownFor, nudgeShownTokensFor, clearNudgeTracking, clearNudgeTokenStamps, noteCompressOutcomes, compressRetryCappedFor, compressFailCountFor, clearCompressRetryTracking, liveContextLimit, configFor, reasoningDropFor, reloadConfig, stateFor, save, deriveChildState: deriveChild, acquireLock, overflowFor, overflowDrop, noteDeadCompress, clearDeadCompress, throttleFor, throttleDrop , noteTokenScale, dropTokenScale };}
