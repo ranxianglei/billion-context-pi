@@ -171,7 +171,11 @@ test("#289 Fix B: acp_status nudge follows the sent view, not the raw estimate",
   await rm(`${STATE_FILE}.acp.json`, { force: true });
   try {
     const { api, handlers } = captureApi();
-    createAcpExtension({ modelContextLimit: L })(api as any);
+    // nudgeGrowthTokens pinned to the pre-#398 default: this test exercises
+    // the #289 sent-view recomputation, not the window-scaled cadence (with
+    // #398 scaling a 100K window gets a 33333 band and the growth branch
+    // legitimately fires on the 36K first-sight mass).
+    createAcpExtension({ modelContextLimit: L, compress: { nudgeGrowthTokens: 50_000 } })(api as any);
     const compressTool = api.tools.find((t: any) => t.name === "compress");
     const statusTool = api.tools.find((t: any) => t.name === "acp_status");
     assert.ok(statusTool, "acp_status tool registered");

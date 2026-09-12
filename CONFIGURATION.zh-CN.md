@@ -146,7 +146,7 @@
 |----|------|--------|------|------|
 | `compress.maxContextLimit` | number \| string | `"75%"` | 🟢 ACTIVE | 触发强制压缩 nudge 的上下文阈值。 |
 | `compress.emergencyThresholdPercent` | number \| string | `"95%"` | 🟢 ACTIVE | 触发紧急截断的上下文阈值。 |
-| `compress.nudgeGrowthTokens` | number | `50000` | 🟢 ACTIVE | 软压缩 nudge 的 token 增长步长。 |
+| `compress.nudgeGrowthTokens` | number | 随窗口缩放：150K+ 为 `50000`；以下为 `clamp(窗口/3, 8000, 50000)`（#398） | 🟢 ACTIVE | 软压缩 nudge 的 token 增长步长。 |
 | `compress.reasoning` | object | `{ "drop": true, "threshold": 2048 }` | 🟢 ACTIVE | 请求时丢弃历史 `compress` 调用上的超大思考（不修改持久化历史）。 |
 
 **prompts 键**
@@ -542,9 +542,11 @@
 ### `compress.nudgeGrowthTokens`
 
 - **类型：** `number`
-- **默认值：** `50000`
+- **默认值：** 随窗口缩放（#398）—— 窗口 ≥ 150K 或未知时 `50000`；否则 `clamp(窗口 / 3, 8000, 50000)`（50K 窗口得 `16667`，100K 窗口得 `33333`）
 - **状态：** 🟢 ACTIVE
 - **说明：** 控制**软**压缩 nudge 频率的 token 增长阈值。每当积累约这么多新可压缩内容时，触发一次软 nudge。值越低模型被 nudge 压缩的频率越高；值越高频率越低。此设置只控制*基于增长的* nudge——用量越过 `compress.maxContextLimit` 后，强制 nudge 接管，不受此设置影响。映射到内核设置 `nudge.growthFloor` 和 `nudge.growthCap`。
+- **随窗口缩放的默认值（#398）：** 未显式设置时，低于 150K 的窗口默认把增长带设为窗口的三分之一。内核固定的 50000 只在 150K+ 窗口有意义：更小的窗口里，还没攒满 50K 增长，75% 强制带就接管了，软节奏形同虚设，压缩完全被强制/emergency 带驱动。50K 窗口下 ~16.7K 的增长带让软 nudge 在 ~52% 占用即介入，之后每 ~16.7K 增长重新布防——小上下文会话进入平稳的压缩循环，而不是被抽进强制压缩。显式值优先；设 `50000` 可恢复旧固定带。
+- **小上下文配方（~50K 窗口）：** #398 之后压缩侧无需任何旋钮。若还想让超大单次工具输出提前吸收（而不是等一次 compress），合并 [PR #208](https://github.com/ranxianglei/billion-context-pi/pull/208) 并设置 `{ "absorb": { "minToolTokens": 4000 } }` —— 默认 1000（占 50K 窗口 2%）连普通输出也会吸收；4000（~8%）只针对真正的大输出。
 - **同轮重注入：** 同一用户轮内 nudge 至多注入一次，但上下文自上次注入后又增长满一个增长门槛（镜像内核防抖 cadence：`max(minGrowthFloor, minGrowthRatio × adaptiveGrowth)`，默认 22.5K token）时，会在同轮重新注入新提醒（issue #269：模型忽略 78% nudge 后，原来会一直沉默到 95% emergency 机械截断）。成功 compress 后增长基线重锚到新（更小）刻度，压缩后重新长回压力带不会被压缩前峰值压制。
 
 ### `compress.reasoning`

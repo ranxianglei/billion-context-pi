@@ -466,6 +466,27 @@ export function resolveCompress(
   return mergeCompress(compress, prov, model);
 }
 
+/** Kernel default nudge growth band — the value large windows keep. */
+const KERNEL_GROWTH_DEFAULT = 50_000;
+/** Window-scaled nudge growth (#398): below this window the kernel's fixed
+ *  50000-token band can never accumulate before the 75% force band takes
+ *  over, so the soft cadence is dead weight; scale it to the window instead. */
+const ADAPTIVE_GROWTH_WINDOW_MAX = 150_000;
+/** Floor for the scaled band — keeps tiny windows from nudging on every
+ *  message (below ~24K windows the band is unreachable either way, matching
+ *  the pre-#398 behavior where 50000 was equally unreachable). */
+const ADAPTIVE_GROWTH_MIN = 8_000;
+
+/** Effective nudge growth band for a context window when the user has not set
+ *  `nudgeGrowthTokens`: a third of the window for windows under 150K (a 50K
+ *  window gets ~16.7K — soft nudges from ~52% usage, re-arming every ~16.7K
+ *  of growth), the untouched kernel default (50000) at 150K and above or when
+ *  the window is unknown (<= 0). */
+export function scaleNudgeGrowthToWindow(limit: number): number {
+  if (!Number.isFinite(limit) || limit <= 0 || limit >= ADAPTIVE_GROWTH_WINDOW_MAX) return KERNEL_GROWTH_DEFAULT;
+  return Math.min(KERNEL_GROWTH_DEFAULT, Math.max(ADAPTIVE_GROWTH_MIN, Math.round(limit / 3)));
+}
+
 export function resolveConfig(adapter: AdapterConfig, liveContextLimit: number, provider?: string, modelId?: string): Config {
   const envLimit = process.env.ACP_MODEL_CONTEXT_LIMIT;
   const envLimitNum = envLimit ? Number(envLimit) : NaN;
@@ -493,6 +514,13 @@ export function resolveConfig(adapter: AdapterConfig, liveContextLimit: number, 
   if (c.nudgeGrowthTokens !== undefined) {
     config.nudge.growthFloor = c.nudgeGrowthTokens;
     config.nudge.growthCap = c.nudgeGrowthTokens;
+  } else {
+    // #398: window-scaled soft-nudge cadence — an unset nudgeGrowthTokens on
+    // a sub-150K window defaults to a third of the window instead of the
+    // kernel's fixed 50000 (which only ever engages the 75%/95% bands there).
+    const scaled = scaleNudgeGrowthToWindow(limit);
+    config.nudge.growthFloor = scaled;
+    config.nudge.growthCap = scaled;
   }
   if (c.minPressureBenefitTokens !== undefined) {
     config.nudge.minPressureBenefitTokens = c.minPressureBenefitTokens;
