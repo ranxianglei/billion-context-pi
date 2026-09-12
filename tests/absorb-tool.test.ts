@@ -5,6 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAcpExtension } from "../src/index.js";
 import { resolveConfig } from "../src/config.js";
+import { makeAbsorbTool } from "../src/absorb-tool.js";
+import type { AcpRuntime } from "../src/runtime.js";
+import { UNSUPPORTED_HOST_MESSAGE } from "../src/omp.js";
 
 function captureApi() {
   const handlers = new Map<string, ((event: any, ctx: any) => any)[]>();
@@ -168,6 +171,39 @@ test("absorb rejects bad refs and empty summaries", async () => {
     await assert.rejects(absorb.execute("c1", { ref: "m99999", summary: "s" }, {}, undefined, ctx), /does not exist in this session/);
     await assert.rejects(absorb.execute("c2", { ref: "", summary: "s" }, {}, undefined, ctx), /Invalid absorb arguments/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("absorb tool refuses on unsupported hosts", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ autoUpdate: false, absorb: true })(api);
+  const ompCtx = {
+    mode: "rpc",
+    hasUI: false,
+    cwd: "/tmp",
+    ui: { notify: () => {}, confirm: async () => true, select: async () => undefined, input: async () => "", setStatus: () => {} },
+    model: { contextWindow: 200_000 },
+    sessionManager: {
+      getBranch: () => [],
+      getSessionId: () => "omp-session",
+      getSessionFile: () => "/tmp/absorb-omp.session.json",
+    },
+  };
+  await handlers.get("session_start")![0]!({ type: "session_start", reason: "startup" }, ompCtx);
+  const absorb = (api as any).tools.find((t: any) => t.name === "absorb");
+  assert.ok(absorb, "absorb registered at factory time");
+  const res = await absorb.execute("c1", { ref: "m00001", summary: "s" }, {}, undefined, ompCtx);
+  assert.equal(res.content[0].text, UNSUPPORTED_HOST_MESSAGE);
+});
+
+test("makeAbsorbTool applies surface prompt overrides", () => {
+  const runtime = { refused: false } as unknown as AcpRuntime;
+  const base = makeAbsorbTool(runtime);
+  const overridden = makeAbsorbTool(runtime, "takeaway", { description: "CUSTOM-DESC", promptSnippet: "", promptGuidelines: ["G1"] });
+  assert.notEqual(overridden.description, base.description);
+  assert.equal(overridden.description, "CUSTOM-DESC");
+  assert.equal(overridden.promptSnippet, "");
+  assert.deepEqual(overridden.promptGuidelines, ["G1"]);
+  assert.equal(overridden.name, "takeaway");
 });
 
 test("system prompt gains absorb section when enabled", () => {

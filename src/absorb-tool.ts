@@ -6,6 +6,8 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import type { AcpRuntime } from "./runtime.js";
 import { logInfo, logThrow, logWarn } from "./log.js";
+import { applyToolPromptOverrides, type ToolPromptOverrides } from "./surface.js";
+import { UNSUPPORTED_HOST_MESSAGE } from "./omp.js";
 import { parseAbsorbInput, applyAbsorb } from "acp-kernel";
 
 const AbsorbParams = Type.Object({
@@ -15,8 +17,8 @@ const AbsorbParams = Type.Object({
 
 type AbsorbArgs = Static<typeof AbsorbParams>;
 
-export function makeAbsorbTool(runtime: AcpRuntime, name = "absorb"): ToolDefinition<typeof AbsorbParams> {
-  return {
+export function makeAbsorbTool(runtime: AcpRuntime, name = "absorb", overrides?: ToolPromptOverrides): ToolDefinition<typeof AbsorbParams> {
+  return applyToolPromptOverrides({
     name,
     label: "Absorb",
     description:
@@ -28,6 +30,7 @@ export function makeAbsorbTool(runtime: AcpRuntime, name = "absorb"): ToolDefini
     ],
     parameters: AbsorbParams,
     async execute(toolCallId, params, _signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {
+      if (runtime.refused) return { details: undefined, content: [{ type: "text", text: runtime.refusalMessage ?? UNSUPPORTED_HOST_MESSAGE }] };
       let result: string;
       try {
         result = await handleAbsorb(params as AbsorbArgs, runtime, ctx, toolCallId);
@@ -37,7 +40,7 @@ export function makeAbsorbTool(runtime: AcpRuntime, name = "absorb"): ToolDefini
       }
       return { details: undefined, content: [{ type: "text", text: result }] };
     },
-  };
+  }, overrides);
 }
 
 async function handleAbsorb(args: AbsorbArgs, runtime: AcpRuntime, ctx: ExtensionContext, toolCallId?: string): Promise<string> {

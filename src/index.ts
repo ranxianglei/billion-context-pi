@@ -20,7 +20,7 @@ import { makeStatusTool } from "./status-tool.js";
 import { makeDelegateTool, makeDelegateWaitTool, makeDelegateCancelTool, runningRunsSnapshot, resetDelegateUsage, setDelegateDisplayUsage, setDelegatePolicy, setDelegateDefaults, setDelegateNotifyIfRead, markDelegateResultRead, markDelegateRunReadByCommand } from "./delegate-tool.js";
 import { makeCommands } from "./commands.js";
 import { mergeSurface, readToolSurfaceWithPacks, resolveActivePack } from "./prompt-pack.js";
-import type { NudgeSectionsConfig } from "./surface.js";
+import type { NudgeSectionsConfig, ToolPromptOverrides } from "./surface.js";
 import { coreOutToAgentMessages, extractText } from "./messages.js";
 import { countThinkingChars, dropCompressReasoning } from "./reasoning-drop.js";
 import { collapseAssistantDegeneration, degenerationNotice, lastAssistantRuns, resolveDegenerationGuard } from "./degeneration.js";
@@ -106,17 +106,17 @@ export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactor
     pi.registerTool(makeDecompressTool(runtime, toolSurface.decompress));
     pi.registerTool(makeSearchTool(runtime, toolSurface.search_context));
     pi.registerTool(makeStatusTool(runtime, toolSurface.acp_status));
-    registerAbsorbIfEnabled(pi, runtime, adapter);
+    registerAbsorbIfEnabled(pi, runtime, adapter, toolSurface.absorb);
     for (const { name, options } of makeCommands(runtime, pi)) {
       pi.registerCommand(name, options);
     }
   };
 }
 
-function registerAbsorbIfEnabled(pi: ExtensionAPI, runtime: AcpRuntime, adapter: AdapterConfig): void {
+function registerAbsorbIfEnabled(pi: ExtensionAPI, runtime: AcpRuntime, adapter: AdapterConfig, overrides?: ToolPromptOverrides): void {
   const absorb = resolveAbsorb(adapter);
   if (!absorb.enabled) return;
-  pi.registerTool(makeAbsorbTool(runtime, absorb.toolName));
+  pi.registerTool(makeAbsorbTool(runtime, absorb.toolName, overrides));
 }
 
 export default createAcpExtension();
@@ -243,7 +243,7 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
         });
       }
     }
-    registerAbsorbIfEnabled(pi, runtime, runtime.adapter);
+    registerAbsorbIfEnabled(pi, runtime, runtime.adapter, readToolSurfaceWithPacks(ctx.cwd).absorb);
     // Headless hosts exit as soon as the turn ends; awaiting the check keeps
     // the process alive until a running install finishes. TUI stays
     // fire-and-forget so interactive startup is never blocked by npm.

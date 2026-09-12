@@ -279,6 +279,22 @@ Shorthand forms (like `delegate`): `absorb: true` enables with defaults; an obje
 - **Status:** 🟢 ACTIVE
 - **Description:** Tool names whose results are never absorbable. ACP's own tool results (`compress`, `decompress`, `search_context`, `acp_status`, …) and protected tools are always excluded automatically.
 
+### Tuning for small windows (≤ 50K)
+
+Running big projects in a ~50K-token window needs two adjustments:
+
+- `compress.nudgeGrowthTokens` — at its default of `50000`, soft growth nudges effectively never fire in a 50K window (that much pending content can't accumulate before the 75% forced nudge takes over), so only the 75%/95% escalation works. Set it to roughly a third of the window so soft nudges start early — e.g. `15000` for 50K.
+- `absorb.minToolTokens` — the default `1000` is only ~2% of a 50K window and absorbs routine outputs too eagerly; ~`4000` (~8%) keeps absorption to genuinely bulky results.
+
+Example 50K-window profile:
+
+```jsonc
+{
+  "compress": { "nudgeGrowthTokens": 15000 },
+  "absorb": { "minToolTokens": 4000 }
+}
+```
+
 ---
 
 ## Delegate
@@ -739,7 +755,7 @@ The `prompts` object overrides acp-kernel's **load-bearing** compression prompt 
 - **Type:** `object` (per-tool partial)
 - **Default:** *(built-in defaults)*
 - **Status:** 🟢 ACTIVE
-- **Description:** Override the LLM-facing text of the four ACP tools. Keys: `compress`, `decompress`, `search_context`, `acp_status`. Each accepts `description` (string), `paramDescriptions` (object mapping parameter names to strings — rewrites the schema field descriptions), `promptSnippet` (string, shown in the "Available tools" system prompt section), and `promptGuidelines` (string or string[] — appended to the system prompt Guidelines section). Read **synchronously at extension load** (tool definitions are frozen at registration), so changes require restarting pi. Example:
+- **Description:** Override the LLM-facing text of the ACP tools. Keys: `compress`, `decompress`, `search_context`, `acp_status`, `absorb` (only takes effect while absorb is enabled). Each accepts `description` (string), `paramDescriptions` (object mapping parameter names to strings — rewrites the schema field descriptions), `promptSnippet` (string, shown in the "Available tools" system prompt section), and `promptGuidelines` (string or string[] — appended to the system prompt Guidelines section). Read **synchronously at extension load** (tool definitions are frozen at registration), so changes require restarting pi. Example:
 
   ```json
   {

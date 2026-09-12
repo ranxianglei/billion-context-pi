@@ -275,6 +275,22 @@
 - **状态:** 🟢 ACTIVE
 - **说明:** 永不参与吸收的工具名。ACP 自身工具的结果(`compress`、`decompress`、`search_context`、`acp_status` 等)与受保护工具始终自动排除。
 
+### 小窗口(≤ 5w token)调优
+
+在 ~5w token 的窗口里跑较大项目,需要调整两处:
+
+- `compress.nudgeGrowthTokens` —— 默认值 `50000` 在 5w 窗口里意味着软性增长催促基本不会触发(等到攒够这么多可压缩内容,75% 的强制催促早已接管),实际只剩 75%/95% 两级兜底。设为窗口大小的三分之一左右,让软催促提前介入——例如 5w 窗口设 `15000`。
+- `absorb.minToolTokens` —— 默认 `1000` 只占 5w 窗口的 ~2%,会把常规输出也过度吸收;设成 ~`4000`(约 8%)只让真正的大输出走吸收。
+
+5w 窗口示例配置:
+
+```jsonc
+{
+  "compress": { "nudgeGrowthTokens": 15000 },
+  "absorb": { "minToolTokens": 4000 }
+}
+```
+
 ---
 
 ## Delegate
@@ -728,7 +744,7 @@ provider 的 key 是 **Pi provider 名**(如 `"anthropic"`、`"openai"`、`"zhip
 - **类型：** `object`（逐工具部分覆盖）
 - **默认值：** *(内置默认)*
 - **状态：** 🟢 ACTIVE
-- **说明：** 覆盖四个 ACP 工具面向 LLM 的文案。键：`compress`、`decompress`、`search_context`、`acp_status`。每项可设 `description`（字符串）、`paramDescriptions`（参数名→字符串的对象——重写 schema 字段描述）、`promptSnippet`（字符串，显示在系统提示词的“可用工具”段）、`promptGuidelines`（字符串或字符串数组——追加到系统提示词 Guidelines 段）。在**扩展加载时同步读取**（工具定义在注册时固化），修改后需重启 pi。示例：
+- **说明：** 覆盖 ACP 工具面向 LLM 的文案。键：`compress`、`decompress`、`search_context`、`acp_status`、`absorb`（仅在 absorb 开启时生效）。每项可设 `description`（字符串）、`paramDescriptions`（参数名→字符串的对象——重写 schema 字段描述）、`promptSnippet`（字符串，显示在系统提示词的“可用工具”段）、`promptGuidelines`（字符串或字符串数组——追加到系统提示词 Guidelines 段）。在**扩展加载时同步读取**（工具定义在注册时固化），修改后需重启 pi。示例：
 
   ```json
   {
