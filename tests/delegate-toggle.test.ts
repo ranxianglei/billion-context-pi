@@ -71,17 +71,22 @@ async function withConfigs(
     const root = await mkdtemp(join(tmpdir(), "pi-acp-delegate-"));
     const home = join(root, "home");
     const cwd = join(root, "project");
+    // os.homedir() reads USERPROFILE on Windows, HOME elsewhere — set both (cf. tests/user-config.test.ts)
     const savedHome = process.env.HOME;
+    const savedUserProfile = process.env.USERPROFILE;
     try {
         await mkdir(join(home, CONFIG_DIR_NAME), { recursive: true });
         await mkdir(join(cwd, CONFIG_DIR_NAME), { recursive: true });
         if (global !== undefined) await writeFile(join(home, CONFIG_DIR_NAME, "acp.json"), JSON.stringify(global));
         if (project !== undefined) await writeFile(join(cwd, CONFIG_DIR_NAME, "acp.json"), JSON.stringify(project));
         process.env.HOME = home;
+        process.env.USERPROFILE = home;
         await fn(cwd);
     } finally {
         if (savedHome === undefined) delete process.env.HOME;
         else process.env.HOME = savedHome;
+        if (savedUserProfile === undefined) delete process.env.USERPROFILE;
+        else process.env.USERPROFILE = savedUserProfile;
         await rm(root, { recursive: true, force: true });
     }
 }
