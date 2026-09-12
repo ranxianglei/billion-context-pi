@@ -51,6 +51,12 @@
     "emergencyThresholdPercent": "95%",
     "nudgeGrowthTokens": 50000,
     "reasoning": { "drop": true, "threshold": 2048 }
+  },
+
+  "absorb": {
+    "minToolTokens": 1000,
+    "contextThresholdPct": 0,
+    "excludeTools": ["read"]
   }
 }
 ```
@@ -149,6 +155,16 @@
 | `compress.nudgeGrowthTokens` | number | `50000` | 🟢 ACTIVE | 软压缩 nudge 的 token 增长步长。 |
 | `compress.reasoning` | object | `{ "drop": true, "threshold": 2048 }` | 🟢 ACTIVE | 请求时丢弃历史 `compress` 调用上的超大思考（不修改持久化历史）。 |
 
+**Absorb 键**
+
+| 键 | 类型 | 默认值 | 状态 | 说明 |
+|-----|------|--------|------|------|
+| `absorb` | boolean \| object | `false` | 🟢 ACTIVE | `true` 以默认参数开启工具结果即时吸收;传对象可细调。 |
+| `absorb.toolName` | string | `"absorb"` | 🟢 ACTIVE | 暴露给模型的 absorb 工具名。 |
+| `absorb.minToolTokens` | number | `1000` | 🟢 ACTIVE | 低于该估算规模的工具结果不触发吸收提示。 |
+| `absorb.contextThresholdPct` | number \| string | `0` | 🟢 ACTIVE | 仅当上下文占用达到该比例(`0.3` / `"30%"`)时提示;`0` 表示只看大小。 |
+| `absorb.excludeTools` | string[] | `[]` | 🟢 ACTIVE | 永不参与吸收的工具名列表。 |
+
 **prompts 键**
 
 | 键 | 类型 | 默认值 | 状态 | 说明 |
@@ -223,6 +239,57 @@
 - **默认值：** `200000`
 - **状态：** 🟢 ACTIVE
 - **说明：** 通过 `tool_result` 钩子对工具返回文本施加的硬性字节上限（约 200KB，约 5000 行）。它拦截 Pi 自身上限无法覆盖的失控输出（例如 Pi 不做限制的工具）。触发上限时，超长文本会被头部截断，并附带提示告知模型如何查看完整输出。设小一些（如 `8192`）可收紧上下文预算，设为 `0` 则完全禁用。
+
+---
+
+## Absorb(工具即时压缩)
+
+`absorb` 子对象开启**工具结果即时压缩**——面向小上下文场景(例如 1w–2w 窗口):此时常规的"到阈值再催促压缩"来不及,模型没有干活的空间。工具调用是上下文的最大消耗者;即时吸收让模型在每次大工具输出之后立刻把这笔开销还回去。
+
+工作方式:
+
+1. 当工具结果足够大(估算 ≥ `absorb.minToolTokens`)且未被排除/保护时,内核在其后追加一条强制的 `[ACP absorb]` 指令:要求模型立即调用 `absorb` 工具,带上该结果的 ref 和蒸馏摘要。
+2. 吸收完成后,原来的工具调用+工具结果对在**后续轮次中被隐藏**;携带摘要的 `absorb` 调用成为持久记录。
+3. `absorb` 调用本身是普通工具调用——之后仍可被常规压缩系统折叠进 block,两个机制彼此正交。
+
+支持简写(同 `delegate`):`absorb: true` 以默认值开启;传对象可细调。
+
+### `absorb.minToolTokens`
+
+- **类型:** `number`
+- **默认值:** `1000`
+- **状态:** 🟢 ACTIVE
+- **说明:** 估算低于该 token 数的工具结果不触发吸收提示。保持足够高,只让真正的大输出走蒸馏步骤。
+
+### `absorb.contextThresholdPct`
+
+- **类型:** `number | string`
+- **默认值:** `0`
+- **状态:** 🟢 ACTIVE
+- **说明:** 仅当上下文占用达到窗口的该比例时(`0.3` 或 `"30%"`)才追加吸收提示。默认 `0` 表示只看大小——每个达标结果都立即吸收,这正是小上下文场景想要的。
+
+### `absorb.excludeTools`
+
+- **类型:** `string[]`
+- **默认值:** `[]`
+- **状态:** 🟢 ACTIVE
+- **说明:** 永不参与吸收的工具名。ACP 自身工具的结果(`compress`、`decompress`、`search_context`、`acp_status` 等)与受保护工具始终自动排除。
+
+### 小窗口(≤ 5w token)调优
+
+在 ~5w token 的窗口里跑较大项目,需要调整两处:
+
+- `compress.nudgeGrowthTokens` —— 默认值 `50000` 在 5w 窗口里意味着软性增长催促基本不会触发(等到攒够这么多可压缩内容,75% 的强制催促早已接管),实际只剩 75%/95% 两级兜底。设为窗口大小的三分之一左右,让软催促提前介入——例如 5w 窗口设 `15000`。
+- `absorb.minToolTokens` —— 默认 `1000` 只占 5w 窗口的 ~2%,会把常规输出也过度吸收;设成 ~`4000`(约 8%)只让真正的大输出走吸收。
+
+5w 窗口示例配置:
+
+```jsonc
+{
+  "compress": { "nudgeGrowthTokens": 15000 },
+  "absorb": { "minToolTokens": 4000 }
+}
+```
 
 ---
 
@@ -677,7 +744,7 @@ provider 的 key 是 **Pi provider 名**(如 `"anthropic"`、`"openai"`、`"zhip
 - **类型：** `object`（逐工具部分覆盖）
 - **默认值：** *(内置默认)*
 - **状态：** 🟢 ACTIVE
-- **说明：** 覆盖四个 ACP 工具面向 LLM 的文案。键：`compress`、`decompress`、`search_context`、`acp_status`。每项可设 `description`（字符串）、`paramDescriptions`（参数名→字符串的对象——重写 schema 字段描述）、`promptSnippet`（字符串，显示在系统提示词的“可用工具”段）、`promptGuidelines`（字符串或字符串数组——追加到系统提示词 Guidelines 段）。在**扩展加载时同步读取**（工具定义在注册时固化），修改后需重启 pi。示例：
+- **说明：** 覆盖 ACP 工具面向 LLM 的文案。键：`compress`、`decompress`、`search_context`、`acp_status`、`absorb`（仅在 absorb 开启时生效）。每项可设 `description`（字符串）、`paramDescriptions`（参数名→字符串的对象——重写 schema 字段描述）、`promptSnippet`（字符串，显示在系统提示词的“可用工具”段）、`promptGuidelines`（字符串或字符串数组——追加到系统提示词 Guidelines 段）。在**扩展加载时同步读取**（工具定义在注册时固化），修改后需重启 pi。示例：
 
   ```json
   {

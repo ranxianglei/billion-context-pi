@@ -51,6 +51,12 @@ Create `~/.pi/acp.json` (or `<project>/.pi/acp.json`) and drop in whichever keys
     "emergencyThresholdPercent": "95%",
     "nudgeGrowthTokens": 50000,
     "reasoning": { "drop": true, "threshold": 2048 }
+  },
+
+  "absorb": {
+    "minToolTokens": 1000,
+    "contextThresholdPct": 0,
+    "excludeTools": ["read"]
   }
 }
 ```
@@ -150,6 +156,16 @@ All keys below are currently **ACTIVE**.
 | `compress.nudgeGrowthTokens` | number | `50000` | 🟢 ACTIVE | Token growth step for soft compression nudges. |
 | `compress.reasoning` | object | `{ "drop": true, "threshold": 2048 }` | 🟢 ACTIVE | Drop oversized thinking from historical `compress` calls (request-time; persisted history untouched). |
 
+**Absorb keys**
+
+| Key | Type | Default | Status | Description |
+|-----|------|---------|--------|-------------|
+| `absorb` | boolean \| object | `false` | 🟢 ACTIVE | `true` enables instant tool-result absorption with defaults; an object tunes it. |
+| `absorb.toolName` | string | `"absorb"` | 🟢 ACTIVE | Name of the absorb tool exposed to the model. |
+| `absorb.minToolTokens` | number | `1000` | 🟢 ACTIVE | Tool results below this estimated size never get the absorb prompt. |
+| `absorb.contextThresholdPct` | number \| string | `0` | 🟢 ACTIVE | Only prompt when context usage is at or above this fraction (`0.3` / `"30%"`); `0` = size alone decides. |
+| `absorb.excludeTools` | string[] | `[]` | 🟢 ACTIVE | Tool names whose results are never absorbable. |
+
 **Prompts keys**
 
 | Key | Type | Default | Status | Description |
@@ -227,6 +243,57 @@ All keys below are currently **ACTIVE**.
 - **Default:** `200000`
 - **Status:** 🟢 ACTIVE
 - **Description:** A hard byte cap (~200 KB, roughly 5000 lines) applied to tool result text via the `tool_result` hook. It stops runaway output that Pi's own caps cannot catch (for example, from tools Pi does not cap). When the cap fires, the oversized text is head-truncated with a notice telling the model how to see the full output. Set lower (e.g. `8192`) for a tighter context budget, or set to `0` to disable the cap entirely.
+
+---
+
+## Absorb
+
+The `absorb` sub-object enables **instant tool-result compression** — designed for small-context setups (e.g. a 10K–20K window) where waiting for a regular compression nudge starves the model of working room. Tool calls are the biggest context consumer; absorption makes the model pay that cost back immediately after every large tool result.
+
+How it works:
+
+1. When a tool result is large enough (≥ `absorb.minToolTokens` estimated tokens) and not excluded/protected, a forced `[ACP absorb]` instruction is appended to it: the model must immediately call the `absorb` tool with the result's ref and a distilled summary.
+2. Once absorbed, the original tool-call + tool-result pair is **hidden from all later turns**; the `absorb` call (carrying your summary) becomes the durable record.
+3. `absorb` calls are ordinary tool calls — the regular compression system can fold them into blocks later, so the two mechanisms stay orthogonal.
+
+Shorthand forms (like `delegate`): `absorb: true` enables with defaults; an object tunes it.
+
+### `absorb.minToolTokens`
+
+- **Type:** `number`
+- **Default:** `1000`
+- **Status:** 🟢 ACTIVE
+- **Description:** Tool results estimated below this many tokens never get the absorb prompt. Keep it high enough that only genuinely bulky outputs demand a distill step.
+
+### `absorb.contextThresholdPct`
+
+- **Type:** `number | string`
+- **Default:** `0`
+- **Status:** 🟢 ACTIVE
+- **Description:** Only append absorb prompts when context usage is at or above this fraction of the window (`0.3` or `"30%"`). With the default `0`, size alone decides — every qualifying result is absorbed immediately, which is what small-context setups want.
+
+### `absorb.excludeTools`
+
+- **Type:** `string[]`
+- **Default:** `[]`
+- **Status:** 🟢 ACTIVE
+- **Description:** Tool names whose results are never absorbable. ACP's own tool results (`compress`, `decompress`, `search_context`, `acp_status`, …) and protected tools are always excluded automatically.
+
+### Tuning for small windows (≤ 50K)
+
+Running big projects in a ~50K-token window needs two adjustments:
+
+- `compress.nudgeGrowthTokens` — at its default of `50000`, soft growth nudges effectively never fire in a 50K window (that much pending content can't accumulate before the 75% forced nudge takes over), so only the 75%/95% escalation works. Set it to roughly a third of the window so soft nudges start early — e.g. `15000` for 50K.
+- `absorb.minToolTokens` — the default `1000` is only ~2% of a 50K window and absorbs routine outputs too eagerly; ~`4000` (~8%) keeps absorption to genuinely bulky results.
+
+Example 50K-window profile:
+
+```jsonc
+{
+  "compress": { "nudgeGrowthTokens": 15000 },
+  "absorb": { "minToolTokens": 4000 }
+}
+```
 
 ---
 
@@ -688,7 +755,7 @@ The `prompts` object overrides acp-kernel's **load-bearing** compression prompt 
 - **Type:** `object` (per-tool partial)
 - **Default:** *(built-in defaults)*
 - **Status:** 🟢 ACTIVE
-- **Description:** Override the LLM-facing text of the four ACP tools. Keys: `compress`, `decompress`, `search_context`, `acp_status`. Each accepts `description` (string), `paramDescriptions` (object mapping parameter names to strings — rewrites the schema field descriptions), `promptSnippet` (string, shown in the "Available tools" system prompt section), and `promptGuidelines` (string or string[] — appended to the system prompt Guidelines section). Read **synchronously at extension load** (tool definitions are frozen at registration), so changes require restarting pi. Example:
+- **Description:** Override the LLM-facing text of the ACP tools. Keys: `compress`, `decompress`, `search_context`, `acp_status`, `absorb` (only takes effect while absorb is enabled). Each accepts `description` (string), `paramDescriptions` (object mapping parameter names to strings — rewrites the schema field descriptions), `promptSnippet` (string, shown in the "Available tools" system prompt section), and `promptGuidelines` (string or string[] — appended to the system prompt Guidelines section). Read **synchronously at extension load** (tool definitions are frozen at registration), so changes require restarting pi. Example:
 
   ```json
   {

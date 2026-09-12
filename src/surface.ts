@@ -14,13 +14,13 @@ export interface ToolPromptOverrides {
   promptGuidelines?: string | string[];
 }
 
-export type AcpToolName = "compress" | "decompress" | "search_context" | "acp_status";
+export type AcpToolName = "compress" | "decompress" | "search_context" | "acp_status" | "absorb";
 
 export type ToolPromptsConfig = Partial<Record<AcpToolName, ToolPromptOverrides>>;
 
 export type NudgeSectionsConfig = Partial<Record<"efficiencyNote" | "emergencyHeader" | "t2Guidance" | "t3Guidance", string | null>>;
 
-const TOOL_NAMES: ReadonlySet<string> = new Set(["compress", "decompress", "search_context", "acp_status"]);
+const TOOL_NAMES: ReadonlySet<string> = new Set(["compress", "decompress", "search_context", "acp_status", "absorb"]);
 
 const NUDGE_KEYS: ReadonlySet<string> = new Set(["efficiencyNote", "emergencyHeader", "t2Guidance", "t3Guidance"]);
 
