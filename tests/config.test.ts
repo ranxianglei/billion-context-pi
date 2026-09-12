@@ -109,6 +109,44 @@ test("resolveConfig: explicit nudgeGrowthTokens beats window scaling on small wi
   assert.equal(cascaded.nudge.growthFloor, 12_000, "provider-level explicit still wins");
 });
 
+test("resolveConfig scales minGrowthFloor with the window-scaled band so the re-arm gate tracks it (#406)", () => {
+  // Kernel re-arm gate: max(minGrowthFloor, minGrowthRatio × growthTokens).
+  // Before #406 the fixed 20000 floor pinned the gate at 20000 even when the
+  // scaled band was smaller — an ignored nudge on sub-50K windows then had no
+  // same-turn second chance before the 95% emergency band.
+  const gateOf = (cfg: ReturnType<typeof resolveConfig>) =>
+    Math.max(cfg.nudge.minGrowthFloor, cfg.nudge.minGrowthRatio * cfg.nudge.growthFloor);
+
+  const w20k = resolveConfig(EMPTY, 20_000);
+  assert.equal(w20k.nudge.minGrowthFloor, 8_000, "20K window: floor follows the clamped 8000 band");
+  assert.equal(gateOf(w20k), 8_000, "gate equals one full band of growth");
+
+  const w30k = resolveConfig(EMPTY, 30_000);
+  assert.equal(w30k.nudge.minGrowthFloor, 10_000, "30K window: floor follows the 10000 band");
+  assert.equal(gateOf(w30k), 10_000);
+
+  const w50k = resolveConfig(EMPTY, 50_000);
+  assert.equal(w50k.nudge.minGrowthFloor, 16_667, "50K window: floor follows the 16667 band");
+  assert.equal(gateOf(w50k), 16_667);
+
+  const w100k = resolveConfig(EMPTY, 100_000);
+  assert.equal(w100k.nudge.minGrowthFloor, 20_000, "100K window: band 33333 exceeds the 20000 kernel floor, which stays");
+  assert.equal(gateOf(w100k), 20_000);
+});
+
+test("resolveConfig keeps the kernel 20000 minGrowthFloor on unscaled windows (#406)", () => {
+  for (const limit of [1_000_000, 150_000, 0]) {
+    const cfg = resolveConfig(EMPTY, limit);
+    assert.equal(cfg.nudge.minGrowthFloor, 20_000, `${limit}: unscaled band keeps the kernel default`);
+    assert.equal(cfg.nudge.growthFloor, 50_000);
+  }
+});
+
+test("resolveConfig: explicit nudgeGrowthTokens leaves minGrowthFloor untouched (#406)", () => {
+  const cfg = resolveConfig({ compress: { nudgeGrowthTokens: 30_000 } }, 50_000);
+  assert.equal(cfg.nudge.minGrowthFloor, 20_000, "legacy behavior: only the unset path scales the floor");
+});
+
 test("resolveConfig maps compress.minPressureBenefitTokens to kernel nudge (0 = legacy any-pending)", () => {
   const cfg = resolveConfig({ compress: { minPressureBenefitTokens: 0 } }, 1_000_000);
   assert.equal(cfg.nudge.minPressureBenefitTokens, 0);
