@@ -119,6 +119,7 @@
 | `delegate.maxConcurrent` | number | unlimited | 🟢 ACTIVE | 同时运行的后台（`async`）delegate 上限；超出的启动按 FIFO 排队，有空位时自动开始。`1` = 强制串行。可被 `PI_ACP_DELEGATE_MAX_CONCURRENT` 覆盖。 |
 | `delegate.thinkingLevel` | string | _（未设置）_ | 🟢 ACTIVE | delegate 全局默认 thinking level（per-call > 角色 > 全局 > Pi 默认）。 |
 | `delegate.agents` | object | _（未设置）_ | 🟢 ACTIVE | 按角色配置默认模型 + thinking level，以角色名为键。 |
+| `delegate.fleetShortcut` | string | `ctrl+alt+d` | 🟢 ACTIVE | `acp_delegate` fleet inspector 的 TUI 快捷键；设为 `""` 可关闭注册。 |
 
 **provider 限流重试键**
 
@@ -316,6 +317,12 @@
 }
 ```
 
+### `delegate.fleetShortcut`
+
+- **类型：** 字符串——任意 Pi 键位（如 `"ctrl+alt+d"`、`"ctrl+shift+f"`）；空字符串 `""` 表示不注册快捷键
+- **默认值：** `ctrl+alt+d`
+- **状态：** 🟢 ACTIVE
+- **说明：** TUI **fleet inspector**（运行中 / 已结束的 `acp_delegate` run 的实时列表 + 会话转录）的键盘快捷键。默认键已从 `ctrl+alt+f` 挪开，因为该组合键同时被 `pi-subagents` 扩展占用——Pi 加载器既不去重跨扩展的快捷键冲突、也不允许用户覆盖，两者会争抢同一按键（#412）。无论此设置如何，fleet inspector 始终可通过 `/acp-fleet` 打开。设为 `""` 则完全不注册快捷键（例如你依赖其他扩展的 fleet 界面时）。非法值会注册一个永不触发的绑定，而不会导致启动失败。
 
 ---
 
