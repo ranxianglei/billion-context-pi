@@ -466,10 +466,34 @@ export function resolveCompress(
   return mergeCompress(compress, prov, model);
 }
 
+/** Kernel default nudge growth band — THE design value (#398): 50000 on
+ *  every window that can sustain it, no matter how large. */
+const KERNEL_GROWTH_DEFAULT = 50_000;
+/** Small-window crossover (#398): the window whose third equals the default
+ *  (150K / 3 = 50000). At or above it the computed band reaches 50000, so the
+ *  5w default stands; below it window/3 comes out SMALLER than 5w and the
+ *  small-window algorithm takes over. Not an arbitrary threshold — the
+ *  natural crossing point of the two regimes. */
+const ADAPTIVE_GROWTH_WINDOW_MAX = 150_000;
+/** Floor for the scaled band — keeps tiny windows from nudging on every
+ *  message (below ~24K windows the band is unreachable either way, matching
+ *  the pre-#398 behavior where 50000 was equally unreachable). */
+const ADAPTIVE_GROWTH_MIN = 8_000;
+
+/** Effective nudge growth band for a context window when the user has not set
+ *  `nudgeGrowthTokens`: `min(50000, max(8000, window / 3))` — the 5w default
+ *  wherever the window can sustain it (150K and up, and unknown windows), a
+ *  third of the window only where that computes smaller than 5w (a 50K window
+ *  gets ~16.7K, re-arming every ~16.7K of growth). */
+export function scaleNudgeGrowthToWindow(limit: number): number {
+  if (!Number.isFinite(limit) || limit <= 0 || limit >= ADAPTIVE_GROWTH_WINDOW_MAX) return KERNEL_GROWTH_DEFAULT;
+  return Math.min(KERNEL_GROWTH_DEFAULT, Math.max(ADAPTIVE_GROWTH_MIN, Math.round(limit / 3)));
+}
+
 export function resolveConfig(adapter: AdapterConfig, liveContextLimit: number, provider?: string, modelId?: string): Config {
   const envLimit = process.env.ACP_MODEL_CONTEXT_LIMIT;
   const envLimitNum = envLimit ? Number(envLimit) : NaN;
-  const FALLBACK_LIMIT = 150_000;
+  const FALLBACK_LIMIT = ADAPTIVE_GROWTH_WINDOW_MAX;
   const limit =
     !Number.isNaN(envLimitNum) && envLimitNum > 0
       ? envLimitNum
@@ -493,6 +517,13 @@ export function resolveConfig(adapter: AdapterConfig, liveContextLimit: number, 
   if (c.nudgeGrowthTokens !== undefined) {
     config.nudge.growthFloor = c.nudgeGrowthTokens;
     config.nudge.growthCap = c.nudgeGrowthTokens;
+  } else {
+    // #398: window-scaled soft-nudge cadence — an unset nudgeGrowthTokens on
+    // a sub-150K window defaults to a third of the window instead of the
+    // kernel's fixed 50000 (which only ever engages the 75%/95% bands there).
+    const scaled = scaleNudgeGrowthToWindow(limit);
+    config.nudge.growthFloor = scaled;
+    config.nudge.growthCap = scaled;
   }
   if (c.minPressureBenefitTokens !== undefined) {
     config.nudge.minPressureBenefitTokens = c.minPressureBenefitTokens;
