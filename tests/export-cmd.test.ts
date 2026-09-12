@@ -86,7 +86,7 @@ async function setupSession(stateFile: string) {
     ctx,
   );
   const text = (res.content[0] as any).text as string;
-  assert.match(text, /1 block/, "compress created a block");
+  assert.match(text, /blocks: b1=m00002/, "compress created a block");
   return { api, ctx, notifies };
 }
 
