@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { resolveConfig, resolveCompress, mergeCompress, resolveDelegate, resolveRepetitionGuard, REPETITION_GUARD_DEFAULTS, type AdapterConfig } from "../src/config.js";
+import { resolveConfig, resolveCompress, mergeCompress, resolveDelegate, resolveRepetitionGuard, REPETITION_GUARD_DEFAULTS, DEFAULT_NUDGE_GROWTH_TOKENS, type AdapterConfig } from "../src/config.js";
 
 const EMPTY: AdapterConfig = {};
 
@@ -76,10 +76,10 @@ test("resolveConfig maps compress.nudgeGrowthTokens to both growthFloor and grow
   assert.equal(cfg.nudge.growthCap, 30000);
 });
 
-test("resolveConfig leaves growthFloor/growthCap at kernel defaults when compress.nudgeGrowthTokens omitted", () => {
+test("resolveConfig applies the adapter default (100000) when compress.nudgeGrowthTokens omitted (#381)", () => {
   const cfg = resolveConfig(EMPTY, 1_000_000);
-  assert.equal(cfg.nudge.growthFloor, 50000);
-  assert.equal(cfg.nudge.growthCap, 50000);
+  assert.equal(cfg.nudge.growthFloor, DEFAULT_NUDGE_GROWTH_TOKENS);
+  assert.equal(cfg.nudge.growthCap, DEFAULT_NUDGE_GROWTH_TOKENS);
 });
 
 test("resolveConfig maps compress.minPressureBenefitTokens to kernel nudge (0 = legacy any-pending)", () => {

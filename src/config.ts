@@ -107,6 +107,16 @@ export const DEFAULT_DELEGATE_POLICY: DelegatePolicy = {
   notifyIfRead: "skip",
 };
 
+/** Adapter-level default for compress.nudgeGrowthTokens (#381): the kernel's
+ *  raw default (50000) fires one full compression round-trip per ~50K tokens
+ *  of growth regardless of window size — on large windows (e.g. 900K) that
+ *  burned hours of main-loop time on summaries while usage was still low
+ *  (observed: 293 compress events in 45h at ~10% usage). Small windows are
+ *  unaffected: the pressure band (maxContextLimitPct, default 75%) engages
+ *  first, and the emergency band (default 95%) remains the hard backstop.
+ *  Set compress.nudgeGrowthTokens (any cascade level) to override. */
+export const DEFAULT_NUDGE_GROWTH_TOKENS = 100_000;
+
 /** Compression tuning fields, shared by all three levels (global, provider,
  *  model). Percentage fields accept a ratio (0.75) or percent string ("75%").
  *  Resolution is per-field, deepest-wins (model > provider > global); an
@@ -121,7 +131,9 @@ export interface CompressSettings {
    *  Default: 0.95. Must be >= maxContextLimit. Maps to kernel
    *  nudge.emergencyThresholdPct + truncate.threshold. */
   emergencyThresholdPercent?: number | string;
-  /** Token growth threshold for soft compression nudges. Default: 50000.
+  /** Token growth threshold for soft compression nudges. Default:
+   *  DEFAULT_NUDGE_GROWTH_TOKENS (100000) — the adapter raises the kernel's
+   *  raw default of 50000, which fired too often on large windows (#381).
    *  Maps to kernel nudge.growthFloor + nudge.growthCap. */
   nudgeGrowthTokens?: number;
   /** Minimum reclaimable tokens for a pressure-band nudge (kernel #198).
@@ -426,10 +438,9 @@ export function resolveConfig(adapter: AdapterConfig, liveContextLimit: number, 
     config.nudge.emergencyThresholdPct = pct;
     config.truncate.threshold = pct;
   }
-  if (c.nudgeGrowthTokens !== undefined) {
-    config.nudge.growthFloor = c.nudgeGrowthTokens;
-    config.nudge.growthCap = c.nudgeGrowthTokens;
-  }
+  const growthTokens = c.nudgeGrowthTokens ?? DEFAULT_NUDGE_GROWTH_TOKENS;
+  config.nudge.growthFloor = growthTokens;
+  config.nudge.growthCap = growthTokens;
   if (c.minPressureBenefitTokens !== undefined) {
     config.nudge.minPressureBenefitTokens = c.minPressureBenefitTokens;
   }

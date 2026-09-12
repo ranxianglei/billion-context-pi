@@ -49,7 +49,7 @@
   "compress": {
     "maxContextLimit": "75%",
     "emergencyThresholdPercent": "95%",
-    "nudgeGrowthTokens": 50000,
+    "nudgeGrowthTokens": 100000,
     "reasoning": { "drop": true, "threshold": 2048 }
   }
 }
@@ -145,7 +145,7 @@
 |----|------|--------|------|------|
 | `compress.maxContextLimit` | number \| string | `"75%"` | 🟢 ACTIVE | 触发强制压缩 nudge 的上下文阈值。 |
 | `compress.emergencyThresholdPercent` | number \| string | `"95%"` | 🟢 ACTIVE | 触发紧急截断的上下文阈值。 |
-| `compress.nudgeGrowthTokens` | number | `50000` | 🟢 ACTIVE | 软压缩 nudge 的 token 增长步长。 |
+| `compress.nudgeGrowthTokens` | number | `100000` | 🟢 ACTIVE | 软压缩 nudge 的 token 增长步长（#381 中由内核原始默认值 50000 上调）。 |
 | `compress.reasoning` | object | `{ "drop": true, "threshold": 2048 }` | 🟢 ACTIVE | 请求时丢弃历史 `compress` 调用上的超大思考（不修改持久化历史）。 |
 
 **prompts 键**
@@ -504,10 +504,10 @@
 ### `compress.nudgeGrowthTokens`
 
 - **类型：** `number`
-- **默认值：** `50000`
+- **默认值：** `100000`（适配器层；内核原始默认值为 50000）
 - **状态：** 🟢 ACTIVE
-- **说明：** 控制**软**压缩 nudge 频率的 token 增长阈值。每当积累约这么多新可压缩内容时，触发一次软 nudge。值越低模型被 nudge 压缩的频率越高；值越高频率越低。此设置只控制*基于增长的* nudge——用量越过 `compress.maxContextLimit` 后，强制 nudge 接管，不受此设置影响。映射到内核设置 `nudge.growthFloor` 和 `nudge.growthCap`。
-- **同轮重注入：** 同一用户轮内 nudge 至多注入一次，但上下文自上次注入后又增长满一个增长门槛（镜像内核防抖 cadence：`max(minGrowthFloor, minGrowthRatio × adaptiveGrowth)`，默认 22.5K token）时，会在同轮重新注入新提醒（issue #269：模型忽略 78% nudge 后，原来会一直沉默到 95% emergency 机械截断）。成功 compress 后增长基线重锚到新（更小）刻度，压缩后重新长回压力带不会被压缩前峰值压制。
+- **说明：** 控制**软**压缩 nudge 频率的 token 增长阈值。每当积累约这么多新可压缩内容时，触发一次软 nudge。值越低模型被 nudge 压缩的频率越高；值越高频率越低。此设置只控制*基于增长的* nudge——用量越过 `compress.maxContextLimit` 后，强制 nudge 接管，不受此设置影响。映射到内核设置 `nudge.growthFloor` 和 `nudge.growthCap`。由内核原始默认值 50000 上调（#381）：大窗口（如 900K）下 50K 门槛会在用量仍很低（~10%）时大约每增长 5 万 token 就触发一次完整压缩往返，长任务被反复停摆——实测 45 小时 293 次压缩事件。小窗口不受影响（压力带先接管，紧急带仍是最后兜底）。可在任意层级设置更小/更大的值覆盖。
+- **同轮重注入：** 同一用户轮内 nudge 至多注入一次，但上下文自上次注入后又增长满一个增长门槛（镜像内核防抖 cadence：`max(minGrowthFloor, minGrowthRatio × adaptiveGrowth)`，默认 45K token）时，会在同轮重新注入新提醒（issue #269：模型忽略 78% nudge 后，原来会一直沉默到 95% emergency 机械截断）。成功 compress 后增长基线重锚到新（更小）刻度，压缩后重新长回压力带不会被压缩前峰值压制。
 
 ### `compress.reasoning`
 
@@ -544,7 +544,7 @@ provider 的 key 是 **Pi provider 名**(如 `"anthropic"`、`"openai"`、`"zhip
   "compress": {
     "maxContextLimit": "75%",
     "emergencyThresholdPercent": "95%",
-    "nudgeGrowthTokens": 50000,
+    "nudgeGrowthTokens": 100000,
     "providers": {
       "anthropic": {
         "maxContextLimit": "80%",

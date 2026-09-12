@@ -84,7 +84,7 @@ test("e2e compress config: a single runtime resolves differently per model (prov
     });
 });
 
-test("e2e compress config: without a config file the kernel defaults apply", async () => {
+test("e2e compress config: without a config file the adapter defaults apply", async () => {
     const savedHome = process.env.HOME;
     await withConfigDir(undefined, async (cwd) => {
         process.env.HOME = cwd;
@@ -95,7 +95,8 @@ test("e2e compress config: without a config file the kernel defaults apply", asy
         const cfg = runtime.configFor(ctxFor("anthropic", "claude-sonnet-4-5", 200_000));
         assert.equal(cfg.nudge.maxContextLimitPct, 0.75, "kernel default maxContextLimitPct");
         assert.equal(cfg.nudge.emergencyThresholdPct, 0.95, "kernel default emergencyThresholdPct");
-        assert.equal(cfg.nudge.growthFloor, 50000, "kernel default growthFloor");
+        assert.equal(cfg.nudge.growthFloor, 100_000, "adapter default growthFloor (#381)");
+        assert.equal(cfg.nudge.growthCap, 100_000, "adapter default growthCap (#381)");
     });
     process.env.HOME = savedHome;
 });
