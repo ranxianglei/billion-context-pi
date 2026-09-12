@@ -466,11 +466,14 @@ export function resolveCompress(
   return mergeCompress(compress, prov, model);
 }
 
-/** Kernel default nudge growth band — the value large windows keep. */
+/** Kernel default nudge growth band — THE design value (#398): 50000 on
+ *  every window that can sustain it, no matter how large. */
 const KERNEL_GROWTH_DEFAULT = 50_000;
-/** Window-scaled nudge growth (#398): below this window the kernel's fixed
- *  50000-token band can never accumulate before the 75% force band takes
- *  over, so the soft cadence is dead weight; scale it to the window instead. */
+/** Small-window crossover (#398): the window whose third equals the default
+ *  (150K / 3 = 50000). At or above it the computed band reaches 50000, so the
+ *  5w default stands; below it window/3 comes out SMALLER than 5w and the
+ *  small-window algorithm takes over. Not an arbitrary threshold — the
+ *  natural crossing point of the two regimes. */
 const ADAPTIVE_GROWTH_WINDOW_MAX = 150_000;
 /** Floor for the scaled band — keeps tiny windows from nudging on every
  *  message (below ~24K windows the band is unreachable either way, matching
@@ -478,10 +481,10 @@ const ADAPTIVE_GROWTH_WINDOW_MAX = 150_000;
 const ADAPTIVE_GROWTH_MIN = 8_000;
 
 /** Effective nudge growth band for a context window when the user has not set
- *  `nudgeGrowthTokens`: a third of the window for windows under 150K (a 50K
- *  window gets ~16.7K — soft nudges from ~52% usage, re-arming every ~16.7K
- *  of growth), the untouched kernel default (50000) at 150K and above or when
- *  the window is unknown (<= 0). */
+ *  `nudgeGrowthTokens`: `min(50000, max(8000, window / 3))` — the 5w default
+ *  wherever the window can sustain it (150K and up, and unknown windows), a
+ *  third of the window only where that computes smaller than 5w (a 50K window
+ *  gets ~16.7K, re-arming every ~16.7K of growth). */
 export function scaleNudgeGrowthToWindow(limit: number): number {
   if (!Number.isFinite(limit) || limit <= 0 || limit >= ADAPTIVE_GROWTH_WINDOW_MAX) return KERNEL_GROWTH_DEFAULT;
   return Math.min(KERNEL_GROWTH_DEFAULT, Math.max(ADAPTIVE_GROWTH_MIN, Math.round(limit / 3)));
