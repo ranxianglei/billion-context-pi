@@ -722,6 +722,8 @@ A **prompt pack** is a named JSON file bundling surface overrides — prompt sec
 { "compress": { "promptPack": "lean" } }
 ```
 
+The pack mechanism itself — contracts, sanitization, built-in registry (`default`, `lean`), directory sources, resolver — ships in **acp-kernel ≥ 0.0.66**. The adapter resolves the active pack per turn and merges its surface into the pi session; pi-specific fields ride under the opaque `adapters.pi` namespace (see schema below) and are validated pi-side.
+
 Pack selection rides the standard `compress` three-level cascade (`models > providers > global`, deepest-wins per turn), so different models can use different packs with zero extra config plumbing:
 
 ```json
@@ -732,9 +734,9 @@ Pack selection rides the standard `compress` three-level cascade (`models > prov
 
 For pack name `N`, the first match wins:
 
-1. `<project>/.pi/acp/packs/N.json` — project-local (checked last, wins — shadows both)
+1. `<project>/.pi/acp/packs/N.json` — project-local (wins — shadows user-global and built-ins)
 2. `~/.pi/acp/packs/N.json` — user-global
-3. Built-in packs: `default`, `lean`
+3. Built-in packs (shipped by acp-kernel): `default`, `lean`
 
 Names must match `[A-Za-z0-9][A-Za-z0-9._-]*` (no `..`, no path separators); invalid names and unreadable/invalid-JSON files fall back to built-ins — the adapter never crashes on a bad pack.
 
@@ -751,22 +753,29 @@ Names must match `[A-Za-z0-9][A-Za-z0-9._-]*` (no `..`, no path separators); inv
     "tier2DistillRules": "...",
     "tier3CondenseRules": "..."
   },
-  "promptSections": { "acpTags": "...", "tier2": null },   // same schema as acp.json promptSections
+  "promptSections": { "acpTags": "...", "tools": null },   // generic level: shared keys only (acpTags, tools, summariesInContext, textProtocol, textTools, functionTools)
   "nudgeSections": { "efficiencyNote": "..." },             // same schema as acp.json nudgeSections
-  "toolPrompts": { "compress": { "description": "..." } }, // same schema as acp.json toolPrompts
-  "delegatePrompt": "..."          // string replaces, null removes
+  "toolPrompts": { "compress": { "description": "..." } }, // description + paramDescriptions, any tool name
+  "adapters": {
+    "pi": {                        // pi-specific extras — opaque to the kernel, validated by the adapter
+      "promptSections": { "tier2": null, "whenToCompress": "..." },  // full 13-key tri-state schema of acp.json promptSections
+      "toolExtras": { "compress": { "promptSnippet": "...", "promptGuidelines": ["..."] } },
+      "delegatePrompt": "..."      // string replaces, null removes
+    }
+  }
 }
 ```
 
-Every field is optional; each uses the same sanitizer as its `acp.json` counterpart, and every key in each section is tri-state (`string` replaces, `null` deletes, absent keeps the pack/built-in value).
+Every field is optional, and every key in each section is tri-state (`string` replaces, `null` deletes, absent keeps the pack/built-in value). Two levels coexist: the **generic level** (`promptSections`, `toolPrompts`) is sanitized by acp-kernel and shared with other ACP hosts; the **pi level** under `adapters.pi` carries everything pi-specific (the extended section keys, `promptSnippet`/`promptGuidelines` tool extras, `delegatePrompt`) using the same sanitizers as their `acp.json` counterparts. Note the kernel only recognizes the shared keys at the top level — pi-only section keys such as `tier2` or `whenToCompress` must live under `adapters.pi.promptSections`, not at the top level (same for pi-only tool fields: `promptSnippet`/`promptGuidelines` belong in `adapters.pi.toolExtras`; top-level `toolPrompts` keeps only `description` + `paramDescriptions`).
 
 ### Merge semantics — pack base, inline wins
 
 The effective surface for a turn = **pack defaults ⊕ inline `acp.json` overrides**, field by field:
 
-- `promptSections` / `nudgeSections`: inline key beats pack key (including `null`).
-- `toolPrompts`: per-tool, then per-field (`description`, `promptSnippet`, `promptGuidelines`), then per-param inside `paramDescriptions`.
-- `delegatePrompt`: inline wins if present (including `null`).
+- `promptSections`: inline key beats `adapters.pi.promptSections` key beats the generic top-level key (including `null`).
+- `nudgeSections`: inline key beats pack key (including `null`).
+- `toolPrompts`: per-tool, then per-field (`description`, `paramDescriptions`, `promptSnippet`, `promptGuidelines`); within the pack, `adapters.pi.toolExtras` beats the generic `toolPrompts`; inline beats both.
+- `delegatePrompt`: inline wins if present (including `null`), otherwise `adapters.pi.delegatePrompt` applies.
 
 ### Programmatic sources (hosts & future installers)
 
@@ -780,13 +789,15 @@ interface PackSource {
 }
 ```
 
-Built-in packs, directory packs, and any managed registry all flow through one `createPackResolver([...sources])` — first match wins, so a **prepended source shadows everything**. That is the intended integration point for a future `bili-pi install`-style pack manager: write pack files into the user dir (zero code), or register a managed source ahead of the defaults — no core changes either way. Hosts embedding the adapter can build their own resolver and pass it to `resolveActivePack`.
+Built-in packs, directory packs, and any managed registry all flow through one `createPackResolver([...sources])` — first match wins, so a **prepended source shadows everything**. That is the intended integration point for a future `bili-pi install`-style pack manager: write pack files into the user dir (zero code), or register a managed source ahead of the defaults — no core changes either way. The whole mechanism (`createPackResolver`, `createDirPackSource`, `defaultPackSources`, `builtinSource`, `sanitizePackSurface`, plus the `Pack`/`PackSource`/`PackResolver` types) is exported by acp-kernel and re-exported from this adapter's prompt-pack module, so hosts and installers depend on one implementation. Hosts embedding the adapter can build their own resolver and pass it to `resolveActivePack`.
 
 ### Risk gating
 
 A pack's `prompts` block overrides the compression rule strings, exactly like inline `prompts` — so it is gated by the same [`acknowledgePromptsRisk`](#acknowledgepromptsrisk) switch. Without that flag set in `acp.json`, the pack's `prompts` block is ignored (everything else in the pack still applies); a warning is logged. The flag cannot be shipped inside a pack — it must be an explicit local choice.
 
 ### Built-in packs
+
+Both built-ins are defined in acp-kernel — the adapter ships no local copies, so there is a single source of truth for every ACP host.
 
 | Name | Purpose |
 |------|---------|
