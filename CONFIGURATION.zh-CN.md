@@ -239,7 +239,10 @@
 - **类型：** `boolean`
 - **默认值：** `true`
 - **状态：** 🟢 ACTIVE
-- **说明：** 启用 `acp_delegate` 工具（`acp_delegate`、`acp_delegate_wait`、`acp_delegate_cancel`）及其对应的系统提示部分。设为 `false` 可完全跳过注册——例如你使用了其他子代理扩展，或者在无头环境下运行时异步结果注入没有意义。
+- **说明：** 启用 `acp_delegate` 工具（`acp_delegate`、`acp_delegate_wait`、`acp_delegate_cancel`）及其对应的系统提示部分。设为 `false` 可完全跳过注册——例如你使用了其他子代理扩展，或者在无头环境下运行时异步结果注入没有意义。保留自带子代理的完整步骤见 [README.zh-CN.md](./README.zh-CN.md) 的 **改用你自己的子代理**。
+- **生效时机：** 三个工具在会话启动时注册，因此改动在**下一个会话**（或重启 Pi）生效。系统提示段每回合实时解析，可能在工具之前先于会话内消失。
+- **只关提示段：** `delegatePrompt: null` 移除 `ACP_DELEGATE NOTIFICATIONS` 段但保留工具。
+- **不能替代：** Pi 原生的 `--exclude-tools acp_delegate,acp_delegate_wait,acp_delegate_cancel` 只隐藏工具、**不**隐藏系统提示段，会让模型被告知它调不到的工具。
 
 ### `delegate.displayUsage`
 

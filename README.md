@@ -76,10 +76,9 @@ pi install npm:billion-context-pi
 
 That's it. The extension auto-loads on next Pi startup. No configuration needed — it reads your model's context window automatically.
 
-> **Uninstall `pi-subagents` first (optional, recommended).** billion-context-pi ships its own `acp_delegate` sub-agent tool (see below) that replaces pi-subagents at a fraction of the context cost (~600 tok vs ~7K tok/turn). If you have pi-subagents installed, remove it to avoid duplicate delegation tools:
-> ```bash
-> pi remove npm:pi-subagents
-> ```
+> **Using another sub-agent extension?** billion-context-pi ships its own `acp_delegate` sub-agent tool (see below) at a fraction of the context cost (~600 tok vs ~7K tok/turn). Two delegation tools in one session only make the model's choice noisier, so pick one:
+> - **Use ACP's delegate** — remove the other extension: `pi remove npm:pi-subagents`
+> - **Keep your own sub-agent** — turn ACP's delegate off in `acp.json`: `{ "delegate": false }` (see *Using your own sub-agent instead* below)
 
 ## How it works
 
@@ -133,6 +132,8 @@ billion-context-pi is built for the **Pi** coding agent (`@earendil-works/pi-cod
 | `acp_delegate_wait` | Block until a delegate run finishes (returns its result; times out otherwise) |
 | `acp_delegate_cancel` | Cancel a running delegate by runId |
 
+The four `acp_delegate*` tools are optional: if you bring your own sub-agent extension, disable them with one `acp.json` key — see *Using your own sub-agent instead* below.
+
 ### acp_delegate — clean-context delegation
 
 Hand a self-contained task to a fresh pi process running in a clean context. Five built-in roles, each with a system prompt and a **soft tool guardrail**:
@@ -156,6 +157,21 @@ The full delegate result is saved to a file (`/tmp/acp-delegate/<runId>.out`); t
 - **Failures are loud, never silent.** A run that fails (nonzero exit, spawn error, watchdog timeout) injects a `FAILED ⚠️` notification carrying a short error excerpt, so a failed delegate cannot hide among sibling completions. If a notification cannot be delivered at all, a recovery notice is attached to the next delegate notification or the next `acp_delegate` / `acp_delegate_wait` / `acp_delegate_cancel` tool result — a dispatched run's failure always reaches the model before it wraps up.
 
 In the **interactive TUI**, async runs also show a live status widget below the editor (agent, elapsed seconds, task preview), so you always know what's running and for how long. Disabled automatically in RPC/print/JSON.
+
+
+#### Using your own sub-agent instead
+
+If you already run another sub-agent extension (pi-subagents, pi-lens, …), turn ACP's delegate off so the model is offered only one way to delegate. In `~/.pi/acp.json` (global) or `<project>/.pi/acp.json` (per project):
+
+```json
+{ "delegate": false }
+```
+
+- Equivalent object form: `{ "delegate": { "enabled": false } }`.
+- **What it removes:** the `acp_delegate`, `acp_delegate_wait` and `acp_delegate_cancel` tools, the `ACP_DELEGATE NOTIFICATIONS` system-prompt section, and the `ctrl+alt+f` fleet shortcut (`/acp-fleet` then reports that delegate is off). Compression is unaffected — `compress`, `decompress`, `search_context` and `acp_status` stay.
+- **When it applies:** the three tools are registered at session start, so a change needs a **new session** (or a Pi restart). The system-prompt section is resolved live on every turn, so it can disappear mid-session before the tools do.
+- Want to drop only the prompt section and keep the tools? Set `{ "delegatePrompt": null }`.
+- Pi's `--exclude-tools acp_delegate,acp_delegate_wait,acp_delegate_cancel` is **not** a substitute: it hides the tools but the model still receives the `ACP_DELEGATE NOTIFICATIONS` section describing tools it cannot call. Use `delegate: false`.
 
 ## `/acp` command
 
