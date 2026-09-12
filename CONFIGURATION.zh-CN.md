@@ -718,6 +718,8 @@ provider 的 key 是 **Pi provider 名**(如 `"anthropic"`、`"openai"`、`"zhip
 { "compress": { "promptPack": "lean" } }
 ```
 
+包机制本身——契约、消毒、内置注册表（`default`、`lean`）、目录来源、解析器——由 **acp-kernel ≥ 0.0.66** 提供。适配器只负责逐回合解析激活的包并把其表面合并进 pi 会话；pi 专属字段放在不透明的 `adapters.pi` 命名空间下（见下方 schema），由 pi 侧验证。
+
 包选择复用标准 `compress` 三级级联（`models > providers > global`，逐字段最深者赢），因此不同模型用不同包不需要额外配置管道：
 
 ```json
@@ -728,9 +730,9 @@ provider 的 key 是 **Pi provider 名**(如 `"anthropic"`、`"openai"`、`"zhip
 
 包名 `N`，首个命中者生效：
 
-1. `<项目>/.pi/acp/packs/N.json` — 项目本地（最后检查但优先——可遮蔽以下两者）
+1. `<项目>/.pi/acp/packs/N.json` — 项目本地（优先——可遮蔽用户全局与内置）
 2. `~/.pi/acp/packs/N.json` — 用户全局
-3. 内置包：`default`、`lean`
+3. 内置包（由 acp-kernel 提供）：`default`、`lean`
 
 包名必须匹配 `[A-Za-z0-9][A-Za-z0-9._-]*`（禁止 `..` 与路径分隔符）；非法名字、不可读或非法 JSON 的文件都回退到内置包——适配器绝不因坏包崩溃。
 
@@ -747,22 +749,29 @@ provider 的 key 是 **Pi provider 名**(如 `"anthropic"`、`"openai"`、`"zhip
     "tier2DistillRules": "...",
     "tier3CondenseRules": "..."
   },
-  "promptSections": { "acpTags": "...", "tier2": null },   // 与 acp.json promptSections 同 schema
+  "promptSections": { "acpTags": "...", "tools": null },   // 通用层：仅共享键（acpTags、tools、summariesInContext、textProtocol、textTools、functionTools）
   "nudgeSections": { "efficiencyNote": "..." },             // 与 acp.json nudgeSections 同 schema
-  "toolPrompts": { "compress": { "description": "..." } }, // 与 acp.json toolPrompts 同 schema
-  "delegatePrompt": "..."          // string 替换，null 删除
+  "toolPrompts": { "compress": { "description": "..." } }, // description + paramDescriptions，任意工具名
+  "adapters": {
+    "pi": {                        // pi 专属附加项——对内核不透明，由适配器验证
+      "promptSections": { "tier2": null, "whenToCompress": "..." },  // acp.json promptSections 的完整 13 键三态 schema
+      "toolExtras": { "compress": { "promptSnippet": "...", "promptGuidelines": ["..."] } },
+      "delegatePrompt": "..."      // string 替换，null 删除
+    }
+  }
 }
 ```
 
-所有字段可选；每个字段走与其 `acp.json` 对应项相同的消毒器，每个 section 内的每个键都是三态（`string` 替换、`null` 删除、缺省保留包/内置值）。
+所有字段可选，每个 section 内的每个键都是三态（`string` 替换、`null` 删除、缺省保留包/内置值）。两个层级并存：**通用层**（`promptSections`、`toolPrompts`）由 acp-kernel 消毒，与其它 ACP 宿主共享；`adapters.pi` 下的 **pi 层**承载一切 pi 专属内容（扩展 section 键、`promptSnippet`/`promptGuidelines` 工具附加项、`delegatePrompt`），消毒器与其 `acp.json` 对应项相同。注意内核顶层只认识共享键——`tier2`、`whenToCompress` 这类 pi 专属 section 键必须放在 `adapters.pi.promptSections` 下，不能写在顶层（pi 专属工具字段同理：`promptSnippet`/`promptGuidelines` 属于 `adapters.pi.toolExtras`；顶层 `toolPrompts` 只保留 `description` + `paramDescriptions`）。
 
 ### 合并语义——包为基础层，内联优先
 
 一回合的有效表面 = **包默认值 ⊕ `acp.json` 内联覆盖**，逐字段：
 
-- `promptSections` / `nudgeSections`：内联键胜包键（含 `null`）。
-- `toolPrompts`：先按工具，再按字段（`description`、`promptSnippet`、`promptGuidelines`），再按 `paramDescriptions` 内逐参数。
-- `delegatePrompt`：内联存在则胜（含 `null`）。
+- `promptSections`：内联键 > `adapters.pi.promptSections` 键 > 通用顶层键（含 `null`）。
+- `nudgeSections`：内联键胜包键（含 `null`）。
+- `toolPrompts`：先按工具，再按字段（`description`、`paramDescriptions`、`promptSnippet`、`promptGuidelines`）；包内 `adapters.pi.toolExtras` 胜通用 `toolPrompts`；内联两者皆胜。
+- `delegatePrompt`：内联存在则胜（含 `null`），否则取 `adapters.pi.delegatePrompt`。
 
 ### 可编程来源（宿主与未来安装器）
 
@@ -776,13 +785,15 @@ interface PackSource {
 }
 ```
 
-内置包、目录包、任何托管注册表全部走同一个 `createPackResolver([...sources])`——首个命中者胜，**前置的 source 可遮蔽一切**。这就是为将来 `bili-pi install` 式包管理器预留的集成点：把包文件写进用户目录（零代码），或在默认链前面注册一个 managed source——两条路都不改核心。内嵌适配器的宿主也可以自建 resolver 传给 `resolveActivePack`。
+内置包、目录包、任何托管注册表全部走同一个 `createPackResolver([...sources])`——首个命中者胜，**前置的 source 可遮蔽一切**。这就是为将来 `bili-pi install` 式包管理器预留的集成点：把包文件写进用户目录（零代码），或在默认链前面注册一个 managed source——两条路都不改核心。整套机制（`createPackResolver`、`createDirPackSource`、`defaultPackSources`、`builtinSource`、`sanitizePackSurface`，以及 `Pack`/`PackSource`/`PackResolver` 类型）由 acp-kernel 导出，本适配器的 prompt-pack 模块原样重新导出——宿主与安装器只需依赖一份实现。内嵌适配器的宿主也可以自建 resolver 传给 `resolveActivePack`。
 
 ### 风险门
 
 包的 `prompts` 块会覆盖压缩规则字符串，与内联 `prompts` 完全一样——因此受同一个 [`acknowledgePromptsRisk`](#acknowledgepromptsrisk) 开关门控。`acp.json` 未设该标志时，包的 `prompts` 块被忽略（包内其余照常生效）并记录警告。该标志不能随包分发——它必须是显式的本地选择。
 
 ### 内置包
+
+两个内置包都定义在 acp-kernel 中——适配器不携带本地副本，因此每个 ACP 宿主共享同一事实源。
 
 | 名称 | 用途 |
 |------|------|

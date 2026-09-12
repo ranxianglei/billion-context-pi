@@ -1,35 +1,50 @@
 import { readFileSync } from "node:fs";
 import * as path from "node:path";
 import { homedir } from "node:os";
-import {
-  builtinSource,
-  createDirPackSource,
-  createPackResolver,
-  defaultPack,
-  defaultPackSources as kernelPackSources,
-  isValidPackName,
-  leanPack,
-  sanitizePackSurface,
-} from "acp-kernel";
-import type { Pack, PackResolver, PackSource, PackSurface, PromptPackFile, Prompts } from "acp-kernel";
+import type { Prompts } from "acp-kernel";
+import { createPackResolver, defaultPack, defaultPackSources, isValidPackName } from "acp-kernel";
+import type { Pack, PackResolver, PackSurface } from "acp-kernel";
 import type { AdapterConfig } from "./config.js";
 import { resolveCompress } from "./config.js";
 import { CONFIG_DIR_NAME } from "./config-dir.js";
 import { sanitizePromptSections, type PiPromptSections } from "./system-prompt.js";
-import { sanitizeToolPrompts, type AcpToolName, type NudgeSectionsConfig, type ToolPromptsConfig } from "./surface.js";
+import { sanitizeToolPrompts, type NudgeSectionsConfig, type ToolPromptsConfig } from "./surface.js";
 
-export { builtinSource, createDirPackSource, createPackResolver, defaultPack, isValidPackName, leanPack, sanitizePackSurface };
-export type { Pack, PackResolver, PackSource, PackSurface, PromptPackFile };
+// Pack layer lives in acp-kernel >=0.0.66 (#259/#260); pi-specific data rides
+// opaquely under surface.adapters.pi and is validated by piExtras below.
 
-export function defaultPackSources(cwd: string): PackSource[] {
-  return kernelPackSources({
-    projectDir: path.join(cwd, CONFIG_DIR_NAME, "acp", "packs"),
-    userDirs: [path.join(homedir(), CONFIG_DIR_NAME, "acp", "packs")],
-  });
+export { builtinSource, createDirPackSource, createPackResolver, defaultPack, defaultPackSources, isValidPackName, leanPack, sanitizePackSurface } from "acp-kernel";
+export type { Pack, PackResolver, PackSource, PackSurface, PromptPackFile } from "acp-kernel";
+
+interface PiPackExtras {
+  promptSections: Partial<PiPromptSections>;
+  toolExtras: ToolPromptsConfig;
+  delegatePrompt?: string | null;
+}
+
+function piExtras(surface: PackSurface | null | undefined): PiPackExtras {
+  const raw = surface?.adapters?.pi;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { promptSections: {}, toolExtras: {} };
+  const rec = raw as Record<string, unknown>;
+  const out: PiPackExtras = {
+    promptSections: sanitizePromptSections(rec.promptSections),
+    toolExtras: sanitizeToolPrompts(rec.toolExtras),
+  };
+  if (typeof rec.delegatePrompt === "string" || rec.delegatePrompt === null) out.delegatePrompt = rec.delegatePrompt;
+  return out;
+}
+
+function packToolPrompts(surface: PackSurface | null | undefined): ToolPromptsConfig {
+  return mergeToolPrompts(surface?.toolPrompts, piExtras(surface).toolExtras);
 }
 
 export function packResolver(cwd: string): PackResolver {
-  return createPackResolver(defaultPackSources(cwd));
+  return createPackResolver(
+    defaultPackSources({
+      projectDir: path.join(cwd, CONFIG_DIR_NAME, "acp", "packs"),
+      userDirs: [path.join(homedir(), CONFIG_DIR_NAME, "acp", "packs")],
+    }),
+  );
 }
 
 export function discoverPack(name: string, cwd: string): Pack | null {
@@ -54,88 +69,22 @@ export function resolveActivePack(
   return r.resolve(name) ?? defaultPack;
 }
 
-const ACP_TOOLS: ReadonlySet<string> = new Set(["compress", "decompress", "search_context", "acp_status"]);
-
-export interface PiToolExtras {
-  promptSnippet?: string;
-  promptGuidelines?: string[];
-}
-
-export type PiToolExtrasConfig = Partial<Record<AcpToolName, PiToolExtras>>;
-
-export interface PiAdapterSurface {
-  promptSections: Partial<PiPromptSections>;
-  toolExtras: PiToolExtrasConfig;
-  delegatePrompt?: string | null;
-}
-
-/**
- * Pi-specific part of a pack. `surface.adapters.pi` is opaque to the kernel,
- * so the adapter sanitizes it here: tri-state prompt sections restricted to
- * pi's section keys, per-tool extras with malformed fields dropped.
- */
-export function piAdapterSurface(pack: Pack): PiAdapterSurface {
-  const raw = pack.surface.adapters?.pi;
-  const rec = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
-  const toolExtras: PiToolExtrasConfig = {};
-  const extrasRaw = rec.toolExtras;
-  if (extrasRaw && typeof extrasRaw === "object" && !Array.isArray(extrasRaw)) {
-    for (const [tool, value] of Object.entries(extrasRaw as Record<string, unknown>)) {
-      if (!ACP_TOOLS.has(tool) || !value || typeof value !== "object") continue;
-      const src = value as Record<string, unknown>;
-      const entry: PiToolExtras = {};
-      if (typeof src.promptSnippet === "string") entry.promptSnippet = src.promptSnippet;
-      if (typeof src.promptGuidelines === "string") {
-        entry.promptGuidelines = [src.promptGuidelines];
-      } else if (Array.isArray(src.promptGuidelines)) {
-        const guidelines = src.promptGuidelines.filter((g): g is string => typeof g === "string");
-        if (guidelines.length === src.promptGuidelines.length) entry.promptGuidelines = guidelines;
-      }
-      if (Object.keys(entry).length > 0) toolExtras[tool as AcpToolName] = entry;
-    }
-  }
-  const surface: PiAdapterSurface = {
-    promptSections: sanitizePromptSections(rec.promptSections),
-    toolExtras,
-  };
-  if (typeof rec.delegatePrompt === "string" || rec.delegatePrompt === null) {
-    surface.delegatePrompt = rec.delegatePrompt;
-  }
-  return surface;
-}
-
-function packToolPrompts(pack: Pack | null): ToolPromptsConfig {
-  const out: ToolPromptsConfig = {};
-  const toolPrompts = pack?.surface.toolPrompts;
-  if (toolPrompts) {
-    for (const [tool, overrides] of Object.entries(toolPrompts)) {
-      if (ACP_TOOLS.has(tool)) out[tool as AcpToolName] = { ...overrides };
-    }
-  }
-  if (pack) {
-    for (const [tool, extras] of Object.entries(piAdapterSurface(pack).toolExtras)) {
-      out[tool as AcpToolName] = { ...out[tool as AcpToolName], ...extras };
-    }
-  }
-  return out;
-}
-
 function mergeToolPrompts(pack?: ToolPromptsConfig, inline?: ToolPromptsConfig): ToolPromptsConfig {
   if (!pack) return inline ?? {};
   if (!inline) return pack;
   const out: ToolPromptsConfig = {};
   for (const name of new Set([...Object.keys(pack), ...Object.keys(inline)])) {
-    const p = pack[name as AcpToolName];
-    const i = inline[name as AcpToolName];
+    const p = pack[name as keyof ToolPromptsConfig];
+    const i = inline[name as keyof ToolPromptsConfig];
     if (!i) {
-      out[name as AcpToolName] = p;
+      out[name as keyof ToolPromptsConfig] = p;
       continue;
     }
     if (!p) {
-      out[name as AcpToolName] = i;
+      out[name as keyof ToolPromptsConfig] = i;
       continue;
     }
-    out[name as AcpToolName] = {
+    out[name as keyof ToolPromptsConfig] = {
       ...p,
       ...i,
       paramDescriptions: { ...p.paramDescriptions, ...i.paramDescriptions },
@@ -160,13 +109,14 @@ export interface MergedSurface {
   delegatePrompt?: string | null;
 }
 
-export function mergeSurface(pack: Pack | null, inline: InlineSurface): MergedSurface {
-  const s = pack?.surface ?? {};
-  const pi = pack ? piAdapterSurface(pack) : { promptSections: {}, toolExtras: {} };
+export function mergeSurface(pack: PackSurface | null, inline: InlineSurface): MergedSurface {
+  const p = pack ?? {};
+  const pi = piExtras(pack);
+  const prompts: Partial<Prompts> = { ...(p.prompts ?? {}), ...(inline.prompts ?? {}) };
   return {
-    prompts: { ...(s.prompts ?? {}), ...(inline.prompts ?? {}) },
-    promptSections: { ...pi.promptSections, ...(inline.promptSections ?? {}) },
-    nudgeSections: { ...(s.nudgeSections ?? {}), ...(inline.nudgeSections ?? {}) },
+    prompts,
+    promptSections: { ...sanitizePromptSections(p.promptSections), ...pi.promptSections, ...(inline.promptSections ?? {}) },
+    nudgeSections: { ...(p.nudgeSections ?? {}), ...(inline.nudgeSections ?? {}) },
     toolPrompts: mergeToolPrompts(packToolPrompts(pack), inline.toolPrompts),
     delegatePrompt: inline.delegatePrompt !== undefined ? inline.delegatePrompt : pi.delegatePrompt,
   };
@@ -192,5 +142,5 @@ export function readToolSurfaceWithPacks(cwd: string): ToolPromptsConfig {
     }
   }
   const pack = packName === "default" || !isValidPackName(packName) ? null : packResolver(cwd).resolve(packName);
-  return mergeToolPrompts(packToolPrompts(pack), inline);
+  return mergeToolPrompts(packToolPrompts(pack?.surface ?? null), inline);
 }
