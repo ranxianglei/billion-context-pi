@@ -72,6 +72,14 @@ test("piAdapterSurface(leanPack): aligned rules kept, condensed how-to-compress 
   assert.deepEqual(piAdapterSurface(defaultPack), { promptSections: {}, toolExtras: {} });
 });
 
+test("lean how-to-compress contract reaches the built prompt instead of the default rules", () => {
+  const merged = mergeSurface(leanPack, {});
+  const text = buildAcpSystemPrompt(defaultPrompts, merged.promptSections);
+  assert.ok(text.includes("HOW TO COMPRESS (condensed)"), "condensed contract header present");
+  assert.ok(text.includes("TASK AS OF THIS BLOCK"), "integrity rule present");
+  assert.ok(!text.includes(defaultPrompts.howToCompressRules), "default full rules not injected");
+});
+
 test("lean pack system prompt collapses to header + lean bullets", () => {
   const merged = mergeSurface(leanPack, {});
   const text = buildAcpSystemPrompt(defaultPrompts, merged.promptSections);
