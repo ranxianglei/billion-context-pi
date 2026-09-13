@@ -195,7 +195,9 @@ test("piAdapterSurface sanitizes junk: bad section types dropped, malformed extr
     },
   };
   const s = piAdapterSurface(pack);
-  assert.deepEqual(s.promptSections, { tools: null, whenToCompress: "keep" });
+  // rule-slot strings are legit since kernel 0.0.67 (condensed contracts);
+  // only genuinely bad types (42) are dropped.
+  assert.deepEqual(s.promptSections, { tools: null, whenToCompress: "keep", philosophy: "no" });
   assert.deepEqual(s.toolExtras, {
     compress: { promptGuidelines: ["single"] },
     acp_status: { promptSnippet: "s" },
