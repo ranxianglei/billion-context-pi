@@ -75,10 +75,9 @@ pi install npm:billion-context-pi
 
 完成。扩展在下次 Pi 启动时自动加载。无需配置 —— 它会自动读取模型的上下文窗口。
 
-> **建议先卸载 `pi-subagents`(可选,推荐)。** billion-context-pi 自带 `acp_delegate` 子代理工具(见下文),以极低的上下文成本(~600 tok vs ~7K tok/轮)替代 pi-subagents。如果你已安装 pi-subagents,卸载它以避免重复的委派工具:
-> ```bash
-> pi remove npm:pi-subagents
-> ```
+> **你另有子代理扩展?** billion-context-pi 自带 `acp_delegate` 子代理工具(见下文),上下文成本极低(~600 tok vs ~7K tok/轮)。同一会话里两套委派工具只会让模型的选择更混乱,二选一:
+> - **用 ACP 的 delegate** —— 卸载另一个扩展:`pi remove npm:pi-subagents`
+> - **保留你自己的子代理** —— 在 `acp.json` 里关掉 ACP 的 delegate:`{ "delegate": false }`(见下文*改用你自己的子代理*)
 
 ## 工作原理
 
@@ -132,6 +131,8 @@ billion-context-pi 面向 **Pi** 编码代理(`@earendil-works/pi-coding-agent`)
 | `acp_delegate_wait` | 阻塞等待委派任务完成(返回结果,否则超时) |
 | `acp_delegate_cancel` | 按 runId 取消正在运行的委派任务 |
 
+`acp_delegate*` 四个工具是可选的:如果你自带子代理扩展,一个 `acp.json` 键即可关闭 —— 见下文*改用你自己的子代理*。
+
 ### acp_delegate — 干净上下文委派
 
 把一个自包含的任务交给一个运行在干净上下文中的新 pi 进程。五个内置角色,各自有系统提示和**软工具护栏**:
@@ -154,6 +155,20 @@ Worker 运行在 Pi 的完整默认工具集上 - 不应用 `--tools` 白名单,
 - **Print / JSON 模式**(`pi -p`、SDK):`async:true` 自动降级为**同步** — 结果在同一轮作为工具结果返回(父进程一轮后即退出,后台注入会丢失)。
 
 在**交互 TUI** 中,异步运行还会在编辑器下方显示一个实时状态 widget(角色、已运行秒数、任务预览),让你随时知道什么在跑、跑了多久。RPC/print/JSON 模式自动禁用。
+
+#### 改用你自己的子代理
+
+如果你已经在用别的子代理扩展(pi-subagents、pi-lens 等),关掉 ACP 的 delegate,让模型只有一条委派路径。在 `~/.pi/acp.json`(全局)或 `<项目>/.pi/acp.json`(项目级):
+
+```json
+{ "delegate": false }
+```
+
+- 等价对象写法:`{ "delegate": { "enabled": false } }`。
+- **关掉的是什么:**`acp_delegate`、`acp_delegate_wait`、`acp_delegate_cancel` 三个工具,`ACP_DELEGATE NOTIFICATIONS` 系统提示段,以及 `ctrl+alt+f` 快捷键(此时 `/acp-fleet` 会提示 delegate 未启用)。压缩本身不受影响 —— `compress`、`decompress`、`search_context`、`acp_status` 全部保留。
+- **生效时机:**三个工具在会话启动时注册,因此需要**新会话**(或重启 Pi)。系统提示段每回合实时解析,可能在工具之前先消失。
+- 只想去掉提示段、保留工具?设 `{ "delegatePrompt": null }`。
+- Pi 原生的 `--exclude-tools acp_delegate,acp_delegate_wait,acp_delegate_cancel` **不能**替代:它藏起工具,但模型仍会收到描述这些工具的 `ACP_DELEGATE NOTIFICATIONS` 段。请用 `delegate: false`。
 
 ## `/acp` 命令
 
