@@ -6,6 +6,11 @@ import type { PiPromptSections } from "./system-prompt.js";
 import type { NudgeSectionsConfig, ToolPromptsConfig } from "./surface.js";
 import { logWarn } from "./log.js";
 
+/** Default TUI shortcut for the acp_delegate fleet inspector. Moved off
+ *  "ctrl+alt+f" (also claimed by pi-subagents) to avoid a cross-extension
+ *  conflict Pi's loader only warns about — last-loaded silently wins (#412). */
+export const DEFAULT_FLEET_SHORTCUT = "ctrl+alt+d";
+
 /** Per-role delegate defaults. Lets long-lived automation pin a cheaper or
  *  more capable model and a thinking level per delegate role, so the main
  *  agent doesn't have to fill them in on every `acp_delegate()` call. */
@@ -75,6 +80,13 @@ export interface DelegateConfig {
    *  saw the result, so re-injecting it would only waste context.
    *  "always" — always inject the notification (previous behavior). */
   notifyIfRead?: "skip" | "always";
+  /** Keybinding for the interactive TUI shortcut that opens the acp_delegate
+   *  fleet inspector (live list + transcript). Default: "ctrl+alt+d". Set to
+   *  "" (empty string) to disable keyboard registration entirely — the
+   *  inspector stays reachable via /acp-fleet. Moved off the previous hardcoded
+   *  "ctrl+alt+f" because pi-subagents also claims ctrl+alt+f, and Pi's loader
+   *  only warns + last-loaded-wins on cross-extension conflicts (#412). */
+  fleetShortcut?: string;
 }
 
 /** Resolved delegate policy: what actually takes effect after merging acp.json,
@@ -96,6 +108,8 @@ export interface DelegatePolicy {
   /** Whether to suppress the completion notification when the model already
    *  read the result file after the run finished. Always resolved ("skip" default). */
   notifyIfRead: "skip" | "always";
+  /** Resolved TUI shortcut for the fleet inspector ("" = registration disabled). */
+  fleetShortcut: string;
 }
 
 export const DEFAULT_DELEGATE_POLICY: DelegatePolicy = {
@@ -107,6 +121,7 @@ export const DEFAULT_DELEGATE_POLICY: DelegatePolicy = {
   asyncTimeoutMs: 30 * 60_000,
   maxConcurrent: Infinity,
   notifyIfRead: "skip",
+  fleetShortcut: DEFAULT_FLEET_SHORTCUT,
 };
 
 /** Compression tuning fields, shared by all three levels (global, provider,
@@ -333,7 +348,16 @@ export function resolveDelegate(adapter: AdapterConfig): DelegatePolicy {
       hint: "no-output watchdog is off; hung async runs must be cancelled manually via acp_delegate_cancel",
     });
   }
-  return { enabled, displayUsage, maxDepth, syncTimeoutMs, idleMs, asyncTimeoutMs, maxConcurrent, thinkingLevel: cfg.thinkingLevel, agents: cfg.agents, notifyIfRead: cfg.notifyIfRead ?? "skip" };
+  return { enabled, displayUsage, maxDepth, syncTimeoutMs, idleMs, asyncTimeoutMs, maxConcurrent, thinkingLevel: cfg.thinkingLevel, agents: cfg.agents, notifyIfRead: cfg.notifyIfRead ?? "skip", fleetShortcut: resolveFleetShortcut(cfg.fleetShortcut) };
+}
+
+/** Resolve the fleet-inspector TUI shortcut: a string passes through verbatim
+ *  ("" disables registration); a non-string falls back to the default with a
+ *  logged warning rather than failing the session (#412). */
+function resolveFleetShortcut(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value !== undefined) logWarn("config", { event: "delegate-config-invalid", field: "fleetShortcut", value: String(value), fallback: DEFAULT_FLEET_SHORTCUT });
+  return DEFAULT_FLEET_SHORTCUT;
 }
 
 function resolveMaxDepth(value: number | string | undefined): number {

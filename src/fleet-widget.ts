@@ -18,11 +18,26 @@ let ui: ExtensionContext["ui"] | undefined;
 let timer: ReturnType<typeof setInterval> | undefined;
 let lastRenderKey = "";
 let runsSnapshot: RunsSnapshot | undefined;
+let fleetShortcut = "";
 
 function truncateTask(task: string): string {
   const oneLine = task.replace(/\n/g, " ").trim();
   if (oneLine.length <= MAX_TASK_LEN) return oneLine;
   return `${oneLine.slice(0, MAX_TASK_LEN - 1)}…`;
+}
+
+export function formatShortcutLabel(shortcut: string): string {
+  return shortcut
+    .split("+")
+    .map((part) => {
+      const normalized = part.trim().toLowerCase();
+      if (normalized === "ctrl") return "Ctrl";
+      if (normalized === "alt") return "Alt";
+      if (normalized === "shift") return "Shift";
+      if (normalized === "super") return "Super";
+      return normalized.length === 1 ? normalized.toUpperCase() : part.trim();
+    })
+    .join("+");
 }
 
 function renderLines(runs: WidgetRun[]): string[] | undefined {
@@ -35,7 +50,10 @@ function renderLines(runs: WidgetRun[]): string[] | undefined {
     const elapsed = Math.max(0, Math.round((now - r.startedAt) / 1000));
     return `  ● ${r.agent} (${elapsed}s) — ${truncateTask(r.task)}`;
   });
-  return [header, ...rows, "  /acp-fleet · Ctrl+Alt+F — inspect"];
+  const hint = fleetShortcut
+    ? `  /acp-fleet · ${formatShortcutLabel(fleetShortcut)} — inspect`
+    : "  /acp-fleet — inspect";
+  return [header, ...rows, hint];
 }
 
 function renderKeyFor(runs: WidgetRun[]): string {
@@ -99,7 +117,7 @@ function refresh(): void {
 }
 
 export const delegateStatusWidget = {
-  setContext(ctx: ExtensionContext, snapshot: RunsSnapshot): void {
+  setContext(ctx: ExtensionContext, snapshot: RunsSnapshot, shortcut?: string): void {
     // Only the interactive TUI renders widgets. RPC mode has hasUI === true but
     // its setWidget just emits extension_ui_request notifications to an RPC
     // client — useless here and a needless ~1Hz chatter. print/json have
@@ -109,6 +127,7 @@ export const delegateStatusWidget = {
     initFooterStatus(ctx);
     ui = ctx.ui;
     runsSnapshot = snapshot;
+    fleetShortcut = shortcut ?? "";
     if (!timer) {
       timer = setInterval(refresh, REFRESH_MS);
       timer.unref?.();
@@ -121,6 +140,7 @@ export const delegateStatusWidget = {
     disposeFooterStatus();
     ui = undefined;
     lastRenderKey = "";
+    fleetShortcut = "";
   },
   poke(): void {
     // A new spawn may arrive after refresh() stopped the timer on an empty

@@ -5,6 +5,7 @@ import type {
   SessionMessageEntry,
 } from "@earendil-works/pi-coding-agent";
 import { CONFIG_DIR_NAME } from "./config-dir.js";
+import type { KeyId } from "@earendil-works/pi-tui";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -222,14 +223,15 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
       logWarn("config", { event: "prompts-resolve-failed", error: e instanceof Error ? e.message : String(e) });
       runtime.setPrompts(defaultPrompts);
     }
-    if (resolveDelegate(runtime.adapter).enabled) {
+    const delegatePolicy = resolveDelegate(runtime.adapter);
+    if (delegatePolicy.enabled) {
       pi.registerTool(makeDelegateTool(pi));
       pi.registerTool(makeDelegateWaitTool(pi));
       pi.registerTool(makeDelegateCancelTool(pi));
       // Not every host implements the full ExtensionAPI surface (older pi,
       // embedded hosts) — shortcuts are a TUI nicety, never load-bearing.
-      if (typeof pi.registerShortcut === "function") {
-        pi.registerShortcut("ctrl+alt+f", {
+      if (typeof pi.registerShortcut === "function" && delegatePolicy.fleetShortcut !== "") {
+        pi.registerShortcut(delegatePolicy.fleetShortcut as KeyId, {
           description: "Inspect acp_delegate runs (live list + transcript)",
           handler: (ctx) => { void openFleetInspector(ctx); },
         });
@@ -246,7 +248,7 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     // in-memory runs Map (via runningRunsSnapshot) and renders a live list of
     // running delegates below the editor. Only the interactive TUI has a UI;
     // rpc/json/print have hasUI=false and the call is a no-op.
-    delegateStatusWidget.setContext(ctx, runningRunsSnapshot);
+    delegateStatusWidget.setContext(ctx, runningRunsSnapshot, delegatePolicy.fleetShortcut);
   });
   pi.on("session_shutdown", (_event, ctx) => {
     const sid = ctx.sessionManager.getSessionId();

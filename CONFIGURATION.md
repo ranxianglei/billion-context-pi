@@ -120,6 +120,7 @@ All keys below are currently **ACTIVE**.
 | `delegate.maxConcurrent` | number | unlimited | 🟢 ACTIVE | Max background (`async`) delegates running at once; extra launches queue FIFO and start as slots free. `1` = forced serial. Overridden by `PI_ACP_DELEGATE_MAX_CONCURRENT`. |
 | `delegate.thinkingLevel` | string | _(unset)_ | 🟢 ACTIVE | Global default thinking level for delegates (per-call > role > global > Pi default). |
 | `delegate.agents` | object | _(unset)_ | 🟢 ACTIVE | Per-role default model + thinking level, keyed by role name. |
+| `delegate.fleetShortcut` | string | `ctrl+alt+d` | 🟢 ACTIVE | TUI shortcut for the `acp_delegate` fleet inspector; set `""` to disable registration. |
 
 **Provider throttle retry keys**
 
@@ -320,6 +321,12 @@ The `delegate` sub-object controls the `acp_delegate` sub-agent tool family (`ac
 }
 ```
 
+### `delegate.fleetShortcut`
+
+- **Type:** string — any Pi key id (e.g. `"ctrl+alt+d"`, `"ctrl+shift+f"`); the empty string `""` disables registration
+- **Default:** `ctrl+alt+d`
+- **Status:** 🟢 ACTIVE
+- **Description:** Keyboard shortcut for the TUI **fleet inspector** (live list + transcript of running/finished `acp_delegate` runs). The default was moved off `ctrl+alt+f`, which is also claimed by the `pi-subagents` extension — Pi's loader cannot deduplicate or let users override cross-extension shortcut conflicts, so both extensions would fight over the key (#412). The inspector remains reachable via `/acp-fleet` regardless of this setting. Set to `""` to register no shortcut (e.g. when you rely on another extension's fleet UI). An invalid value registers a never-matching binding instead of failing startup.
 
 ---
 
