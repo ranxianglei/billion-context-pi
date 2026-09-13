@@ -258,6 +258,31 @@ Restore them next to each other on the target machine. For clone/fork children, 
 
 > If you import only the `.jsonl`, ACP's log-replay fallback rebuilds the state automatically on the next session (see above). Copying the pair is still preferred — it is exact, while the replay re-derives token snapshots and can only restore what the transcript records.
 
+### Machine-readable contract for compression blocks (#368)
+
+Downstream tools that read a session's compressed blocks (cross-session search, memory indexes, …) should rely on this stable boundary instead of globbing private fields:
+
+**Versioned sidecar.** Every `<session>.acp.json` carries a top-level envelope:
+
+```json
+{ "schemaVersion": 1, "producer": { "name": "billion-context-pi", "version": "<semver>" }, "blocks": [ … ], … }
+```
+
+Semantics:
+- **Missing `schemaVersion` == v1.** Files written before this field existed are treated as version 1.
+- **Unknown / higher version.** billion-context-pi stays *tolerant* when loading a higher `schemaVersion` (reads only the fields it knows, logs `unknown-schema-version` once per file) so a downgrade never silently drops state. **Consumers parsing the file themselves must do the opposite:** skip a file/block whose `schemaVersion` they don't understand, log once, and never rewrite it.
+- **Bump only on breakage.** `schemaVersion` changes solely when a listed field is renamed, removed, or re-semanticked. New optional fields are additive and never bump the number.
+
+**Public exports.** Import the pinned types/constants without pulling in the Pi host integration:
+
+```ts
+import { SCHEMA_VERSION, PRODUCER_NAME, BcpBlockV1, createSidecarEnvelope } from "billion-context-pi/contract";
+```
+
+A machine-readable JSON Schema for one block ships at [`schema/bcp-block-v1.json`](./schema/bcp-block-v1.json) (included in the npm package — point your validator at it). Each `blocks[]` element is a `BcpBlockV1`: the required stable core is `blockId`, `summary`, `tier`, `compressedTokens`, `createdAt` (**epoch milliseconds**, not ISO 8601); `topic` / `startRef` / `endRef` / `effectiveMessageIds` are optional coverage metadata. Extra properties are permitted — real blocks also carry internal pruning/index fields that are intentionally outside the contract.
+
+**Atomic writes.** The sidecar is written as a temp file + `rename()` over the target, so a reader never observes a half-written file: watermark on mtime/size and always replace the whole file. The **file remains the source of truth** across process restarts.
+
 ## Built on acp-kernel
 
 The compression engine is [`acp-kernel`](https://github.com/ranxianglei/acp-kernel) — a platform-agnostic, MIT-licensed library with 208 tests. It's bundled inline into `dist/index.js`, so there are zero runtime dependencies.

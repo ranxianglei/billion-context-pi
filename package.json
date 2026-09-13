@@ -8,7 +8,12 @@
 		".": {
 			"types": "./dist/index.d.ts",
 			"import": "./dist/index.js"
-		}
+		},
+		"./contract": {
+			"types": "./dist/contract.d.ts",
+			"import": "./dist/contract.js"
+		},
+		"./schema/bcp-block-v1.json": "./schema/bcp-block-v1.json"
 	},
 	"pi": {
 		"extensions": [
@@ -17,6 +22,7 @@
 	},
 	"files": [
 		"dist",
+		"schema",
 		"README.md",
 		"LICENSE"
 	],

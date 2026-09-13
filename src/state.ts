@@ -2,8 +2,17 @@ import { promises as fs } from "node:fs";
 import * as path from "node:path";
 import { createInitialState, type CompressionState } from "acp-kernel";
 import { logError, logInfo, logWarn } from "./log.js";
+import { createSidecarEnvelope, SCHEMA_VERSION } from "./contract.js";
 
 const STATE_SUFFIX = ".acp.json";
+
+declare const CURRENT_VERSION: string;
+
+function producerVersion(): string | undefined {
+  return typeof CURRENT_VERSION !== "undefined" ? CURRENT_VERSION : undefined;
+}
+
+const warnedUnknownVersions = new Set<string>();
 
 export interface LiveRefOrigin {
   rawId: string;
@@ -70,7 +79,15 @@ export class SessionStateStore {
     if (file) {
       try {
         const raw = await fs.readFile(file, "utf8");
-        const parsed = JSON.parse(raw) as CompressionState & { liveRefOrigins?: unknown; derivedFrom?: unknown };
+        const parsed = JSON.parse(raw) as CompressionState & { liveRefOrigins?: unknown; derivedFrom?: unknown; schemaVersion?: unknown };
+        // Tolerant forward-compat (#368): a higher schemaVersion means a future bcp wrote this
+        // file — we still load known fields below (refusing would drop state on downgrade) but
+        // log once per file so the downgrade is observable. Missing schemaVersion == v1.
+        const sv = typeof parsed?.schemaVersion === "number" ? parsed.schemaVersion : SCHEMA_VERSION;
+        if (sv > SCHEMA_VERSION && !warnedUnknownVersions.has(file)) {
+          warnedUnknownVersions.add(file);
+          logWarn("state", { event: "unknown-schema-version", file, found: sv, supported: SCHEMA_VERSION });
+        }
         if (parsed && Array.isArray(parsed.blocks)) {
           state = mergeInitialState(parsed);
           liveRefOrigins = parseLiveRefOrigins(parsed.liveRefOrigins);
@@ -113,7 +130,8 @@ export class SessionStateStore {
     });
     const tmp = path.join(dir, `.acp-tmp-${path.basename(file)}`);
     try {
-      const payload: Record<string, unknown> = { ...state, liveRefOrigins };
+      const envelope = createSidecarEnvelope(producerVersion());
+      const payload: Record<string, unknown> = { ...envelope, ...state, liveRefOrigins };
       if (derivedFrom) payload.derivedFrom = derivedFrom;
       await fs.writeFile(tmp, JSON.stringify(payload), "utf8");
       await fs.rename(tmp, file);
