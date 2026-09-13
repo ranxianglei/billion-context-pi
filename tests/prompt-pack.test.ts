@@ -6,7 +6,7 @@ import * as path from "node:path";
 import { defaultPrompts } from "acp-kernel";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createAcpExtension } from "../src/index.js";
-import { buildAcpSystemPrompt } from "../src/system-prompt.js";
+import { buildAcpSystemPrompt, SECTION_KEYS } from "../src/system-prompt.js";
 import { leanPack } from "../src/prompt-pack.js";
 import {
   isValidPackName,
@@ -202,6 +202,16 @@ test("piAdapterSurface sanitizes junk: bad section types dropped, malformed extr
     decompress: { promptGuidelines: ["fine"] },
   });
   assert.equal(s.delegatePrompt, "D");
+});
+
+test("piAdapterSurface pass-through: every kernel-shipped tri-state value on a pi key survives untouched", () => {
+  const sections: Record<string, string | null> = {};
+  let i = 0;
+  for (const key of SECTION_KEYS) {
+    sections[key] = i++ % 2 === 0 ? `V${key}` : null;
+  }
+  const pack: Pack = { name: "t", source: "test", surface: { adapters: { pi: { promptSections: sections } } } };
+  assert.deepEqual(piAdapterSurface(pack).promptSections, sections);
 });
 
 test("readToolSurfaceWithPacks applies base pack under inline (per-field, per-param)", async () => {
