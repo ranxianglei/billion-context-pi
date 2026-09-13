@@ -189,7 +189,7 @@
 |----|------|--------|------|------|
 | `prompts` | object | *(内核默认)* | 🟢 ACTIVE | 覆盖 acp-kernel 的 4 条承重压缩提示词规则。每个设置的字段逐字替换默认值。 |
 | `acknowledgePromptsRisk` | boolean | `false` | 🟢 ACTIVE | 必须为 `true`，`prompts` 覆盖才会生效；否则覆盖被丢弃、使用默认值。 |
-| `promptSections` | object | *(内置默认)* | 🟢 ACTIVE | 覆盖 ACP 系统提示词的 13 个段（含 4 个压缩规则块）（三态：字符串=替换 / null=删除 / 省略=默认）。不经风险门禁。 |
+| `promptSections` | object | *(内置默认)* | 🟢 ACTIVE | 覆盖 ACP 系统提示词的 13 个段，统一三态：字符串=替换 / null=删除 / 省略=默认。不经风险门禁。 |
 | `nudgeSections` | object | *(内置默认)* | 🟢 ACTIVE | 覆盖压缩提示的 4 段引导类文本（efficiencyNote / emergencyHeader / t2Guidance / t3Guidance），同样三态。不经风险门禁。 |
 | `toolPrompts` | object | *(内置默认)* | 🟢 ACTIVE | 覆盖四个 ACP 工具的 LLM 文案（description / paramDescriptions / promptSnippet / promptGuidelines）。扩展加载时同步读取，改后需重启 pi。 |
 | `delegatePrompt` | string \| null | *(内置附录)* | 🟢 ACTIVE | 替换（string）或删除（null）delegate 启用时的 ACP_DELEGATE_NOTIFICATIONS 系统提示词附录。 |
@@ -779,7 +779,7 @@ provider 的 key 是 **Pi provider 名**(如 `"anthropic"`、`"openai"`、`"zhip
 - **类型：** `object`（部分覆盖——逐段三态）
 - **默认值：** *(内置默认)*
 - **状态：** 🟢 ACTIVE
-- **说明：** 覆盖 ACP 系统提示词的各段。十三个键：九个结构性文档段（`acpTags`、`summariesInContext`、`tools`、`whenToCompress`、`whenNotToCompress`、`multiTierIntro`、`decompressPhilosophy`、`contextBreakdown`、`throttleRetry`）加四个规则块（`philosophy`、`howToCompress`、`tier2`、`tier3`）。三态语义：字符串**替换**该段，`null` **删除**该段，省略则保持默认。不经风险门禁——若需经门禁替换规则文本请用 `prompts`；两者同时设置时 `promptSections` 生效（后应用）。示例：
+- **说明：** 覆盖 ACP 系统提示词的各段。十三个键（`acpTags`、`summariesInContext`、`tools`、`whenToCompress`、`whenNotToCompress`、`multiTierIntro`、`decompressPhilosophy`、`contextBreakdown`、`throttleRetry`、`philosophy`、`howToCompress`、`tier2`、`tier3`），统一三态语义（与内核 section 语义一致）：字符串**替换**该段，`null` **删除**该段，省略则保持默认。不经风险门禁——若需经门禁替换规则文本请用 `prompts`；两者同时设置时 `promptSections` 生效（后应用）。示例：
 
   ```json
   {
