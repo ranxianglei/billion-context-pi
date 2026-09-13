@@ -63,10 +63,18 @@
 }
 ```
 
-覆盖内核压缩提示词规则的高级配置（需要风险确认）。只设置你想改的字段，其余继承内核默认值：
+切换整套压缩提示词表面最简单的方式是具名包——一行选定（如内置 `lean`，无需风险确认）：
+
+```json
+{ "compress": { "promptPack": "lean" } }
+```
+
+逐项微调则用 `promptSections`（系统提示词分段）/ `nudgeSections`（nudge 文案）/ `toolPrompts`（工具文案），三态：字符串=替换 / `null`=删除 / 省略=默认，不经风险门禁。逐字改写内核压缩规则仍走 `prompts`（需 `acknowledgePromptsRisk: true`）；只设置你想改的字段，其余继承内核默认值：
 
 ```json
 {
+  "promptSections": { "acpTags": "（自定义 acp 标签说明）" },
+  "toolPrompts": { "compress": { "promptGuidelines": "批量合并相邻范围。" } },
   "prompts": {
     "compressPhilosophy": "我的压缩理念……",
     "howToCompressRules": "我的 tier-1 规则……",
@@ -76,6 +84,8 @@
   "acknowledgePromptsRisk": true
 }
 ```
+
+完整参考见[提示词包](#提示词包)一节。
 
 ---
 

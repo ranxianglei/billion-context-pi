@@ -63,10 +63,18 @@ A minimal config enabling only debug logging:
 }
 ```
 
-An advanced config overriding the kernel's compression prompt rules (requires the risk acknowledgement). Set only the fields you want to change; the rest inherit the kernel defaults:
+The simplest way to swap the whole compression prompt surface is a named pack — one line (e.g. the built-in `lean`, no risk acknowledgement needed):
+
+```json
+{ "compress": { "promptPack": "lean" } }
+```
+
+For per-item tuning use `promptSections` (system-prompt sections) / `nudgeSections` (nudge texts) / `toolPrompts` (tool copy) — tri-state: string=replace / `null`=delete / omitted=default, without the risk gate. Verbatim replacement of the kernel's compression rules still goes through `prompts` (requires `acknowledgePromptsRisk: true`). Set only the fields you want to change; the rest inherit the kernel defaults:
 
 ```json
 {
+  "promptSections": { "acpTags": "(custom acp tag explanation)" },
+  "toolPrompts": { "compress": { "promptGuidelines": "Batch adjacent ranges." } },
   "prompts": {
     "compressPhilosophy": "My compression philosophy...",
     "howToCompressRules": "My tier-1 rules...",
@@ -76,6 +84,8 @@ An advanced config overriding the kernel's compression prompt rules (requires th
   "acknowledgePromptsRisk": true
 }
 ```
+
+See [Prompt Packs](#prompt-packs) for the full reference.
 
 ---
 
