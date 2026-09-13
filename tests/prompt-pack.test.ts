@@ -51,10 +51,18 @@ test("lean pack is a kernel builtin carrying its pi surface under adapters", () 
   assert.ok(String(rules).includes("makes recall unnecessary"));
 });
 
-test("piAdapterSurface(leanPack): aligned rules kept, every other section nulled, lean tool extras", () => {
+test("piAdapterSurface(leanPack): aligned rules kept, condensed how-to-compress contract, other sections nulled, lean tool extras", () => {
   const s = piAdapterSurface(leanPack);
   assert.equal(s.promptSections.acpTags, leanPiSections().acpTags);
-  for (const k of ["summariesInContext", "tools", "philosophy", "howToCompress", "tier2", "tier3", "multiTierIntro", "decompressPhilosophy", "contextBreakdown", "throttleRetry", "whenToCompress", "whenNotToCompress"]) {
+  // kernel >= 0.0.67: the style contract slot is restored with a condensed
+  // distillation of the default rules (incident 01a09989 — unstyled summaries
+  // transcribed dialogue state). philosophy/tier sections stay nulled.
+  const howTo = s.promptSections.howToCompress;
+  assert.equal(typeof howTo, "string", "howToCompress is the condensed contract");
+  for (const marker of ["TASK AS OF THIS BLOCK", "PENDING", "no Q&A lists", "KEEP VERBATIM", "PRIORITY"]) {
+    assert.ok(String(howTo).includes(marker), `howToCompress missing: ${marker}`);
+  }
+  for (const k of ["summariesInContext", "tools", "philosophy", "tier2", "tier3", "multiTierIntro", "decompressPhilosophy", "contextBreakdown", "throttleRetry", "whenToCompress", "whenNotToCompress"]) {
     assert.equal((s.promptSections as Record<string, unknown>)[k], null, `${k} should be null`);
   }
   for (const t of ["compress", "decompress", "search_context", "acp_status"] as const) {
@@ -62,6 +70,14 @@ test("piAdapterSurface(leanPack): aligned rules kept, every other section nulled
   }
   assert.equal(s.delegatePrompt, undefined);
   assert.deepEqual(piAdapterSurface(defaultPack), { promptSections: {}, toolExtras: {} });
+});
+
+test("lean how-to-compress contract reaches the built prompt instead of the default rules", () => {
+  const merged = mergeSurface(leanPack, {});
+  const text = buildAcpSystemPrompt(defaultPrompts, merged.promptSections);
+  assert.ok(text.includes("HOW TO COMPRESS (condensed)"), "condensed contract header present");
+  assert.ok(text.includes("TASK AS OF THIS BLOCK"), "integrity rule present");
+  assert.ok(!text.includes(defaultPrompts.howToCompressRules), "default full rules not injected");
 });
 
 test("lean pack system prompt collapses to header + lean bullets", () => {
@@ -187,7 +203,9 @@ test("piAdapterSurface sanitizes junk: bad section types dropped, malformed extr
     },
   };
   const s = piAdapterSurface(pack);
-  assert.deepEqual(s.promptSections, { tools: null, whenToCompress: "keep" });
+  // rule-slot strings are legit since kernel 0.0.67 (condensed contracts);
+  // only genuinely bad types (42) are dropped.
+  assert.deepEqual(s.promptSections, { tools: null, whenToCompress: "keep", philosophy: "no" });
   assert.deepEqual(s.toolExtras, {
     compress: { promptGuidelines: ["single"] },
     acp_status: { promptSnippet: "s" },
