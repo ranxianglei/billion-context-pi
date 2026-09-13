@@ -60,6 +60,20 @@ pi-acp/
 5. **Auto-update on session_start** — checks npm registry (6h throttle), auto-installs if newer
 6. **acp-kernel MUST be pinned to an exact version** (e.g. `"acp-kernel": "0.0.14"`, NEVER `"^0.0.14"`). Because acp-kernel is a build-time dependency that tsup bundles inline into `dist`, a caret range makes the resolved version drift if `package-lock.json` is regenerated or absent, breaking reproducible builds. When bumping acp-kernel: set the exact version in `package.json`, run `npm install` to refresh the lockfile, then rebuild. The `package-lock.json` is committed and kept in sync.
 
+### Kernel Contract: Message Ids Are Never Reused
+
+The kernel (`acp-kernel`) guarantees, and this plugin RELIES on: within a
+session, a raw content-hash id and a ref number (`mNNNNN`) denote exactly one
+message forever — **never reused, never duplicated**, even after the message
+dies (edited/truncated/folded). Summaries cite tags across turns and the
+model can cite any number it has ever seen, so a re-issued number silently
+misattributes on decompress. The kernel's ref-slot reclamation
+(acp-kernel PR #176, in 0.0.48/0.0.49) violated this and was reverted
+(kernel #191) — **this repo must not pin acp-kernel 0.0.48/0.0.49**; bump
+from 0.0.47 only after the revert release ships (or bump back down to
+0.0.47). Capacity pressure is the kernel's problem to solve by widening the
+ref space, never by recycling numbers.
+
 ## 3. Development Standards
 
 ### Build Commands
