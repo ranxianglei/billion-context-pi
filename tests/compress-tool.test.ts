@@ -365,3 +365,56 @@ test("compressPanelBlocks counts tier labels correctly ((Tn) carries a paren)", 
   assert.equal(compressPanelBlocks("▣ ACP | 61.1K → 13.7K tokens (~47.4K reclaimed, blocks: b3(T2)=m00044–m00097, b4(T2)=m00103–m00123*)"), 2);
   assert.equal(compressPanelBlocks("No ranges provided."), -1);
 });
+
+// issue #420: a successful compress result must list the remaining compressible
+// ranges (from the post-compression nudge) so a same-turn follow-up batch does
+// not require an acp_status planning call first.
+test("compress success lists remaining compressible ranges", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000, preserveRecentMessages: 1 })(api as any);
+  const BIG = "中".repeat(6000);
+  const stateFile = "/tmp/pai-acp-compress-ranges-a.session.json";
+  await rm(`${stateFile}.acp.json`, { force: true });
+  const entries = [userMsg("e1", BIG), userMsg("e2", BIG), userMsg("e3", BIG), userMsg("e4", BIG)];
+  const ctx = fakeCtx(entries, stateFile);
+  ctx.__setUsage(100_000);
+  await runContextRound(handlers, ctx); // prime the context round
+
+  const compressTool = api.tools.find((t: any) => t.name === "compress")!;
+  const out = await compressTool.execute(
+    "tc1",
+    { content: [{ startId: "m00001", endId: "m00001", summary: "first block: initial entry compressed to leave follow-up ranges behind" }] },
+    undefined, undefined, ctx,
+  );
+  const text = typeof out === "string" ? out : out.content?.[0]?.text ?? String(out);
+  assert.ok(text.includes("▣ ACP"), `compress failed: ${text}`);
+  assert.ok(!text.includes("Errors:"), `compress rejected: ${text}`);
+
+  // e4 stays protected (last message); e2/e3 remain viable — their refs must be
+  // carried in the result so the next batch can be planned without acp_status.
+  assert.match(text, /Current compressible ranges \(use these refs exactly as listed\):/);
+  assert.match(text, /m0000[23]/, `remaining ranges missing refs: ${text}`);
+});
+
+test("compress success omits the ranges section when nothing viable remains", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000, preserveRecentMessages: 1 })(api as any);
+  const BIG = "中".repeat(6000);
+  const stateFile = "/tmp/pai-acp-compress-ranges-b.session.json";
+  await rm(`${stateFile}.acp.json`, { force: true });
+  const entries = [userMsg("e1", BIG), userMsg("e2", BIG)];
+  const ctx = fakeCtx(entries, stateFile);
+  ctx.__setUsage(100_000);
+  await runContextRound(handlers, ctx); // prime the context round
+
+  const compressTool = api.tools.find((t: any) => t.name === "compress")!;
+  const out = await compressTool.execute(
+    "tc1",
+    { content: [{ startId: "m00001", endId: "m00001", summary: "only block: last entry stays protected so no compressible ranges remain" }] },
+    undefined, undefined, ctx,
+  );
+  const text = typeof out === "string" ? out : out.content?.[0]?.text ?? String(out);
+  assert.ok(text.includes("▣ ACP"), `compress failed: ${text}`);
+  assert.ok(!text.includes("Errors:"), `compress rejected: ${text}`);
+  assert.ok(!text.includes("Current compressible ranges"), `unexpected ranges section: ${text}`);
+});

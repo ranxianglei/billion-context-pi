@@ -504,5 +504,11 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
   const lines = [`▣ ACP | ${formatK(beforeTokens)} → ${formatK(afterTokens)} tokens (~${formatK(reclaimed)} reclaimed, ${spanClause})`];
   if (warnings.length > 0) lines.push("⚠️ " + warnings.join("; "));
   if (errors.length > 0) lines.push("Errors: " + errors.join("; "));
+  if (blocksCreated > 0) {
+    const afterRanges = viableRanges(afterTurn.nudge?.compressibleRanges ?? []);
+    if (afterRanges.length > 0) {
+      lines.push("Current compressible ranges (use these refs exactly as listed):\n" + formatRanges(afterRanges, []));
+    }
+  }
   return lines.join("\n");
 }
