@@ -1,10 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFile, rm } from "node:fs/promises";
-import type { CompressionBlock, CompressionState } from "acp-kernel";
+import type { CompressionBlock, CompressionState, CoreMessage } from "acp-kernel";
 import { createAcpExtension } from "../src/index.js";
-import { blockSpanLabel, compressPanelBlocks, isCompressNoopText, isCompressSuccessText, summaryFingerprintLine } from "../src/compress-tool.js";
+import { blockSpanLabel, compressPanelBlocks, firstFoldStartTokens, isCompressNoopText, isCompressSuccessText, summaryFingerprintLine } from "../src/compress-tool.js";
 import { tmpPath } from "./tmp-path.js";
+import { estimateTokens } from "../src/tokens.js";
 
 // ─── helpers (mirror decompress-tool.test.ts) ──────────────────────────────
 
@@ -529,4 +530,67 @@ test("in-place refold of a non-tail block: span clause and fingerprint reference
   assert.equal(blocks.length, 2, "refold updates in place — no third block");
   assert.equal(blocks.find((b) => b.blockId === "b1")!.summary, s1b, "b1 summary replaced by the refold");
   assert.equal(blocks.find((b) => b.blockId === "b2")!.summary, s2, "b2 summary untouched");
+});
+
+test("firstFoldStartTokens measures the pre-fold prefix on the beforeTokens scale (#359)", () => {
+  const msgs = [
+    { id: "a", role: "user", contentType: "text", text: "x".repeat(400) },
+    { id: "b", role: "assistant", contentType: "text", text: "y".repeat(800) },
+    { id: "c", role: "user", contentType: "text", text: "z".repeat(1200) },
+  ] as unknown as CoreMessage[];
+  const none = new Set<string>();
+  const noImages = new Map<string, number>();
+  // fold starts at c → prefix = a+b, exactly what estimateTokens gives for the slice
+  assert.equal(firstFoldStartTokens(msgs, none, noImages, new Set(["c"])), estimateTokens(msgs.slice(0, 2), none, noImages));
+  // fold at the very start → zero prefix
+  assert.equal(firstFoldStartTokens(msgs, none, noImages, new Set(["a"])), 0);
+  // middle fold → one-message prefix
+  assert.equal(firstFoldStartTokens(msgs, none, noImages, new Set(["b"])), estimateTokens(msgs.slice(0, 1), none, noImages));
+  // folded id absent from the view → nothing measurable
+  assert.equal(firstFoldStartTokens(msgs, none, noImages, new Set(["zzz"])), null);
+  // covered-id exclusion matches beforeTokens semantics
+  const coveredA = new Set(["a"]);
+  assert.equal(firstFoldStartTokens(msgs, coveredA, noImages, new Set(["c"])), estimateTokens(msgs.slice(0, 2), coveredA, noImages));
+});
+
+test("event=applied logs firstFoldStartPct + retainedPctUpperBound fold geometry (#359)", async () => {
+  const logFile = "/tmp/pai-acp-compress-applied-geometry.log";
+  const stateFile = "/tmp/pai-acp-compress-applied-geometry.session.json";
+  await rm(logFile, { force: true });
+  await rm(`${stateFile}.acp.json`, { force: true });
+  process.env.ACP_LOG_FILE = logFile;
+  try {
+    const { api, handlers } = captureApi();
+    // preserveRecentMessages:1 keeps only m00003 out of the protected zone so
+    // the middle fold (m00002) is viable (same pattern as the #309 test).
+    createAcpExtension({ modelContextLimit: 200_000, preserveRecentMessages: 1 })(api as any);
+    const BIG = "中".repeat(6000);
+    const entries = [userMsg("e1", BIG), userMsg("e2", BIG), userMsg("e3", BIG)];
+    const ctx = fakeCtx(entries, stateFile);
+    ctx.__setUsage(100_000);
+    await runContextRound(handlers, ctx); // prime refs
+
+    const compressTool = api.tools.find((t: any) => t.name === "compress")!;
+    const out = await compressTool.execute(
+      "tc1",
+      { content: [{ startId: "m00002", endId: "m00002", summary: "Middle fold geometry test: second of three identical CJK message blocks compressed to verify the applied-event fields." }] },
+      undefined, undefined, ctx,
+    );
+    const text = typeof out === "string" ? out : out.content?.[0]?.text ?? String(out);
+    assert.ok(text.includes("▣ ACP") && !text.includes("Errors:"), `compress failed: ${text}`);
+
+    const lines = (await readFile(logFile, "utf8")).split("\n").filter((l) => l.includes("event=applied"));
+    assert.equal(lines.length, 1, `exactly one applied line, got: ${lines.join(" | ")}`);
+    const applied = lines[0]!;
+    const start = Number(/firstFoldStartPct=(\d+(?:\.\d+)?)/.exec(applied)?.[1]);
+    const retained = Number(/retainedPctUpperBound=(\d+(?:\.\d+)?)/.exec(applied)?.[1]);
+    // m00002 is the middle of three equal messages → divergence ≈ 1/3 into the view
+    assert.ok(start > 0.2 && start < 0.6, `firstFoldStartPct ≈ 1/3 for a middle fold, got ${start} (${applied})`);
+    // ~2/3 of the view survives → upper bound in (0.4, 0.9)
+    assert.ok(retained > 0.4 && retained < 0.9, `retainedPctUpperBound ≈ 2/3, got ${retained} (${applied})`);
+    // invariant: longest common prefix ≤ surviving token fraction
+    assert.ok(start <= retained, `prefix retention ≤ surviving fraction: ${start} ≤ ${retained}`);
+  } finally {
+    delete process.env.ACP_LOG_FILE;
+  }
 });
