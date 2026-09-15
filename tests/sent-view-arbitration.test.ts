@@ -65,7 +65,7 @@ const nudgeCount = (r: any) =>
 test("context transform DOES go emergency when the sent view itself overflows", async () => {
   await rm(`${STATE_FILE}.1000.acp.json`, { force: true });
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 180_000 })(api as any);
+  createAcpExtension({ rollover: false, modelContextLimit: 180_000 })(api as any);
 
   // Host reports a small tree; irrelevant now. The stream itself is 60 ×
   // ~4.5K ≈ 270K tokens → 150% of the 180K window.
@@ -88,7 +88,7 @@ test("context transform DOES go emergency when the sent view itself overflows", 
 test("context transform trips the emergency nudge from the provider-usage floor (estimate 42%, real 97%)", async () => {
   await rm(`${STATE_FILE}.175000.acp.json`, { force: true });
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 180_000 })(api as any);
+  createAcpExtension({ rollover: false, modelContextLimit: 180_000 })(api as any);
 
   const ctx = fakeCtx(175_000);
   const entries = [msg("e0", "user", "start " + MID)];
@@ -106,7 +106,7 @@ test("context transform trips the emergency nudge from the provider-usage floor 
 test("context transform stays idle when there is no provider usage to floor from", async () => {
   await rm(`${STATE_FILE}.500.acp.json`, { force: true });
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 180_000 })(api as any);
+  createAcpExtension({ rollover: false, modelContextLimit: 180_000 })(api as any);
 
   const ctx = fakeCtx(500);
   const entries = [msg("e0", "user", "start " + SMALL)];
@@ -126,7 +126,7 @@ test("context transform stays idle when there is no provider usage to floor from
 test("context transform skips the provider-usage floor while the anchor predates a successful compress", async () => {
   await rm(`${STATE_FILE}.175001.acp.json`, { force: true });
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 180_000 })(api as any);
+  createAcpExtension({ rollover: false, modelContextLimit: 180_000 })(api as any);
 
   const ctx = fakeCtx(175_000);
   const entries = [msg("e0", "user", "start " + SMALL)];

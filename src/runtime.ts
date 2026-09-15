@@ -14,6 +14,7 @@ import { applyStrictReasoningGate, resolveReasoningDrop, type CompressReasoningC
 import { entriesToCoreMessages, extractText, matchesStoredText, messageIdentity, messageRef } from "./messages.js";
 import { SessionStateStore, deriveChildState, type LiveRefOrigin } from "./state.js";
 import { hasCompressHistory, rebuildStateFromLog } from "./state-rebuild.js";
+import type { RolloverPending } from "./rollover.js";
 import { loadUserConfig, applyUserConfig } from "./user-config.js";
 import { sanitizeSurfaceConfig } from "./surface.js";
 import { ThrottleEpisode } from "./throttle-retry.js";
@@ -118,6 +119,14 @@ export interface AcpRuntime {
   reloadConfig(cwd: string): Promise<void>;
   stateFor(ctx: ExtensionContext, liveMessages?: AgentMessage[]): Promise<{ state: CompressionState; coreMessages: ReturnType<typeof entriesToCoreMessages>; entries: SessionEntry[] }>;
   save(state: CompressionState, ctx: ExtensionContext): Promise<void>;
+  /** Batch-rollover pending work (#241): compressions recorded by the compress
+   *  tool and absorbs recorded by the absorb tool. Applied in one batch at
+   *  rollover (usage ≥ threshold or /acp rollover) so the model-visible
+   *  history stays append-only within a phase. */
+  getRolloverPending(ctx: ExtensionContext): RolloverPending | null;
+  /** Synchronous on purpose: callers do a read-modify-write of the pending
+   *  list and need it atomic under parallel tool calls (no await between). */
+  setRolloverPending(ctx: ExtensionContext, pending: RolloverPending | null): void;
   /** #364 inline child sessions (same process, e.g. Prime RLM): derive the
    *  child's compression state from another session's. Inherits blocks /
    *  message refs / token snapshot so decompress + search_context keep working
@@ -537,6 +546,15 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     await store.save(state, sm.getSessionFile() ?? undefined, sm.getSessionId());
   }
 
+  function getRolloverPending(ctx: ExtensionContext): RolloverPending | null {
+    const sm = ctx.sessionManager;
+    return store.getRolloverPending(sm.getSessionFile() ?? undefined, sm.getSessionId());
+  }
+  function setRolloverPending(ctx: ExtensionContext, pending: RolloverPending | null): void {
+    const sm = ctx.sessionManager;
+    store.setRolloverPending(sm.getSessionFile() ?? undefined, sm.getSessionId(), pending);
+  }
+
   // Own-sidecar check (not cache/load) because load() may have already filled
   // the slot via implicit parentSession-header inheritance — that implicit
   // state is replaceable by an explicit derivation, but real self-compressed
@@ -570,4 +588,4 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   let refused = false;
   let refusalMessage: string | null = null;
   let delegateStoodDown = false;
-  return { core, store, get refused() { return refused; }, set refused(v: boolean) { refused = v; }, get refusalMessage() { return refusalMessage; }, set refusalMessage(v: string | null) { refusalMessage = v; }, get delegateStoodDown() { return delegateStoodDown; }, set delegateStoodDown(v: boolean) { delegateStoodDown = v; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown, nudgeShownFor, nudgeShownTokensFor, clearNudgeTracking, clearNudgeTokenStamps, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reasoningDropFor, reloadConfig, stateFor, save, deriveChildState: deriveChild, acquireLock, overflowFor, overflowDrop, noteDeadCompress, clearDeadCompress, throttleFor, throttleDrop , noteTokenScale, dropTokenScale };}
+  return { core, store, get refused() { return refused; }, set refused(v: boolean) { refused = v; }, get refusalMessage() { return refusalMessage; }, set refusalMessage(v: string | null) { refusalMessage = v; }, get delegateStoodDown() { return delegateStoodDown; }, set delegateStoodDown(v: boolean) { delegateStoodDown = v; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown, nudgeShownFor, nudgeShownTokensFor, clearNudgeTracking, clearNudgeTokenStamps, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reasoningDropFor, reloadConfig, stateFor, save, getRolloverPending, setRolloverPending, deriveChildState: deriveChild, acquireLock, overflowFor, overflowDrop, noteDeadCompress, clearDeadCompress, throttleFor, throttleDrop , noteTokenScale, dropTokenScale };}

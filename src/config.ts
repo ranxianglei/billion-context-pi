@@ -172,6 +172,21 @@ export interface CompressSettings {
   promptPack?: string;
 }
 
+/** Batch rollover tuning (Prompt Cache stability, #241). Deferred compress /
+ *  absorb work is applied in one batch when the calibrated sent-view usage
+ *  crosses `threshold` (or via `/acp rollover`), so the model-visible history
+ *  stays append-only within a phase and the cache prefix is rewritten once
+ *  per rollover instead of once per compression. */
+export interface RolloverConfig {
+  /** Enable batch rollover mode. Default: true. Set `false` (or
+   *  `rollover: false`) to restore the legacy immediate-compression behavior. */
+  enabled?: boolean;
+  /** Context usage percentage that triggers a rollover. Accepts a ratio (0.7)
+   *  or percent string ("70%"). Default: 0.70 — below the 0.75 forced-nudge
+   *  band so pending work is reclaimed before nudges start. */
+  threshold?: number | string;
+}
+
 /** Per-provider compression overrides. Carries the same tuning fields as the
  *  global level, plus an optional per-model map keyed by model id. */
 export interface ProviderCompress extends CompressSettings {
@@ -306,6 +321,10 @@ export interface AdapterConfig {
    *  replacing the kernel's tuned compression rules may reduce summary quality
    *  (lost paths/signatures/decisions → worse retrieval). */
   acknowledgePromptsRisk?: boolean;
+  /** Batch rollover mode (Prompt Cache stability, #241). Accepts a boolean
+   *  shorthand (`false` disables) or a RolloverConfig object. Default: enabled
+   *  at a 0.70 usage threshold. */
+  rollover?: boolean | RolloverConfig;
   /** Override structural sections of the ACP system prompt (ACP TAGS, TOOLS,
    *  WHEN TO COMPRESS, ...). Tri-state per section: string = replace, null =
    *  remove, omitted = default. Not risk-gated — these are documentation
@@ -475,6 +494,22 @@ export function resolveHostSession(adapter: AdapterConfig): ResolvedHostSession 
     logWarn("config", { event: "host-session-invalid", value: String(h), fallback: "off" });
   }
   return { countCustomMessages: false };
+}
+
+/** Resolve rollover config from the adapter, handling the boolean shorthand.
+ *  Default: enabled at a 0.70 usage threshold. */
+export function resolveRollover(adapter: AdapterConfig): { enabled: boolean; threshold: number } {
+  const r = adapter.rollover;
+  if (typeof r === "object" && r !== null) {
+    return {
+      enabled: r.enabled !== false,
+      threshold: r.threshold !== undefined ? parsePercent(r.threshold) : 0.7,
+    };
+  }
+  return {
+    enabled: r !== false,
+    threshold: 0.7,
+  };
 }
 
 /** Per-field deepest-wins merge of the three compression levels (global →

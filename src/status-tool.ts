@@ -10,8 +10,9 @@ import { applyOutputHeadroom, resolveOutputHeadroomCap } from "./overflow-selfhe
 import { getSystemPromptText } from "./compat.js";
 import { logThrow } from "./log.js";
 import { getDelegateUsage } from "./delegate-tool.js";
-import { resolveDelegate } from "./config.js";
+import { resolveDelegate, resolveRollover } from "./config.js";
 import { UNSUPPORTED_HOST_MESSAGE } from "./omp.js";
+import { pendingHasWork } from "./rollover.js";
 
 const StatusParams = Type.Object({
   scope: Type.Optional(Type.Union([Type.Literal("compressed"), Type.Literal("uncompressed")], { description: '"compressed" = drill into blocks; "uncompressed" = show visible messages/ranges. Default: overview.' })),
@@ -122,6 +123,21 @@ async function handleStatus(args: StatusArgs, runtime: AcpRuntime, ctx: Extensio
         ? `Nudge: ACTIVE — ${nudge.reason}`
         : `Nudge: idle — ${nudge.reason}`,
     );
+  }
+  const rollover = resolveRollover(runtime.adapter);
+  if (rollover.enabled) {
+    const pending = runtime.getRolloverPending(ctx);
+    if (pending && pendingHasWork(pending)) {
+      const pendingTokens =
+        pending.compressions.reduce((s, c) => s + c.estTokens, 0) +
+        pending.absorbs.reduce((s, a) => s + a.tokensReclaimed, 0);
+      const effectiveTokens = anchorStale ? viewSentTokens : Math.max(viewSentTokens, providerReal);
+      const usagePct = config.modelContextLimit > 0 ? Math.round((effectiveTokens / config.modelContextLimit) * 100) : 0;
+      extra.push("");
+      extra.push(
+        `Rollover: ${pending.compressions.length} pending compression(s) + ${pending.absorbs.length} absorb(s) — ~${pendingTokens.toLocaleString()} tokens pending (threshold ${Math.round(rollover.threshold * 100)}%, current ${usagePct}%)`,
+      );
+    }
   }
   if (ranges.length > 0 || protectedRanges.length > 0) {
     extra.push("");

@@ -95,7 +95,7 @@ async function withConfigs(
 test("delegate toggle: default config keeps the acp_delegate tools and prompt section", async () => {
     await withConfigs(undefined, undefined, async (cwd) => {
         const { api, handlers } = captureApi();
-        createAcpExtension({ ...ADAPTER })(api as any);
+        createAcpExtension({ ...ADAPTER, rollover: false })(api as any);
         const { tools, systemPrompt } = await boot(api, handlers, cwd);
         for (const name of DELEGATE_TOOLS) assert.ok(tools.includes(name), `${name} registered by default`);
         assert.ok(systemPrompt.includes(DELEGATE_PROMPT_MARKER), "delegate prompt section present by default");
@@ -105,7 +105,7 @@ test("delegate toggle: default config keeps the acp_delegate tools and prompt se
 test("delegate toggle: global {\"delegate\": false} drops the tools and the prompt section", async () => {
     await withConfigs({ delegate: false }, undefined, async (cwd) => {
         const { api, handlers } = captureApi();
-        createAcpExtension({ ...ADAPTER })(api as any);
+        createAcpExtension({ ...ADAPTER, rollover: false })(api as any);
         const { tools, systemPrompt } = await boot(api, handlers, cwd);
         for (const name of DELEGATE_TOOLS) assert.ok(!tools.includes(name), `${name} must not be registered`);
         assert.ok(!systemPrompt.includes(DELEGATE_PROMPT_MARKER), "delegate prompt section must be gone");
@@ -117,7 +117,7 @@ test("delegate toggle: global {\"delegate\": false} drops the tools and the prom
 test("delegate toggle: object form {\"delegate\": {\"enabled\": false}} is equivalent to the boolean shorthand", async () => {
     await withConfigs({ delegate: { enabled: false } }, undefined, async (cwd) => {
         const { api, handlers } = captureApi();
-        createAcpExtension({ ...ADAPTER })(api as any);
+        createAcpExtension({ ...ADAPTER, rollover: false })(api as any);
         const { tools, systemPrompt } = await boot(api, handlers, cwd);
         for (const name of DELEGATE_TOOLS) assert.ok(!tools.includes(name), `${name} must not be registered`);
         assert.ok(!systemPrompt.includes(DELEGATE_PROMPT_MARKER), "delegate prompt section must be gone");
@@ -127,13 +127,13 @@ test("delegate toggle: object form {\"delegate\": {\"enabled\": false}} is equiv
 test("delegate toggle: project acp.json wins over global in both directions", async () => {
     await withConfigs({ delegate: true }, { delegate: false }, async (cwd) => {
         const { api, handlers } = captureApi();
-        createAcpExtension({ ...ADAPTER })(api as any);
+        createAcpExtension({ ...ADAPTER, rollover: false })(api as any);
         const { tools } = await boot(api, handlers, cwd);
         assert.ok(!tools.includes("acp_delegate"), "project delegate:false must override global delegate:true");
     });
     await withConfigs({ delegate: false }, { delegate: true }, async (cwd) => {
         const { api, handlers } = captureApi();
-        createAcpExtension({ ...ADAPTER })(api as any);
+        createAcpExtension({ ...ADAPTER, rollover: false })(api as any);
         const { tools, systemPrompt } = await boot(api, handlers, cwd);
         assert.ok(tools.includes("acp_delegate"), "project delegate:true must override global delegate:false");
         assert.ok(systemPrompt.includes(DELEGATE_PROMPT_MARKER));

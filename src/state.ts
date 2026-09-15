@@ -1,7 +1,8 @@
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
-import { createInitialState, type CompressionState } from "acp-kernel";
+import { createInitialState, type AbsorbRecord, type CompressionState } from "acp-kernel";
 import { logError, logInfo, logWarn } from "./log.js";
+import type { RolloverPending } from "./rollover.js";
 
 const STATE_SUFFIX = ".acp.json";
 
@@ -21,6 +22,7 @@ export interface DerivedFrom {
 interface StateCacheSlot {
   state: CompressionState;
   liveRefOrigins: LiveRefOrigin[];
+  rolloverPending: RolloverPending | null;
   derivedFrom: DerivedFrom | null;
   activePack?: string;
 }
@@ -67,15 +69,17 @@ export class SessionStateStore {
     if (cached) return cached.state;
     let state = createInitialState();
     let liveRefOrigins: LiveRefOrigin[] = [];
+    let rolloverPending: RolloverPending | null = null;
     let derivedFrom: DerivedFrom | null = null;
     let activePack: string | undefined;
     if (file) {
       try {
         const raw = await fs.readFile(file, "utf8");
-        const parsed = JSON.parse(raw) as CompressionState & { liveRefOrigins?: unknown; derivedFrom?: unknown; activePack?: unknown };
+        const parsed = JSON.parse(raw) as CompressionState & { liveRefOrigins?: unknown; rolloverPending?: unknown; derivedFrom?: unknown; activePack?: unknown };
         if (parsed && Array.isArray(parsed.blocks)) {
           state = mergeInitialState(parsed);
           liveRefOrigins = parseLiveRefOrigins(parsed.liveRefOrigins);
+          rolloverPending = parseRolloverPending(parsed.rolloverPending);
           derivedFrom = parseDerivedFrom(parsed.derivedFrom);
           if (typeof parsed.activePack === "string" && parsed.activePack) activePack = parsed.activePack;
         }
@@ -94,7 +98,7 @@ export class SessionStateStore {
         if (parentState) state = parentState;
       }
     }
-    this.cache.set(key, { state, liveRefOrigins, derivedFrom, activePack });
+    this.cache.set(key, { state, liveRefOrigins, rolloverPending, derivedFrom, activePack });
     return state;
   }
 
@@ -117,11 +121,12 @@ export class SessionStateStore {
     const liveRefOrigins = prev?.liveRefOrigins ?? [];
     const derivedFrom = prev?.derivedFrom ?? null;
     const activePack = prev?.activePack;
+    const rolloverPending = prev?.rolloverPending ?? null;
     // Cache update is unconditional: file-less (in-memory) sessions have no
     // sidecar to persist, but their state must still survive across turns in
     // this process — otherwise every compress result is dropped and the model
     // re-compresses the same original context forever (issue #322).
-    this.cache.set(key, { state, liveRefOrigins, derivedFrom, activePack });
+    this.cache.set(key, { state, liveRefOrigins, derivedFrom, activePack, rolloverPending });
     if (!file) return;
     const dir = path.dirname(file);
     await fs.mkdir(dir, { recursive: true }).catch((e: unknown) => {
@@ -132,6 +137,7 @@ export class SessionStateStore {
       const payload: Record<string, unknown> = { ...state, liveRefOrigins };
       if (derivedFrom) payload.derivedFrom = derivedFrom;
       if (activePack) payload.activePack = activePack;
+      if (rolloverPending) payload.rolloverPending = rolloverPending;
       await fs.writeFile(tmp, JSON.stringify(payload), "utf8");
       await fs.rename(tmp, file);
     } catch (e) {
@@ -146,7 +152,17 @@ export class SessionStateStore {
   setLiveRefOrigins(sessionFile: string | undefined, sessionId: string, origins: LiveRefOrigin[]): void {
     const key = cacheKey(sessionFile, sessionId);
     const slot = this.cache.get(key);
-    if (slot) this.cache.set(key, { state: slot.state, liveRefOrigins: [...origins], derivedFrom: slot.derivedFrom });
+    if (slot) this.cache.set(key, { state: slot.state, liveRefOrigins: [...origins], derivedFrom: slot.derivedFrom, activePack: slot.activePack, rolloverPending: slot.rolloverPending });
+  }
+
+  getRolloverPending(sessionFile: string | undefined, sessionId: string): RolloverPending | null {
+    return this.cache.get(cacheKey(sessionFile, sessionId))?.rolloverPending ?? null;
+  }
+
+  setRolloverPending(sessionFile: string | undefined, sessionId: string, pending: RolloverPending | null): void {
+    const key = cacheKey(sessionFile, sessionId);
+    const slot = this.cache.get(key);
+    if (slot) this.cache.set(key, { state: slot.state, liveRefOrigins: slot.liveRefOrigins, derivedFrom: slot.derivedFrom, activePack: slot.activePack, rolloverPending: pending });
   }
 
   getDerivedFrom(sessionFile: string | undefined, sessionId: string): DerivedFrom | null {
@@ -156,7 +172,7 @@ export class SessionStateStore {
   setDerivedFrom(sessionFile: string | undefined, sessionId: string, mark: DerivedFrom | null): void {
     const key = cacheKey(sessionFile, sessionId);
     const slot = this.cache.get(key);
-    if (slot) this.cache.set(key, { state: slot.state, liveRefOrigins: slot.liveRefOrigins, derivedFrom: mark });
+    if (slot) this.cache.set(key, { state: slot.state, liveRefOrigins: slot.liveRefOrigins, activePack: slot.activePack, rolloverPending: slot.rolloverPending, derivedFrom: mark });
   }
 
   invalidate(): void {
@@ -231,6 +247,27 @@ function parseLiveRefOrigins(value: unknown): LiveRefOrigin[] {
   });
 }
 
+function parseRolloverPending(value: unknown): RolloverPending | null {
+  if (!value || typeof value !== "object") return null;
+  const p = value as { compressions?: unknown; absorbs?: unknown };
+  const compressions = Array.isArray(p.compressions)
+    ? p.compressions.filter((item): item is RolloverPending["compressions"][number] => {
+        if (!item || typeof item !== "object") return false;
+        const c = item as Record<string, unknown>;
+        return typeof c.startRef === "string" && typeof c.endRef === "string" && typeof c.summary === "string" && typeof c.callId === "string";
+      })
+    : [];
+  const absorbs = Array.isArray(p.absorbs)
+    ? p.absorbs.filter((item): item is RolloverPending["absorbs"][number] => {
+        if (!item || typeof item !== "object") return false;
+        const a = item as Record<string, unknown>;
+        return typeof a.toolCallId === "string" && typeof a.resultMessageId === "string" && typeof a.summary === "string";
+      })
+    : [];
+  if (compressions.length === 0 && absorbs.length === 0) return null;
+  return { compressions, absorbs };
+}
+
 function mergeInitialState(parsed: CompressionState): CompressionState {
   const fresh = createInitialState();
   return {
@@ -239,7 +276,18 @@ function mergeInitialState(parsed: CompressionState): CompressionState {
     tokenSnapshot: parsed.tokenSnapshot ?? fresh.tokenSnapshot,
     nudge: { ...fresh.nudge, ...(parsed.nudge ?? {}) },
     stats: { ...fresh.stats, ...(parsed.stats ?? {}) },
+    absorbed: parseAbsorbedRecords(parsed.absorbed),
     nextBlockId: parsed.nextBlockId ?? fresh.nextBlockId,
     nextRunId: parsed.nextRunId ?? fresh.nextRunId,
   };
+}
+
+function parseAbsorbedRecords(value: unknown): AbsorbRecord[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const records = value.filter((item): item is AbsorbRecord => {
+    if (!item || typeof item !== "object") return false;
+    const a = item as Record<string, unknown>;
+    return typeof a.toolCallId === "string" && typeof a.resultMessageId === "string" && typeof a.summary === "string";
+  });
+  return records.length > 0 ? records : undefined;
 }

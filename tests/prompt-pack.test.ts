@@ -288,7 +288,7 @@ function wireBeforeAgentStart(adapter: AdapterConfig): BeforeAgentStartHandler {
     registerTool: (_tool: unknown): void => {},
     registerCommand: (_name: string, _options: unknown): void => {},
   };
-  createAcpExtension(adapter)(api as ExtensionAPI);
+  createAcpExtension({ ...adapter, rollover: false })(api as ExtensionAPI);
   assert.ok(handler, "before_agent_start wired");
   return handler!;
 }

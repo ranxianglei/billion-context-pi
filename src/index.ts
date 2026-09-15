@@ -11,9 +11,10 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { CoreMessage, NudgeDecision, CompressionBlock, Prompts } from "acp-kernel";
 import { renderNudgeText, resolvePrompts, defaultPrompts, viableRanges } from "acp-kernel";
-import { type AdapterConfig, resolveDelegate, resolveHostSession, DEFAULT_DELEGATE_POLICY } from "./config.js";
+import { type AdapterConfig, resolveDelegate, resolveRollover, resolveHostSession, DEFAULT_DELEGATE_POLICY } from "./config.js";
 import { createRuntime, type AcpRuntime } from "./runtime.js";
 import { makeCompressTool, isCompressSuccessText, isCompressNoopText } from "./compress-tool.js";
+import { makeAbsorbTool } from "./absorb-tool.js";
 import { makeDecompressTool } from "./decompress-tool.js";
 import { makeSearchTool } from "./search-tool.js";
 import { makeStatusTool } from "./status-tool.js";
@@ -24,7 +25,7 @@ import type { NudgeSectionsConfig } from "./surface.js";
 import { coreOutToAgentMessages, extractText } from "./messages.js";
 import { countThinkingChars, dropCompressReasoning } from "./reasoning-drop.js";
 import { collapseAssistantDegeneration, degenerationNotice, lastAssistantRuns, resolveDegenerationGuard } from "./degeneration.js";
-import { buildAcpSystemPrompt, ACP_DELEGATE_PROMPT } from "./system-prompt.js";
+import { buildAcpSystemPrompt, ACP_DELEGATE_PROMPT, ROLLOVER_PROMPT_SECTION } from "./system-prompt.js";
 import { delegateStatusWidget } from "./fleet-widget.js";
 import { openFleetInspector } from "./fleet-inspector.js";
 import { wireToolGuardrails } from "./tool-guardrails.js";
@@ -32,6 +33,7 @@ import { debug, logError, logInfo, logWarn, logThrow, closeLogStream } from "./l
 import { collectCoveredMessageIds, estimateTokens, collectImageTokens, modelSupportsImages, sentViewTokenCount } from "./tokens.js";
 import { lastTurnBoundaryId, lastTurnBoundaryIndex } from "./turn-boundary.js";
 import { usageAnchorPredatesCompression } from "./floor-stale.js";
+import { findHiddenPendingCompressCalls, mergeRestoredMessages, pendingHasWork, rolloverReportText, runRollover, shouldRollover, type RolloverResult } from "./rollover.js";
 import { checkForUpdate } from "./update.js";
 import {
   THROTTLE_RETRY_ERROR_MESSAGE,
@@ -265,6 +267,13 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
         });
       }
     }
+    // Absorb is a rollover-mode tool (#241): it defers removal to the next
+    // rollover, so registering it when rollover is off would let the model
+    // record pending drops that never apply. Resolved AFTER reloadConfig so
+    // user-config rollover:false wins over the factory-time default.
+    if (resolveRollover(runtime.adapter).enabled) {
+      pi.registerTool(makeAbsorbTool(runtime));
+    }
     // Headless hosts exit as soon as the turn ends; awaiting the check keeps
     // the process alive until a running install finishes. TUI stays
     // fire-and-forget so interactive startup is never blocked by npm.
@@ -418,7 +427,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
         activeBefore: state.blocks.filter((b) => b.active).length,
       });
 
-      const turn = runtime.core.processTurn({ messages: coreMessages, state, config, tokenCount });
+      let turn = runtime.core.processTurn({ messages: coreMessages, state, config, tokenCount });
       await runtime.save(turn.state, ctx);
 
       logInfo("turn", {
@@ -457,8 +466,34 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
       activeAfter: turn.state.blocks.filter((b) => b.active).length,
     });
 
+    // Batch rollover (#241): inside a phase the model-visible history stays
+    // append-only — compress/absorb results are only PENDING markers — so the
+    // prompt-cache prefix is stable. When context pressure crosses the
+    // threshold (or /acp rollover forces it), apply ALL pending work in one
+    // batch: a single cache invalidation amortized over the whole phase.
+    const rollover = resolveRollover(runtime.adapter);
+    let rolloverResult: RolloverResult | null = null;
+    if (rollover.enabled) {
+      const pending = runtime.getRolloverPending(ctx);
+      if (shouldRollover({ enabled: rollover.enabled, tokenCount, limit: config.modelContextLimit, threshold: rollover.threshold, hasPending: pendingHasWork(pending), manual: false })) {
+        rolloverResult = await runRollover({ runtime, ctx, config, coreMessages, turn, imageTokens: collectImageTokens(entries, modelSupportsImages(ctx.model)), systemPromptTokens });
+        if (rolloverResult) {
+          turn = rolloverResult.turn;
+          logInfo("rollover", { sid, compressions: rolloverResult.compressionsApplied, absorbs: rolloverResult.absorbsApplied, before: rolloverResult.beforeTokens, after: rolloverResult.afterTokens, reclaimed: rolloverResult.reclaimed, errors: rolloverResult.errors.length });
+          debug.event("rollover", { sid, compressions: rolloverResult.compressionsApplied, absorbs: rolloverResult.absorbsApplied, before: rolloverResult.beforeTokens, after: rolloverResult.afterTokens });
+        }
+      }
+    }
+
     const originalById = collectOriginals(entries);
-    let rebuilt = coreOutToAgentMessages(turn.messages, originalById);
+    // Deferred (pending) compress calls are orphans to the kernel's
+    // hideConsumedCompressCalls: beyond the last two, older ones get hidden
+    // mid-history — an in-place rewrite that busts the cache prefix. Re-insert
+    // them at their original positions so the phase view stays append-only.
+    const pendingAfter = runtime.getRolloverPending(ctx);
+    const hiddenIds = findHiddenPendingCompressCalls(coreMessages, turn.messages, pendingAfter);
+    const merged = mergeRestoredMessages(turn.messages, coreMessages, hiddenIds, turn.state);
+    let rebuilt = coreOutToAgentMessages(merged, originalById);
     // [#336] Request-time reasoning drop, aligned with opencode-acp #377:
     // compress calls are hard-exempt from compression, so their thinking
     // rides along every request as an unreclaimable floor. Round closure is
@@ -611,6 +646,10 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
       }
     }
 
+    if (rolloverResult) {
+      rebuilt.push(rolloverReportMessage(rolloverResult));
+    }
+
     if (outcome !== null && outcome.cappedNow) {
       logWarn("nudge", { sid, event: "compress-retry-capped", failures: outcome.count });
       debug.event("compress-retry-capped", { sid, turnKey, failures: outcome.count });
@@ -675,7 +714,10 @@ function wireSystemPrompt(pi: ExtensionAPI, runtime: AcpRuntime): void {
       runtime.setPrompts(defaultPrompts);
     }
     const delegate = resolveDelegate(runtime.adapter).enabled && !runtime.delegateStoodDown;
-    const acp = buildAcpSystemPrompt(runtime.prompts, merged.promptSections);
+    const acpBase = buildAcpSystemPrompt(runtime.prompts, merged.promptSections);
+    // Batch-rollover guidance (#241): only when the mode is on — legacy
+    // sessions must not see instructions for a deferred compress flow.
+    const acp = resolveRollover(runtime.adapter).enabled ? `${acpBase}\n${ROLLOVER_PROMPT_SECTION}` : acpBase;
     const delegateText = merged.delegatePrompt !== undefined ? merged.delegatePrompt : ACP_DELEGATE_PROMPT;
     const prompt = delegate && delegateText !== null ? `${acp}\n${delegateText}` : acp;
     return { systemPrompt: formatSystemPromptForEvent(event.systemPrompt, prompt) };
@@ -858,6 +900,17 @@ function nudgeMessage(nudge: NudgeDecision, blocks: CompressionBlock[], prompts:
   return {
     role: "user",
     content: [{ type: "text", text: lines.join("\n") }],
+    timestamp: Date.now(),
+  } as AgentMessage;
+}
+
+// One-shot tail report after a rollover fires (same transient-tail pattern as
+// nudgeMessage): the model sees what was applied this round; the next context
+// event rebuilds the array from scratch, so it does not pollute context.
+function rolloverReportMessage(r: RolloverResult): AgentMessage {
+  return {
+    role: "user",
+    content: [{ type: "text", text: rolloverReportText(r) }],
     timestamp: Date.now(),
   } as AgentMessage;
 }

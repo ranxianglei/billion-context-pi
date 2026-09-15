@@ -123,7 +123,7 @@ test("compress tool succeeds on a missing-`}` string payload (end-to-end)", asyn
     registerTool(tool: any) { this.tools.push(tool); },
     registerCommand(name: string, options: any) { this.commands.set(name, options); },
   };
-  createAcpExtension({ modelContextLimit: 200_000 })(api);
+  createAcpExtension({ rollover: false, modelContextLimit: 200_000 })(api);
   const stateFile = "/tmp/pai-acp-tail-repair-e2e.session.json";
   await rm(`${stateFile}.acp.json`, { force: true });
 

@@ -332,7 +332,7 @@ function textsOf(m: any): string[] {
 
 test("wire: degenerate thinking in the outgoing view is collapsed + recovery notice appended", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
+  createAcpExtension({ rollover: false, modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
   const entries = [
     entry("e1", { role: "user", content: "do the task" }),
     entry("e2", {
@@ -363,7 +363,7 @@ test("wire: degenerate thinking in the outgoing view is collapsed + recovery not
 
 test("wire: thinking-only aborted turn (dropped from sent view) still triggers the notice", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
+  createAcpExtension({ rollover: false, modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
   const entries = [
     entry("e1", { role: "user", content: "do the task" }),
     entry("e2", { role: "assistant", content: [{ type: "thinking", thinking: "【".repeat(4655) }] }),
@@ -386,7 +386,7 @@ test("wire: thinking-only aborted turn (dropped from sent view) still triggers t
 
 test("wire: once a clean assistant turn exists, the notice stops appearing", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
+  createAcpExtension({ rollover: false, modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
   const entries = [
     entry("e1", { role: "user", content: "do the task" }),
     entry("e2", { role: "assistant", content: [{ type: "thinking", thinking: "【".repeat(4655) }] }),
@@ -405,7 +405,7 @@ test("wire: once a clean assistant turn exists, the notice stops appearing", asy
 
 test("wire: degenerationGuard:false kills both the collapse and the notice", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000, degenerationGuard: false })(api as unknown as ExtensionAPI);
+  createAcpExtension({ rollover: false, modelContextLimit: 200_000, degenerationGuard: false })(api as unknown as ExtensionAPI);
   const entries = [
     entry("e1", { role: "user", content: "do the task" }),
     entry("e2", {
@@ -431,7 +431,7 @@ test("wire: degenerationGuard:false kills both the collapse and the notice", asy
 
 test("wire: custom minRun above the run length disables collapsing", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000, degenerationGuard: { minRun: 5000 } })(api as unknown as ExtensionAPI);
+  createAcpExtension({ rollover: false, modelContextLimit: 200_000, degenerationGuard: { minRun: 5000 } })(api as unknown as ExtensionAPI);
   const entries = [
     entry("e1", { role: "user", content: "do the task" }),
     entry("e2", {

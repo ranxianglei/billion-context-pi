@@ -118,7 +118,7 @@ test("sent-view token count includes thinking tokens", async () => {
   await rm(logFile, { force: true });
   process.env.ACP_LOG_FILE = logFile;
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 10_000 })(api as any);
+  createAcpExtension({ rollover: false, modelContextLimit: 10_000 })(api as any);
   const entries = Array.from({ length: 8 }, (_, i) => entry(`e${i}`, thinkingContent(400)));
   const ctx = ctxWithModel(entries, 10_000, ["text"]);
   await handlers.get("context")![0]!({ type: "context", messages: entries.map((e) => e.message) }, ctx);
@@ -133,7 +133,7 @@ test("sent-view token count includes thinking tokens", async () => {
 test("nudge fires when thinking pushes the sent view past the window", async () => {
   await rm(`${STATE_FILE}.acp.json`, { force: true });
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 10_000 })(api as any);
+  createAcpExtension({ rollover: false, modelContextLimit: 10_000 })(api as any);
   const filler = "lorem ".repeat(200);
   const entries = [
     ...Array.from({ length: 8 }, (_, i) => ({
@@ -161,7 +161,7 @@ test("nudge fires when thinking pushes the sent view past the window", async () 
 test("identical session without thinking stays quiet (control)", async () => {
   await rm(`${STATE_FILE}.acp.json`, { force: true });
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 10_000 })(api as any);
+  createAcpExtension({ rollover: false, modelContextLimit: 10_000 })(api as any);
   const filler = "lorem ".repeat(200);
   const entries = [
     ...Array.from({ length: 8 }, (_, i) => ({

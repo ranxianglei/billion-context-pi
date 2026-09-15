@@ -70,7 +70,7 @@ test("#289 Fix A: sent-view recount suppresses spurious emergency", async () => 
   await rm(`${STATE_FILE}.acp.json`, { force: true });
   try {
     const { api, handlers } = captureApi();
-    createAcpExtension({ modelContextLimit: L })(api as any);
+    createAcpExtension({ rollover: false, modelContextLimit: L })(api as any);
     const compressTool = api.tools.find((t: any) => t.name === "compress");
     assert.ok(compressTool, "compress tool registered");
     const ctx = fakeCtx();
@@ -171,7 +171,7 @@ test("#289 Fix B: acp_status nudge follows the sent view, not the raw estimate",
   await rm(`${STATE_FILE}.acp.json`, { force: true });
   try {
     const { api, handlers } = captureApi();
-    createAcpExtension({ modelContextLimit: L })(api as any);
+    createAcpExtension({ rollover: false, modelContextLimit: L })(api as any);
     const compressTool = api.tools.find((t: any) => t.name === "compress");
     const statusTool = api.tools.find((t: any) => t.name === "acp_status");
     assert.ok(statusTool, "acp_status tool registered");

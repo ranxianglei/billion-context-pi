@@ -64,7 +64,7 @@ function bulkEntries(): any[] {
 test("growth baseline re-anchors on the stale→not-stale scale flip (no cross-scale false growth)", async () => {
   await rm(`${STATE_FILE}.acp.json`, { force: true });
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 180_000 })(api as any);
+  createAcpExtension({ rollover: false, modelContextLimit: 180_000 })(api as any);
 
   // Turn 1 — STALE: the successful compress lands after the 175K usage anchor,
   // so the meter runs on the estimate scale (sentTokens), far below 175K.
@@ -108,7 +108,7 @@ test("growth baseline re-anchors on the stale→not-stale scale flip (no cross-s
 test("no reset when the scale is stable (baseline keeps accumulating same-source growth)", async () => {
   await rm(`${STATE_FILE}.acp.json`, { force: true });
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 180_000 })(api as any);
+  createAcpExtension({ rollover: false, modelContextLimit: 180_000 })(api as any);
 
   // Two consecutive NOT-STALE turns (provider scale, no compress in between):
   // the baseline must NOT be reset — it stays anchored so real growth is tracked.

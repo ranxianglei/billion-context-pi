@@ -88,7 +88,7 @@ test("same-turn pressure nudge re-injects only after a full growth floor (issue 
   stateFile = "/tmp/pai-acp-reinject-a.session.json";
   await rm(`${stateFile}.acp.json`, { force: true });
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: LIMIT })(api as any);
+  createAcpExtension({ rollover: false, modelContextLimit: LIMIT })(api as any);
 
   // Event 1 — 140K/180K = 78%: pressure nudge injects (mark at 140K).
   branchEntries = [...bulk(), anchor(140_000)];
@@ -110,7 +110,7 @@ test("drop re-anchor: post-compress regrowth into the pressure band re-injects w
   stateFile = "/tmp/pai-acp-reinject-b.session.json";
   await rm(`${stateFile}.acp.json`, { force: true });
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: LIMIT })(api as any);
+  createAcpExtension({ rollover: false, modelContextLimit: LIMIT })(api as any);
 
   // Inject at 150K, then a successful compress collapses the anchor scale.
   branchEntries = [...bulk(), anchor(150_000)];
@@ -136,7 +136,7 @@ test("emergency bypass is unchanged (95% injects on every event)", async () => {
   stateFile = "/tmp/pai-acp-reinject-c.session.json";
   await rm(`${stateFile}.acp.json`, { force: true });
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: LIMIT })(api as any);
+  createAcpExtension({ rollover: false, modelContextLimit: LIMIT })(api as any);
 
   branchEntries = [...bulk(), anchor(175_000)];
   const r1 = (await fire(handlers, branchEntries, 175_000)).messages;

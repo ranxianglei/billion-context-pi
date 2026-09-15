@@ -100,7 +100,7 @@ test("noteDeadCompress/clearDeadCompress: per-session, per-fingerprint, cleared 
 
 test("issue #250: dead-range repeat breaker + turn cap + reset on new turn", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+  createAcpExtension({ rollover: false, modelContextLimit: 200_000 })(api as any);
   const stateFile = "/tmp/pai-acp-loop-main.session.json";
   await rm(`${stateFile}.acp.json`, { force: true });
 
@@ -156,7 +156,7 @@ test("issue #250: dead-range repeat breaker + turn cap + reset on new turn", asy
 
 test("issue #250: unknown-ref dead ranges get the hard rejection with a live snapshot", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+  createAcpExtension({ rollover: false, modelContextLimit: 200_000 })(api as any);
   const stateFile = "/tmp/pai-acp-loop-unknown.session.json";
   await rm(`${stateFile}.acp.json`, { force: true });
 
@@ -188,7 +188,7 @@ test("issue #250: unknown-ref dead ranges get the hard rejection with a live sna
 
 test("enabled:false (adapter config) registers nothing — Pi native compaction stays active", () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000, enabled: false })(api as any);
+  createAcpExtension({ rollover: false, modelContextLimit: 200_000, enabled: false })(api as any);
   assert.equal(api.tools.length, 0, "no tools registered");
   assert.equal(handlers.size, 0, "no event handlers wired");
 });
@@ -201,7 +201,7 @@ test("enabled:false in project acp.json disables the adapter", () => {
   process.chdir(dir);
   try {
     const { api, handlers } = captureApi();
-    createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+    createAcpExtension({ rollover: false, modelContextLimit: 200_000 })(api as any);
     assert.equal(api.tools.length, 0, "no tools registered");
     assert.equal(handlers.size, 0, "no event handlers wired");
   } finally {

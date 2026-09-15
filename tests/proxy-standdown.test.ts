@@ -79,7 +79,7 @@ describe("isBiliProxyBaseUrl (#296)", () => {
 describe("proxied baseUrl stand-down (#296)", () => {
   test("detects at session_start, stands down, warns once via UI", async () => {
     const { api, handlers } = captureApi();
-    createAcpExtension()(api as any);
+    createAcpExtension({ rollover: false })(api as any);
     const notes: Array<{ msg: string; type?: string }> = [];
     const ctx = piCtx((msg, type) => notes.push({ msg, type }), PROXIED_BASE_URL);
 
@@ -102,7 +102,7 @@ describe("proxied baseUrl stand-down (#296)", () => {
 
   test("all four ACP tools report the stand-down reason", async () => {
     const { api, handlers } = captureApi();
-    createAcpExtension()(api as any);
+    createAcpExtension({ rollover: false })(api as any);
     const ctx = piCtx(() => {}, PROXIED_BASE_URL);
     await startSession(handlers, ctx);
 
@@ -116,7 +116,7 @@ describe("proxied baseUrl stand-down (#296)", () => {
 
   test("warns only once across repeated session_start events", async () => {
     const { api, handlers } = captureApi();
-    createAcpExtension()(api as any);
+    createAcpExtension({ rollover: false })(api as any);
     const notes: string[] = [];
     const ctx = piCtx((msg) => notes.push(msg), PROXIED_BASE_URL);
 
@@ -129,7 +129,7 @@ describe("proxied baseUrl stand-down (#296)", () => {
 
   test("prints the warning to stderr when there is no UI (headless one-shot)", async () => {
     const { api, handlers } = captureApi();
-    createAcpExtension()(api as any);
+    createAcpExtension({ rollover: false })(api as any);
     const ctx = piCtx(() => {}, PROXIED_BASE_URL, false);
 
     const orig = console.error;
@@ -149,7 +149,7 @@ describe("proxied baseUrl stand-down (#296)", () => {
 
   test("stays active when baseUrl is a plain LLM endpoint", async () => {
     const { api, handlers } = captureApi();
-    createAcpExtension()(api as any);
+    createAcpExtension({ rollover: false })(api as any);
     const notes: string[] = [];
     const ctx = piCtx((msg) => notes.push(msg), "https://api.openai.com/v1");
 
@@ -164,7 +164,7 @@ describe("proxied baseUrl stand-down (#296)", () => {
 
   test("falls back to the context event when session_start did not fire", async () => {
     const { api, handlers } = captureApi();
-    createAcpExtension()(api as any);
+    createAcpExtension({ rollover: false })(api as any);
     const notes: string[] = [];
     const ctx = piCtx((msg) => notes.push(msg), PROXIED_BASE_URL);
 

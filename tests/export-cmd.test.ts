@@ -74,7 +74,7 @@ async function setupSession(stateFile: string) {
   await writeSessionFile(stateFile, "test-session", entries);
   await rm(`${stateFile}.acp.json`, { force: true });
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api);
+  createAcpExtension({ rollover: false, modelContextLimit: 200_000 })(api);
   const notifies: string[] = [];
   const ctx = fakeCtx(entries, stateFile, notifies);
   await handlers.get("context")![0]!({ type: "context", messages: [] }, ctx);

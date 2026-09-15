@@ -63,7 +63,7 @@ async function runContextRound(handlers: Map<string, any[]>, ctx: any) {
 
 test("compress beforeTokens is the raw CJK-aware estimate", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+  createAcpExtension({ rollover: false, modelContextLimit: 200_000 })(api as any);
   const stateFile = "/tmp/pai-acp-compress-density-a.session.json";
   await rm(`${stateFile}.acp.json`, { force: true });
   const entries = [userMsg("e1", "hello world"), userMsg("e2", ZH)];
@@ -93,7 +93,7 @@ test("compress beforeTokens is the raw CJK-aware estimate", async () => {
 // plus explicit proof that compression really happened before the scale checks.
 test("compress afterTokens is measured on the same sent-view scale as beforeTokens (multi-block)", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000, preserveRecentMessages: 1 })(api as any);
+  createAcpExtension({ rollover: false, modelContextLimit: 200_000, preserveRecentMessages: 1 })(api as any);
   const stateFile = "/tmp/pai-acp-compress-scales.session.json";
   await rm(`${stateFile}.acp.json`, { force: true });
   const big = "中".repeat(6000); // clears minCompressRange (default 5000 chars)
@@ -147,7 +147,7 @@ test("compress normalizes double-escaped \\uXXXX summaries before storage", asyn
   // unconfigurable preserveRecentTokens (5000) protects any trailing window,
   // so e2 carries ≥5000 tokens of its own and preserveRecentMessages:1 makes
   // e1 (the compress target) fall outside every protected zone.
-  createAcpExtension({ modelContextLimit: 200_000, preserveRecentMessages: 1 })(api as any);
+  createAcpExtension({ rollover: false, modelContextLimit: 200_000, preserveRecentMessages: 1 })(api as any);
   const stateFile = "/tmp/pai-acp-compress-unescape.session.json";
   await rm(`${stateFile}.acp.json`, { force: true });
   const entries = [userMsg("e1", "中".repeat(6000)), userMsg("e2", "中".repeat(6000))];
@@ -185,7 +185,7 @@ test("compress in an in-memory session (no session file) survives to the next co
   // minCompressRange gate needs ≥5000 chars per range; each entry carries 6000
   // CJK chars, and preserveRecentMessages:1 keeps both targets outside the
   // protected trailing zones (same pattern as the #309 test).
-  createAcpExtension({ modelContextLimit: 200_000, preserveRecentMessages: 1 })(api as any);
+  createAcpExtension({ rollover: false, modelContextLimit: 200_000, preserveRecentMessages: 1 })(api as any);
   const BIG = "中".repeat(6000);
   const entries = [userMsg("e1", BIG), userMsg("e2", BIG), userMsg("e3", BIG), userMsg("e4", BIG)];
   const ctx = fakeCtx(entries, undefined);
@@ -227,7 +227,7 @@ test("compress in an in-memory session (no session file) survives to the next co
 test("compress panel lists every new block id with its actual ref span (#376)", async () => {
   const { api, handlers } = captureApi();
   // minCompressRange gate needs ≥5000 chars per range (same pattern as #309/#322).
-  createAcpExtension({ modelContextLimit: 200_000, preserveRecentMessages: 1 })(api as any);
+  createAcpExtension({ rollover: false, modelContextLimit: 200_000, preserveRecentMessages: 1 })(api as any);
   const BIG = "中".repeat(6000);
   const stateFile = "/tmp/pai-acp-compress-spans.session.json";
   await rm(`${stateFile}.acp.json`, { force: true });
@@ -261,7 +261,7 @@ test("compress panel lists every new block id with its actual ref span (#376)", 
 // the panel must still list exactly the blocks that were created.
 test("partial compress panel lists only the created blocks accurately (#376)", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000, preserveRecentMessages: 1 })(api as any);
+  createAcpExtension({ rollover: false, modelContextLimit: 200_000, preserveRecentMessages: 1 })(api as any);
   const BIG = "中".repeat(6000);
   const stateFile = "/tmp/pai-acp-compress-partial-spans.session.json";
   await rm(`${stateFile}.acp.json`, { force: true });

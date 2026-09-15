@@ -73,7 +73,7 @@ const startSession = (handlers: any, ctx: any) =>
 describe("Unsupported-host refusal (issue #234 / #364)", () => {
   test("detects OMP at session_start, refuses service, warns once via UI", async () => {
     const { api, handlers } = captureApi();
-    createAcpExtension()(api as any);
+    createAcpExtension({ rollover: false })(api as any);
     const notes: Array<{ msg: string; type?: string }> = [];
     const notify: Notify = (msg, type) => notes.push({ msg, type });
     const ctx = ompCtx(notify, true);
@@ -98,7 +98,7 @@ describe("Unsupported-host refusal (issue #234 / #364)", () => {
 
   test("warns only once across repeated session_start events", async () => {
     const { api, handlers } = captureApi();
-    createAcpExtension()(api as any);
+    createAcpExtension({ rollover: false })(api as any);
     const notes: string[] = [];
     const notify: Notify = (msg) => notes.push(msg);
     const ctx = ompCtx(notify, true);
@@ -112,7 +112,7 @@ describe("Unsupported-host refusal (issue #234 / #364)", () => {
 
   test("all four ACP tools refuse service on OMP", async () => {
     const { api, handlers } = captureApi();
-    createAcpExtension()(api as any);
+    createAcpExtension({ rollover: false })(api as any);
     const ctx = ompCtx(() => {}, true);
     await startSession(handlers, ctx);
 
@@ -126,7 +126,7 @@ describe("Unsupported-host refusal (issue #234 / #364)", () => {
 
   test("prints the warning to stderr when there is no UI (headless one-shot)", async () => {
     const { api, handlers } = captureApi();
-    createAcpExtension()(api as any);
+    createAcpExtension({ rollover: false })(api as any);
     const ctx = ompCtx(() => {}, false);
 
     const orig = console.error;
@@ -146,7 +146,7 @@ describe("Unsupported-host refusal (issue #234 / #364)", () => {
 
   test("does NOT refuse on a pi host (buildContextEntries present)", async () => {
     const { api, handlers } = captureApi();
-    createAcpExtension()(api as any);
+    createAcpExtension({ rollover: false })(api as any);
     const notes: string[] = [];
     const notify: Notify = (msg) => notes.push(msg);
     const ctx = piCtx(notify);
@@ -162,7 +162,7 @@ describe("Unsupported-host refusal (issue #234 / #364)", () => {
 
   test("declared Pi-compatible fork (PI_ACP_FORK_HOST=1) is NOT refused (#364)", async () => {
     const { api, handlers } = captureApi();
-    createAcpExtension()(api as any);
+    createAcpExtension({ rollover: false })(api as any);
     const notes: string[] = [];
     const notify: Notify = (msg) => notes.push(msg);
     const ctx = ompCtx(notify, true);

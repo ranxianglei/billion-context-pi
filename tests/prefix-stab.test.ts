@@ -41,7 +41,7 @@ function fakeCtx(entries: any[], stateFile: string) {
 
 test("outbound provider view stays byte-stable across context rounds; compression rewrites it exactly once", async () => {
     const { api, handlers } = captureApi();
-    createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+    createAcpExtension({ modelContextLimit: 200_000, rollover: false })(api as any);
     const dir = await mkdtemp(join(tmpdir(), "pi-prefix-"));
     const stateFile = join(dir, "s.session.json");
 

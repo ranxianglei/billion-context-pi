@@ -107,7 +107,7 @@ test("state rebuilt by replaying compress calls from the log when sidecar is mis
         entry("m10", "user", "tail message"),
     ];
     const { api, handlers } = captureApi();
-    createAcpExtension(ADAPTER)(api as any);
+    createAcpExtension({ ...ADAPTER, rollover: false })(api as any);
     const ctx = fakeCtx(entries, stateFile, "rebuild-1", dir);
 
     const rebuilt1 = (await fire(handlers, entries, ctx)) as any;
@@ -152,7 +152,7 @@ test("errored compress calls and no-history logs leave state empty", async () =>
         entry("m9", "user", "tail"),
     ];
     const { api, handlers } = captureApi();
-    createAcpExtension(ADAPTER)(api as any);
+    createAcpExtension({ ...ADAPTER, rollover: false })(api as any);
     const ctx = fakeCtx(entries, stateFile, "rebuild-none", dir);
 
     await fire(handlers, entries, ctx);
@@ -185,7 +185,7 @@ test("two sequential successful compress calls rebuild two blocks", async () => 
         entry("m15", "user", "tail"),
     ];
     const { api, handlers } = captureApi();
-    createAcpExtension(ADAPTER)(api as any);
+    createAcpExtension({ ...ADAPTER, rollover: false })(api as any);
     const ctx = fakeCtx(entries, stateFile, "rebuild-two", dir);
 
     await fire(handlers, entries, ctx);

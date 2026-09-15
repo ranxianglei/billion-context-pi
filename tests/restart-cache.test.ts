@@ -64,7 +64,7 @@ test("outbound view is byte-identical across a simulated restart (state reloaded
 
     // ── Phase 1: original process ──────────────────────────────────────────
     const A = captureApi();
-    createAcpExtension({ ...ADAPTER })(A.api as any);
+    createAcpExtension({ ...ADAPTER, rollover: false })(A.api as any);
     await boot(A.handlers, fakeCtx(entries, stateFile, "sess-original", dir));
     const roundA = async () => {
         const res = await A.handlers.get("context")![0]!(eventOf(entries), fakeCtx(entries, stateFile, "sess-original", dir));
@@ -101,7 +101,7 @@ test("outbound view is byte-identical across a simulated restart (state reloaded
     // the session ID CHANGES (as it does across fork/clone); the state key is
     // the file, so routing must not depend on the id. ────────────────────────
     const B = captureApi();
-    createAcpExtension({ ...ADAPTER })(B.api as any);
+    createAcpExtension({ ...ADAPTER, rollover: false })(B.api as any);
     await boot(B.handlers, fakeCtx(entries, stateFile, "sess-after-restart", dir));
     const postRestart = ((await B.handlers.get("context")![0]!(eventOf(entries), fakeCtx(entries, stateFile, "sess-after-restart", dir))).messages as any[]).map((m) => JSON.stringify(m));
 

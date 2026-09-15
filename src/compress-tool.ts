@@ -14,6 +14,8 @@ import { resolveHostSession } from "./config.js";
 import { defaultCountTokens, parseCompressArgs, viableRanges, formatRanges, type CompressionBlock, type CompressionState, type CompressParseDiagnostics, type NudgeDecision } from "acp-kernel";
 import { countUnicodeEscapes, findUnverifiableUserQuote, sanitizeSummary } from "./summary-sanitize.js";
 import { getSystemPromptText } from "./compat.js";
+import { resolveRollover } from "./config.js";
+import { emptyPending, pendingOverlaps, rangeTokenEstimate } from "./rollover.js";
 import { UNSUPPORTED_HOST_MESSAGE } from "./omp.js";
 
 function formatK(n: number): string {
@@ -171,11 +173,12 @@ export function compressPanelBlocks(text: string): number {
 }
 
 /** Success = completed run that created >= 1 block (partial range errors
- *  still count: progress was made). A 0-block panel must NOT be success —
- *  it would reset the retry counter while the emergency nudge re-fires,
- *  looping no-op compressions (issue #6). */
+ *  still count: progress was made), OR a rollover-mode panel that recorded
+ *  ranges as pending (work was accepted — the retry counter resets). A
+ *  0-block panel must NOT be success — it would reset the retry counter
+ *  while the emergency nudge re-fires, looping no-op compressions (issue #6). */
 export function isCompressSuccessText(text: string): boolean {
-  return compressPanelBlocks(text) > 0;
+  return compressPanelBlocks(text) > 0 || text.includes("recorded for next rollover");
 }
 
 /** No-op = completed run that compressed nothing (0-block panel: every
@@ -412,6 +415,62 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
     beforeMsgCount: messages.length,
     beforeTokens,
   });
+  // Batch rollover mode (#241): validate the ranges against a scratch state
+  // (the kernel clones internally — `state` is untouched), then record them
+  // as pending. Nothing in the model-visible history changes until the next
+  // rollover, so the prompt-cache prefix stays stable inside the phase.
+  const rollover = resolveRollover(runtime.adapter);
+  if (rollover.enabled) {
+    const scratch = runtime.core.applyCompression({
+      ranges: ranges.map((r) => ({ startRef: r.startId, endRef: r.endId, summary: r.summary, topic: r.topic ?? topLevelTopic, summaryMaxChars, compressCallId: toolCallId })),
+      messages,
+      state,
+      config,
+    });
+    const rewriteSpans = scratch.result.blocksCreated > 0
+      ? tier3OnlyRewrite(scratch.state.blocks.slice(-scratch.result.blocksCreated), scratch.state.blocks)
+      : null;
+    if (rewriteSpans) {
+      throw new Error(
+        `Range ${rewriteSpans.join(", ")} only re-condenses terminal tier-3 block(s) — T3 is the highest tier, so rewriting it reclaims nothing and can repeat forever (dog/billion-context-pi#3). Nothing was compressed. ` +
+          `Use search_context or decompress to retrieve details, or pick a range containing uncompressed messages (acp_status lists compressible ranges).`,
+      );
+    }
+    if (scratch.result.errors.length > 0) {
+      throw new Error("Errors: " + scratch.result.errors.join("; "));
+    }
+    const pending = runtime.getRolloverPending(ctx) ?? emptyPending();
+    for (const r of ranges) {
+      if (pendingOverlaps(pending, r.startId, r.endId)) {
+        throw new Error(`Range ${r.startId}..${r.endId} overlaps a range already recorded for the next rollover — it will be compressed once, in batch.`);
+      }
+    }
+    const newOnes = ranges.map((r) => ({
+      startRef: r.startId,
+      endRef: r.endId,
+      summary: r.summary,
+      topic: r.topic ?? topLevelTopic,
+      summaryMaxChars,
+      callId: toolCallId ?? "",
+      createdAt: Date.now(),
+      estTokens: rangeTokenEstimate(messages, state, r.startId, r.endId),
+    }));
+    runtime.setRolloverPending(ctx, { compressions: [...pending.compressions, ...newOnes], absorbs: pending.absorbs });
+    await runtime.save(state, ctx);
+    const pendingTokens =
+      pending.compressions.reduce((s, c) => s + c.estTokens, 0) +
+      newOnes.reduce((s, c) => s + c.estTokens, 0) +
+      pending.absorbs.reduce((s, a) => s + a.tokensReclaimed, 0);
+    logInfo("compress", {
+      sid: ctx.sessionManager.getSessionId(),
+      event: "recorded-pending",
+      ranges: ranges.length,
+      pendingCompressions: pending.compressions.length + newOnes.length,
+      pendingTokens,
+    });
+    return `▣ ACP | ${ranges.length} range${ranges.length > 1 ? "s" : ""} recorded for next rollover — ~${formatK(pendingTokens)} tokens pending (applied when usage crosses ${Math.round(rollover.threshold * 100)}%)`;
+  }
+
   const applied = runtime.core.applyCompression({
     ranges: sanitizedRanges.map((r) => ({ startRef: r.startId, endRef: r.endId, summary: r.summary, topic: r.topic ?? topLevelTopic, summaryMaxChars, compressCallId: toolCallId })),
     messages,
