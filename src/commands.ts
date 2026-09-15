@@ -14,6 +14,7 @@ import { getDelegateUsage } from "./delegate-tool.js";
 import { openFleetInspector } from "./fleet-inspector.js";
 import { resolveDelegate } from "./config.js";
 import { ensureSubagentAcpTools } from "./setup-subagent-tools.js";
+import { cacheReportText } from "./cache-tool.js";
 
 declare const CURRENT_VERSION: string;
 
@@ -58,6 +59,27 @@ export function makeCommands(runtime: AcpRuntime, pi?: ExtensionAPI): Array<{ na
       options: {
         description: "Detailed ACP status (block tiers, token breakdown, delegate usage).",
         handler: statusHandler,
+      },
+    },
+    {
+      name: "acp-cache",
+      options: {
+        description:
+          "Prompt-cache reconciliation: grand ledger (input/cached/hit rate) with every request's miss split into new content / compression re-pay / TTL expiry, plus per-fold economics.",
+        handler: async (_args, ctx) => {
+          let text: string;
+          try {
+            text = await cacheReportText(runtime, ctx);
+          } catch (e) {
+            ctx.ui.notify(e instanceof Error ? e.message : String(e), "error");
+            return;
+          }
+          if (typeof pi?.sendMessage === "function") {
+            pi.sendMessage({ customType: ACP_STATUS_CUSTOM_TYPE, content: text, display: true });
+            return;
+          }
+          ctx.ui.notify(text);
+        },
       },
     },
     {

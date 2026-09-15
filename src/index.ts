@@ -17,6 +17,7 @@ import { makeCompressTool, isCompressSuccessText, isCompressNoopText } from "./c
 import { makeDecompressTool } from "./decompress-tool.js";
 import { makeSearchTool } from "./search-tool.js";
 import { makeStatusTool } from "./status-tool.js";
+import { makeCacheTool } from "./cache-tool.js";
 import { makeDelegateTool, makeDelegateWaitTool, makeDelegateCancelTool, runningRunsSnapshot, resetDelegateUsage, setDelegateDisplayUsage, setDelegatePolicy, setDelegateDefaults, setDelegateNotifyIfRead, markDelegateResultRead, markDelegateRunReadByCommand } from "./delegate-tool.js";
 import { makeCommands } from "./commands.js";
 import { mergeSurface, readToolSurfaceWithPacks, resolveActivePack, resolvePackName, surfaceMetaOf } from "./prompt-pack.js";
@@ -107,6 +108,7 @@ export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactor
     pi.registerTool(makeDecompressTool(runtime, toolSurface.decompress));
     pi.registerTool(makeSearchTool(runtime, toolSurface.search_context));
     pi.registerTool(makeStatusTool(runtime, toolSurface.acp_status));
+    pi.registerTool(makeCacheTool(runtime, toolSurface.acp_cache));
     for (const { name, options } of makeCommands(runtime, pi)) {
       pi.registerCommand(name, options);
     }

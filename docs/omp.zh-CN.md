@@ -29,7 +29,7 @@ OMP 暴露的是另一套进程内会话 API。扩展注入的引用可能与会
 
 - **每个进程只警告一次**(TUI/RPC 下用 UI 通知;headless 一次性模式下用
   `console.error` 输出到 stderr),并指向受支持的替代方案;
-- 四个 ACP 工具(`compress`、`decompress`、`search_context`、`acp_status`)
+- 五个 ACP 工具(`compress`、`decompress`、`search_context`、`acp_status`、`acp_cache`)
   返回引导信息,而不执行实际操作;
 - 跳过 ACP 系统提示注入;
 - `context` 转换变为空操作(消息原样透传);

@@ -32,7 +32,7 @@ for forks whose `getBranch()` matches that contract, not for OMP, so OMP always 
 
 - warns **once per process** (UI notification in TUI/RPC; `console.error` to
   stderr in headless one-shot mode) pointing at the supported alternative,
-- the four ACP tools (`compress`, `decompress`, `search_context`, `acp_status`)
+- the five ACP tools (`compress`, `decompress`, `search_context`, `acp_status`, `acp_cache`)
   return the guidance message instead of acting,
 - the ACP system-prompt injection is skipped,
 - the `context` transform is a no-op (messages pass through untouched),

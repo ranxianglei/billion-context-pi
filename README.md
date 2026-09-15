@@ -132,6 +132,7 @@ billion-context-pi is built for the **Pi** coding agent (`@earendil-works/pi-cod
 | `decompress` | Restore a previously compressed block's content |
 | `search_context` | Search compressed block summaries (and visible messages) by keyword |
 | `acp_status` | Show context usage, compressed blocks, compressible ranges |
+| `acp_cache` | Prompt-cache reconciliation: grand ledger (input/cached/hit rate), per-request miss attribution, per-fold economics |
 | `acp_delegate` | Spawn a clean-context sub-agent for a task (review / research / implement / plan / advise) |
 | `acp_delegate_wait` | Block until a delegate run finishes (returns its result; times out otherwise) |
 | `acp_delegate_cancel` | Cancel a running delegate by runId |
@@ -171,7 +172,7 @@ If you already run another sub-agent extension (pi-subagents, pi-lens, …), tur
 ```
 
 - Equivalent object form: `{ "delegate": { "enabled": false } }`.
-- **What it removes:** the `acp_delegate`, `acp_delegate_wait` and `acp_delegate_cancel` tools, the `ACP_DELEGATE NOTIFICATIONS` system-prompt section, and the `ctrl+alt+f` fleet shortcut (`/acp-fleet` then reports that delegate is off). Compression is unaffected — `compress`, `decompress`, `search_context` and `acp_status` stay.
+- **What it removes:** the `acp_delegate`, `acp_delegate_wait` and `acp_delegate_cancel` tools, the `ACP_DELEGATE NOTIFICATIONS` system-prompt section, and the `ctrl+alt+f` fleet shortcut (`/acp-fleet` then reports that delegate is off). Compression is unaffected — `compress`, `decompress`, `search_context`, `acp_status` and `acp_cache` stay.
 - **When it applies:** the three tools are registered at session start, so a change needs a **new session** (or a Pi restart). The system-prompt section is resolved live on every turn, so it can disappear mid-session before the tools do.
 - Want to drop only the prompt section and keep the tools? Set `{ "delegatePrompt": null }`.
 - Pi's `--exclude-tools acp_delegate,acp_delegate_wait,acp_delegate_cancel` is **not** a substitute: it hides the tools but the model still receives the `ACP_DELEGATE NOTIFICATIONS` section describing tools it cannot call. Use `delegate: false`.
