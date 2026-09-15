@@ -11,7 +11,7 @@ import { estimateTokens, collectCoveredMessageIds, collectImageTokens, modelSupp
 import { applyToolPromptOverrides, type ToolPromptOverrides } from "./surface.js";
 import { lastTurnBoundaryId } from "./turn-boundary.js";
 import { resolveHostSession } from "./config.js";
-import { defaultCountTokens, parseCompressArgs, viableRanges, formatRanges, type CompressionBlock, type CompressionState, type CompressParseDiagnostics, type NudgeDecision } from "acp-kernel";
+import { defaultCountTokens, parseCompressArgs, viableRanges, formatRanges, type CompressionBlock, type CompressionState, type CompressParseDiagnostics, type CoreMessage, type NudgeDecision } from "acp-kernel";
 import { countUnicodeEscapes, findUnverifiableUserQuote, sanitizeSummary } from "./summary-sanitize.js";
 import { getSystemPromptText } from "./compat.js";
 import { UNSUPPORTED_HOST_MESSAGE } from "./omp.js";
@@ -268,6 +268,23 @@ function refIsDead(ref: string, state: CompressionState, visibleIds: Set<string>
   return !hasActiveOwner(state, [rawId], visibleIds);
 }
 
+// #359: token offset of the earliest fold start within the pre-fold sent view —
+// where the next render first diverges from the previous one, i.e. the expected
+// first-round cache-hit fraction. Measured on the same list/scale as
+// beforeTokens (same covered-id exclusion + image tokens). Returns null when no
+// folded id is present in the view.
+export function firstFoldStartTokens(
+  messages: CoreMessage[],
+  coveredIds: Set<string>,
+  imageTokensById: Map<string, number>,
+  foldedIds: Set<string>,
+): number | null {
+  const idx = messages.findIndex((m) => foldedIds.has(m.id));
+  if (idx === -1) return null;
+  if (idx === 0) return 0;
+  return estimateTokens(messages.slice(0, idx), coveredIds, imageTokensById);
+}
+
 function compressibleSnapshotText(nudge: NudgeDecision | undefined): string {
   const ranges = viableRanges(nudge?.compressibleRanges ?? []);
   if (ranges.length === 0) {
@@ -465,6 +482,19 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
   const reclaimed = Math.max(0, beforeTokens - afterTokens);
 
   const newBlocks = applied.state.blocks.slice(-blocksCreated);
+  // #359: fold geometry for the applied event. Earliest divergence point =
+  // earliest newly-covered message OR anchor of a block consumed by a new
+  // block (tier distillation replaces its summary in place). retainedPctUpperBound
+  // bounds prefix retention because the longest common prefix of pre/post
+  // renders can never exceed the surviving token fraction.
+  const foldedIds = new Set<string>();
+  for (const b of newBlocks) {
+    for (const id of b.effectiveMessageIds) foldedIds.add(id);
+    for (const childId of b.directBlockIds) foldedIds.add(`acp_summary_${childId}`);
+  }
+  const foldStartTokens = blocksCreated > 0 && beforeTokens > 0
+    ? firstFoldStartTokens(messages, collectCoveredMessageIds(state), imageTokens, foldedIds)
+    : null;
   debug.event("compress-out", {
     sid: ctx.sessionManager.getSessionId(),
     blocksCreated,
@@ -490,6 +520,12 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
     warnings: warnings.length,
     errors: errors.length,
     newBlockIds: newBlocks.map((b) => b.blockId),
+    ...(blocksCreated > 0 && beforeTokens > 0
+      ? {
+          ...(foldStartTokens !== null ? { firstFoldStartPct: Number((foldStartTokens / beforeTokens).toFixed(3)) } : {}),
+          retainedPctUpperBound: Number((afterTokens / beforeTokens).toFixed(3)),
+        }
+      : {}),
   });
   if (errors.length > 0) {
     logError("compress", { sid: ctx.sessionManager.getSessionId(), event: "errors", count: errors.length, errors: errors.slice(0, 5) });

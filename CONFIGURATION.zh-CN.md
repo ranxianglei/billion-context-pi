@@ -592,6 +592,7 @@
 - **状态：** 🟢 ACTIVE
 - **说明：** 控制**软**压缩 nudge 频率的 token 增长阈值。每当积累约这么多新可压缩内容时，触发一次软 nudge。值越低模型被 nudge 压缩的频率越高；值越高频率越低。此设置只控制*基于增长的* nudge——用量越过 `compress.maxContextLimit` 后，强制 nudge 接管，不受此设置影响。映射到内核设置 `nudge.growthFloor` 和 `nudge.growthCap`。
 - **同轮重注入：** 同一用户轮内 nudge 至多注入一次，但上下文自上次注入后又增长满一个增长门槛（镜像内核防抖 cadence：`max(minGrowthFloor, minGrowthRatio × adaptiveGrowth)`，默认 22.5K token）时，会在同轮重新注入新提醒（issue #269：模型忽略 78% nudge 后，原来会一直沉默到 95% emergency 机械截断）。成功 compress 后增长基线重锚到新（更小）刻度，压缩后重新长回压力带不会被压缩前峰值压制。
+- **可观测性（#359）：** 每次成功折叠都会把失效几何写入 `acp.log`：`event=applied … firstFoldStartPct=<f> retainedPctUpperBound=<g>`。`firstFoldStartPct` = 最早折叠起点 / 折前视图 ≈ 折后第一轮 prompt cache 命中率预期；`retainedPctUpperBound` = afterTokens/beforeTokens，是前缀可保持缓存命中的上界（最长公共前缀 ≤ 存活 token 占比）。按模型分别用这两个字段调 `nudgeGrowthTokens`——甜点因模型而异（缓存计价、窗口大小），因此不推荐一刀切的默认值。
 
 ### `compress.reasoning`
 
