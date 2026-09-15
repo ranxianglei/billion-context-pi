@@ -159,3 +159,48 @@ npm publish
 ```
 
 CI auto-publishes on release branch merge. Manual publish only as fallback.
+
+## 7. Review & Auto-Merge Discipline
+
+> Distilled from a full-history audit of this repo + siblings ([billion-context#801](https://github.com/ranxianglei/billion-context/issues/801)). Full cited material: [AUTO-MERGE-GUARDRAILS.md](./AUTO-MERGE-GUARDRAILS.md). Measured: of merged PRs that drew human review, ≈42% needed a 2nd+ round — the highest of the three repos, because this adapter is the most host-coupled. Gate accordingly.
+
+### 7.1 Before you start
+- **Duplicate screening first.** Search open AND closed issues/PRs for the same fix before implementing; link existing work, don't start parallel work.
+- **One issue = one scope.** Split extra findings into separate issues/PRs; never bundle unrelated changes or mass whitespace/reformatting.
+- **Open a PR, never just push a branch.** A bare branch is not a deliverable.
+
+### 7.2 Review discipline
+- **Rebase to CURRENT master before claiming mergeable**; after rebase re-run typecheck + full test + build. A stale base is the top cause of second-round rework.
+- **Watch hot-file contention** (`src/messages.ts`, `src/runtime.ts`, `src/index.ts` event wiring): if another open PR rewrites the same region, resolve by union of intent, then prove it with tests.
+- **Cover ALL host paths, not just the repro.** This repo runs under Pi, refuses OMP, stands down behind the proxy, and coexists with the thin plugin. A host/session-detection change must verify every path — a fix in one silently regresses another.
+- **Done = evidence.** Actually run the changed behavior. For tag/token changes assert CACHE HIT RATE, not just correctness.
+- **Deterministic tests** — no port/env luck.
+
+### 7.3 Correctness guardrails
+- **Prefix-cache stability is a correctness property.** Ref-tag rendering, token snapshots, and `countTokens` density calibration must not invalidate the prefix cache (#343 first-turn hit rate fell to 20–30%; #171 recomputation re-billed 61k tokens). Verify hit-rate regressions explicitly.
+- **Anchor nudge pressure to provider-real usage**, not estimates (#227).
+- **Never silently clobber user config**; reject malformed input loudly rather than merging into defaults or dropping fields.
+- **Prefer native stable session ids** over derived hashes that drift on switch.
+- **Symptom ≠ mechanism** — check upstream/host logs before attributing a bug to this plugin.
+- **Honest output** for degenerate states; **mask secrets in logs**.
+- **Docs** kept zh/en in sync and placed where the actual reader sees them.
+
+### 7.4 Auto-merge gate (this repo only)
+A bugfix may **auto-merge** only if ALL hold:
+1. Single-module scoped; no architectural change.
+2. A regression test reproduces the original bug and now passes.
+3. Green on the rebased head (typecheck + full test + build).
+4. Touches NO load-bearing surface: ref-tag rendering / token calibration, host detection / stand-down, `.acp.json` sidecar format or log-replay rebuild, `src/update.ts`, the `acp-kernel` pin, identity/session binding.
+5. Pure `fix:` — no new capability surface.
+6. Clean diff: no unrelated changes, no mass whitespace/reformat, no generated/lock churn.
+7. References its issue via `Fixes #N`.
+
+**Must stay human:** any item in rule 4, wire/message-shape changes, config schema, persistence format/version, cross-repo dependencies, `src/update.ts` (needs a no-op release first), identity/session-binding logic, feat/refactor/architecture, security, or any fallback/default-value change (a product decision).
+
+> **Scope note:** auto-merge applies to THIS repo only. Cross-repo changes (acp-kernel bumps, anything spanning repos) remain manual/human.
+
+### 7.5 Reviewer focus — the "重灾区"
+Of merged PRs that drew review, ≈42% needed a 2nd+ round. Two drivers dominate, and they are exactly where auto-merge is unsafe:
+1. **Stale-base / concurrent-file churn** on the hot files above.
+2. **Incomplete first pass** — the repro passes but an adjacent host path or the prefix-cache regression is missed.
+A reviewer walks 7.1 → 7.5 in order.
