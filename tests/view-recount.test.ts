@@ -1,10 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { rm } from "node:fs/promises";
+import { rm, writeFile } from "node:fs/promises";
 import { createAcpExtension } from "../src/index.js";
 import { createCore, createInitialState, defaultConfig, defaultCountTokens, type CoreMessage } from "acp-kernel";
 import { sentViewTokenCount, estimateTokens } from "../src/tokens.js";
+import { entriesToCoreMessages } from "../src/messages.js";
 
 const L = 100_000;
 const MID = "lorem ".repeat(3000);
@@ -58,21 +58,50 @@ const emergencyCount = (r: any) =>
 const anyNudgeCount = (r: any) =>
   (r?.messages ?? []).filter((m: any) => m.role === "user" && /Context limit reached|compress/i.test(JSON.stringify(m.content))).length;
 
+// Realize the #289 straddle directly in the persisted state: a well-formed
+// block whose coverage includes c1's split core ("multi#c1") but NOT its huge
+// result r1. Kernel #684's turn-integrity gate forbids producing this by
+// compressing c1 alone (a fold may no longer strand a visible tool-call from
+// its result), so the fixture seeds the state instead of issuing an illegal
+// split-compress. On the next pass prune() strips the uncovered r1 from the
+// sent view every turn while the raw estimate keeps counting it — exactly the
+// raw-inflated / sent-honest divergence #289 fixed. Seeded before the first
+// context event so the (fresh-per-test) store's initial load picks it up.
+async function seedStraddle(): Promise<void> {
+  const base = createInitialState();
+  const coreId = "multi#c1";
+  base.blocks.push({
+    blockId: "b0",
+    runId: "seed-run",
+    tier: 1,
+    topic: "#289 seed",
+    summary: "s".repeat(300),
+    directMessageIds: [coreId],
+    effectiveMessageIds: [coreId],
+    directBlockIds: [],
+    compressedTokens: 0,
+    createdAt: Date.now(),
+    survivedCount: 0,
+    generation: "young",
+    active: true,
+  });
+  await writeFile(`${STATE_FILE}.acp.json`, JSON.stringify(base), "utf8");
+}
+
 // #289 Fix A discriminator. The raw-view estimate (core minus block coverage)
 // counts messages that prune strips from the sent view every turn: an
-// uncovered tool-result whose paired call got compressed. Layout below makes
-// exactly that happen — c1's result sits 21 positions past c1's split core,
-// beyond adjustBoundariesForToolPairs' maxScan=20, so compressing c1 alone
-// orphans r1. Raw view then reads ~97% (>= emergency band 0.95) while the
-// honest sent view reads ~72%: OLD code keeps firing EMERGENCY, NEW code's
-// sent-view recount drops below the band.
+// uncovered tool-result whose paired call is covered by a block. The seeded
+// straddle makes exactly that happen — c1's split core is folded into a block
+// while its huge result r1 stays visible. The raw view then reads ~97% (>=
+// emergency band) while the honest sent view reads ~72%: a raw-driven meter
+// keeps firing EMERGENCY, the sent-view recount stays below the band. Kernel
+// #684 gates out the old way of building this (an illegal split-compress), so
+// the scenario is realized through state instead.
 test("#289 Fix A: sent-view recount suppresses spurious emergency", async () => {
   await rm(`${STATE_FILE}.acp.json`, { force: true });
   try {
     const { api, handlers } = captureApi();
     createAcpExtension({ modelContextLimit: L })(api as any);
-    const compressTool = api.tools.find((t: any) => t.name === "compress");
-    assert.ok(compressTool, "compress tool registered");
     const ctx = fakeCtx();
 
     const entries: any[] = [];
@@ -84,29 +113,13 @@ test("#289 Fix A: sent-view recount suppresses spurious emergency", async () => 
     for (let i = 2; i <= 21; i++) entries.push(msg(`r${i}`, "toolResult", [{ type: "text", text: "ok" }], { toolName: "bash", toolCallId: `c${i}` }));
     branchEntries = entries;
 
-    // Round 1 primes the session (~104.5% raw — emergency expected on both
-    // old and new code).
-    const r1 = await fire(handlers, ctx);
-    assert.ok(anyNudgeCount(r1) >= 1, "round 1 primes the emergency band");
+    // Non-vacuity guard: the full projection presses the limit hard, so a
+    // raw-driven meter sits in the emergency band and would fire.
+    assert.ok(estimateTokens(entriesToCoreMessages(branchEntries)) >= 0.9 * L, "layout must keep the raw estimate near the limit");
 
-    // Resolve c1's split-core ref from the persisted refmap instead of assuming
-    // numbering (assignRefs may skip/protect messages).
-    const st = JSON.parse(await readFileSync(`${STATE_FILE}.acp.json`, "utf8"));
-    const byRef: Record<string, string> = st.messageRefs?.byRef ?? {};
-    const refC1 = Object.keys(byRef).find((k) => byRef[k] === "multi#c1");
-    assert.ok(refC1, `ref for multi#c1 found in ${Object.keys(byRef).length} refs`);
-
-    const out: any = await compressTool.execute("tc1", { content: [{ startId: refC1, endId: refC1, summary: "s".repeat(300) }] }, undefined, undefined, ctx);
-    const text = typeof out === "string" ? out : out.content?.[0]?.text ?? String(out);
-    assert.match(text, /blocks: b\d+=/, `expected successful compress, got: ${text}`);
-
-    // Session realism: the compress toolResult lands in the transcript.
-    branchEntries.push(msg("cr1", "toolResult", [{ type: "text", text: "▣ ACP | 81.7K → 72.2K tokens (~9.5K reclaimed, 1 block)" }], { toolName: "compress", toolCallId: "tc1" }));
-
-    // Round 2: raw estimate ~97% (orphaned r1 counted forever) vs honest sent
-    // view ~72%. OLD: EMERGENCY fires. NEW: recount stays below the band.
-    const r2 = await fire(handlers, ctx);
-    assert.equal(emergencyCount(r2), 0, "no emergency nudge once the sent view is measured honestly (#289 discriminator)");
+    await seedStraddle();
+    const r = await fire(handlers, ctx);
+    assert.equal(emergencyCount(r), 0, "no emergency nudge once the sent view is measured honestly (#289 discriminator)");
   } finally {
     await rm(`${STATE_FILE}.acp.json`, { force: true });
   }
@@ -164,15 +177,15 @@ test("#289 Fix A': probe measurement is invariant to prelim inside the truncate 
 });
 
 // #289 Fix B: acp_status arbitrates on the sent view like the context
-// transform. In the orphan layout below the raw-view estimate sits in the
-// growth band (~88%) while the honest sent view is well under it (~58%):
-// OLD code shows "Nudge: ACTIVE", fixed code shows "Nudge: idle".
+// transform. In the seeded straddle below the raw-view estimate sits in the
+// growth band (~88%) while the honest sent view is well under it (~58%): a
+// raw-driven meter shows "Nudge: ACTIVE", the sent-view recount shows
+// "Nudge: idle".
 test("#289 Fix B: acp_status nudge follows the sent view, not the raw estimate", async () => {
   await rm(`${STATE_FILE}.acp.json`, { force: true });
   try {
     const { api, handlers } = captureApi();
     createAcpExtension({ modelContextLimit: L })(api as any);
-    const compressTool = api.tools.find((t: any) => t.name === "compress");
     const statusTool = api.tools.find((t: any) => t.name === "acp_status");
     assert.ok(statusTool, "acp_status tool registered");
     const ctx = fakeCtx();
@@ -187,13 +200,8 @@ test("#289 Fix B: acp_status nudge follows the sent view, not the raw estimate",
     for (let i = 2; i <= 21; i++) entries.push(msg(`r${i}`, "toolResult", [{ type: "text", text: "ok" }], { toolName: "bash", toolCallId: `c${i}` }));
     branchEntries = entries;
 
+    await seedStraddle();
     await fire(handlers, ctx);
-    const st = JSON.parse(await readFileSync(`${STATE_FILE}.acp.json`, "utf8"));
-    const byRef: Record<string, string> = st.messageRefs?.byRef ?? {};
-    const refC1 = Object.keys(byRef).find((k) => byRef[k] === "multi#c1");
-    assert.ok(refC1, `ref for multi#c1 found in ${Object.keys(byRef).length} refs`);
-    await compressTool.execute("tc1", { content: [{ startId: refC1, endId: refC1, summary: "s".repeat(300) }] }, undefined, undefined, ctx);
-    branchEntries.push(msg("cr1", "toolResult", [{ type: "text", text: "▣ ACP | done" }], { toolName: "compress", toolCallId: "tc1" }));
 
     const out: any = await statusTool.execute("st1", {}, undefined, undefined, ctx);
     const text = typeof out === "string" ? out : out.content?.[0]?.text ?? String(out);
