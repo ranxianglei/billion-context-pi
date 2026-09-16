@@ -496,10 +496,11 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
   });
   if (errors.length > 0) {
     logError("compress", { sid: ctx.sessionManager.getSessionId(), event: "errors", count: errors.length, errors: errors.slice(0, 5) });
-    // #454 stopgap: ref-resolution failures on a declared fork host carry the
-    // live-entry drift signature (see mergeLiveEntries in runtime.ts) — the
-    // same defect class OMP is refused for. Attribute it to #459 in support
-    // logs so "does not exist" spam is not misread as model misbehavior.
+    // Residual drift signal (#454/#459): with content-stable live ids,
+    // ref-resolution failures on a declared fork host mean the host rewrote or
+    // shrank its in-flight view (see mergeLiveEntries in runtime.ts). Attribute
+    // it in support logs so "does not exist" spam is not misread as model
+    // misbehavior.
     if (blocksCreated === 0 && isDeclaredForkHost() && !isPiHost(ctx.sessionManager)
       && /does not exist|cannot be anchored|is unknown|unknown refs/i.test(errors.join(" "))) {
       logWarn("compress", { sid: ctx.sessionManager.getSessionId(), event: "fork-ref-drift-suspected", seeIssue: "#459", errors: errors.slice(0, 3) });

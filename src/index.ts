@@ -212,16 +212,15 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
       }
       return;
     }
-    // Declared fork hosts are admitted but carry a known limitation (#454):
-    // their in-process live-entries integration can drift the nudge's example
-    // refs from the session's real refs as the session grows, so compress
-    // calls may start failing with "does not exist in this session". Warn at
-    // admission instead of letting users discover it mid-session; root fix is
-    // tracked in #459. Log per session (support logs need the attribution),
-    // notify once per process like the refusal path above.
+    // Declared fork hosts are admitted with a caveat (#454/#459): live-tail
+    // refs are content-stable while the host's view grows append-only; a host
+    // that rewrites in-flight messages can still drift them, so warn at
+    // admission and point long sessions at the proxy. Log per session (support
+    // logs need the attribution), notify once per process like the refusal
+    // path above.
     if (isDeclaredForkHost() && !isPiHost(ctx.sessionManager)) {
       const sid = ctx.sessionManager.getSessionId();
-      logWarn("host", { event: "fork-host-admitted", sid, knownLimitation: "ref-drift", seeIssue: "#454", rootFix: "#459" });
+      logWarn("host", { event: "fork-host-admitted", sid, hardening: "#459", proxy: "billion-context" });
       if (!forkWarned) {
         forkWarned = true;
         if (ctx.hasUI) ctx.ui.notify(FORK_HOST_WARNING_MESSAGE, "warning");
@@ -579,9 +578,10 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     const turnPolicy = resolveHostSession(runtime.adapter);
     const turnKey = lastTurnBoundaryId(entries, turnPolicy) ?? sid;
     // #453: the retry breaker keys off PERSISTED boundaries only — under fork
-    // hosts the merged `entries` carry volatile live-N ids for the not-yet-
-    // persisted tail, so `turnKey` churns between context fires and would
-    // reset failCount mid-episode (cap never latches, emergency-inject loops).
+    // hosts the merged `entries` carry content-addressed live-* ids (#459) for
+    // the not-yet-persisted tail, which can still churn when the host's view
+    // of a message drifts between context fires and would reset failCount
+    // mid-episode (cap never latches, emergency-inject loops).
     const retryTurnKey = retryBreakerKey(ctx.sessionManager, turnPolicy) ?? sid;
 
     // Compress-outcome tracking feeds ONLY the nudge circuit breaker below:

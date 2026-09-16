@@ -62,6 +62,12 @@ function userMsg(id: string, text: string) {
   return { type: "message", id, parentId: null, timestamp: "", message: { role: "user", content: text, timestamp: Date.now() } };
 }
 
+// #459: live-tail ids are content-addressed (`live-<hash>`), so tests resolve
+// them dynamically instead of assuming positional names.
+function liveRawKeys(state: { messageRefs?: { byRaw?: Record<string, string> } }): string[] {
+  return Object.keys(state.messageRefs?.byRaw ?? {}).filter((k) => k.startsWith("live-"));
+}
+
  test("factory registers the compress tool and 7 flat commands", () => {
   const { api, handlers } = captureApi();
   createAcpExtension()(api as any);
@@ -219,7 +225,7 @@ test("omp migrates tagged live refs to stable entry ids", async () => {
   await handlers.get("context")![0]!({ type: "context", messages: first.messages }, ctx);
   const saved = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
   assert.equal(saved.messageRefs.byRaw.e1, targetRef);
-  assert.equal(saved.messageRefs.byRaw["live-0"], undefined);
+  assert.equal(liveRawKeys(saved).length, 0);
 });
 
 test("omp matches a persisted context suffix before assigning live refs", async () => {
@@ -234,7 +240,7 @@ test("omp matches a persisted context suffix before assigning live refs", async 
   const targetRef = transformed.messages[0].content.find((block: { type: string; text: string }) => block.type === "text").text.match(/m\d{5}/)![0];
   const saved = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
   assert.equal(saved.messageRefs.byRaw.e1, targetRef);
-  assert.equal(saved.messageRefs.byRaw["live-0"], undefined);
+  assert.equal(liveRawKeys(saved).length, 0);
 });
 
 test("omp rejects a non-contiguous persisted subsequence", async () => {
@@ -251,10 +257,12 @@ test("omp rejects a non-contiguous persisted subsequence", async () => {
   const firstRef = result.messages[0].content.find((block: { type: string; text: string }) => block.type === "text").text.match(/m\d{5}/)![0];
   const saved = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
   assert.equal(saved.messageRefs.byRaw.e1, undefined);
-  assert.equal(saved.messageRefs.byRaw["live-0"], firstRef);
+  const liveEntries = Object.entries(saved.messageRefs.byRaw).filter(([k]) => k.startsWith("live-"));
+  assert.equal(liveEntries.length, 2, "both messages stay live: a non-contiguous subsequence must not align");
+  assert.ok(liveEntries.some(([, v]) => v === firstRef), "the live 'A' message keeps its own ref");
 });
 
-test("omp rejects ambiguous equal-length persisted runs", async () => {
+test("omp resolves an ambiguous equal-length run against the persisted tail (#459)", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api);
   const stateFile = "/tmp/nonexistent-pai-acp-ambiguous-run.session.json";
@@ -267,9 +275,9 @@ test("omp rejects ambiguous equal-length persisted runs", async () => {
   }, ctx);
   const liveRef = result.messages[0].content.find((block: { type: string; text: string }) => block.type === "text").text.match(/m\d{5}/)![0];
   const saved = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
-  assert.equal(saved.messageRefs.byRaw.e1, undefined);
-  assert.equal(saved.messageRefs.byRaw.e2, undefined);
-  assert.equal(saved.messageRefs.byRaw["live-0"], liveRef);
+  assert.equal(saved.messageRefs.byRaw.e1, undefined, "only the most recent occurrence wins the tail anchor");
+  assert.equal(saved.messageRefs.byRaw.e2, liveRef, "the ambiguous match aligns deterministically to the persisted tail");
+  assert.equal(liveRawKeys(saved).length, 0, "no live id minted once aligned");
 });
 
 test("omp migrates a live ref after the provider context evicts its prefix", async () => {
@@ -285,7 +293,7 @@ test("omp migrates a live ref after the provider context evicts its prefix", asy
   await handlers.get("context")![0]!({ type: "context", messages: [first.messages[1], first.messages[2]] }, ctx);
   const saved = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
   assert.equal(saved.messageRefs.byRaw.eB, bRef);
-  assert.equal(saved.messageRefs.byRaw["live-1"], undefined);
+  assert.equal(liveRawKeys(saved).length, 0);
   assert.equal(saved.messageRefs.byRef[bRef], "eB");
 });
 type PersistedEntry = { type: "message"; id: string; parentId: null; timestamp: string; message: Record<string, unknown> };
@@ -313,7 +321,7 @@ test.skip("omp does not bind a different toolCallId with identical visible text 
   await handlers.get("context")![0]!({ type: "context", messages: [toolResult("call-2")] }, ctx);
   const saved = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
   assert.equal(saved.messageRefs.byRaw.e1, undefined, "a different toolCallId must not inherit the persisted identity");
-  assert.equal(saved.messageRefs.byRaw["live-0"], targetRef, "the live message keeps its own ref");
+  assert.equal(saved.messageRefs.byRaw[liveRawKeys(saved)[0]!], targetRef, "the live message keeps its own ref");
 });
 
 // SKIPPED (omp deprecated — see #237): same 0.0.48 ref-pruning conflict as above.
@@ -338,7 +346,7 @@ test.skip("omp does not bind differing image content with identical visible text
   await handlers.get("context")![0]!({ type: "context", messages: [imgMsg("img-2")] }, ctx);
   const saved = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
   assert.equal(saved.messageRefs.byRaw.e1, undefined, "different image data must not inherit the persisted identity");
-  assert.equal(saved.messageRefs.byRaw["live-0"], targetRef, "the live message keeps its own ref");
+  assert.equal(saved.messageRefs.byRaw[liveRawKeys(saved)[0]!], targetRef, "the live message keeps its own ref");
 });
 
 test("omp matches emergency-truncated tool results before compression", async (t) => {
@@ -524,13 +532,14 @@ test("omp migrates assistant tool-call refs after prefix eviction", async () => 
   const ctx = { ...fakeCtx(persisted, stateFile), sessionManager: { getBranch: () => persisted, getSessionId: () => "test-session", getSessionFile: () => stateFile } };
   await handlers.get("context")![0]!({ type: "context", messages: [assistant("call-a")] }, ctx);
   const firstState = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
-  const ref = firstState.messageRefs.byRaw["live-0"];
+  const root = liveRawKeys(firstState).find((k) => !k.includes("#"))!;
+  const ref = firstState.messageRefs.byRaw[root];
   assert.ok(ref, "assistant temporary ref must be assigned");
   persisted = [userMsg("older", "evicted"), { type: "message", id: "e-assistant", parentId: null, timestamp: "", message: assistant("call-a") }];
   await handlers.get("context")![0]!({ type: "context", messages: [assistant("call-a")] }, ctx);
   const saved = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
   assert.equal(saved.messageRefs.byRaw["e-assistant"], ref);
-  assert.equal(saved.messageRefs.byRaw["live-0"], undefined);
+  assert.equal(liveRawKeys(saved).length, 0);
 });
 
 test("omp migrates parallel assistant tool-call child refs after prefix eviction", async () => {
@@ -547,16 +556,16 @@ test("omp migrates parallel assistant tool-call child refs after prefix eviction
   const ctx = { ...fakeCtx(persisted, stateFile), sessionManager: { getBranch: () => persisted, getSessionId: () => "test-session", getSessionFile: () => stateFile } };
   await handlers.get("context")![0]!({ type: "context", messages: [assistant()] }, ctx);
   const first = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
-  const callARef = first.messageRefs.byRaw["live-0#call-a"];
-  const callBRef = first.messageRefs.byRaw["live-0#call-b"];
+  const childKeys = liveRawKeys(first).filter((k) => k.includes("#"));
+  const callARef = first.messageRefs.byRaw[childKeys.find((k) => k.endsWith("#call-a"))!];
+  const callBRef = first.messageRefs.byRaw[childKeys.find((k) => k.endsWith("#call-b"))!];
   assert.ok(callARef && callBRef);
   persisted = [{ type: "message", id: "e-assistant", parentId: null, timestamp: "", message: assistant() }];
   await handlers.get("context")![0]!({ type: "context", messages: [assistant()] }, ctx);
   const saved = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
   assert.equal(saved.messageRefs.byRaw["e-assistant#call-a"], callARef);
   assert.equal(saved.messageRefs.byRaw["e-assistant#call-b"], callBRef);
-  assert.equal(saved.messageRefs.byRaw["live-0#call-a"], undefined);
-  assert.equal(saved.messageRefs.byRaw["live-0#call-b"], undefined);
+  assert.equal(liveRawKeys(saved).length, 0, "root and child live refs all migrated");
 });
 
 test("omp reloads assistant origins before migrating after prefix eviction", async () => {
@@ -569,7 +578,7 @@ test("omp reloads assistant origins before migrating after prefix eviction", asy
   createAcpExtension({ modelContextLimit: 200_000 })(first.api);
   await first.handlers.get("context")![0]!({ type: "context", messages: [assistant("call-a")] }, makeCtx());
   const initial = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
-  const ref = initial.messageRefs.byRaw["live-0"];
+  const ref = initial.messageRefs.byRaw[liveRawKeys(initial)[0]!];
   assert.ok(ref);
   const second = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(second.api);
@@ -577,7 +586,7 @@ test("omp reloads assistant origins before migrating after prefix eviction", asy
   await second.handlers.get("context")![0]!({ type: "context", messages: [assistant("call-a")] }, makeCtx());
   const saved = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
   assert.equal(saved.messageRefs.byRaw["e-assistant"], ref);
-  assert.equal(saved.messageRefs.byRaw["live-0"], undefined);
+  assert.equal(liveRawKeys(saved).length, 0);
   assert.equal(saved.messageRefs.byRef[ref], "e-assistant");
 });
 
@@ -591,7 +600,7 @@ test("omp preserves stable destination when migrating a colliding live ref", asy
   createAcpExtension({ modelContextLimit: 200_000 })(first.api);
   await first.handlers.get("context")![0]!({ type: "context", messages: [assistant("call-a")] }, makeCtx());
   const initial = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
-  const liveRef = initial.messageRefs.byRaw["live-0"];
+  const liveRef = initial.messageRefs.byRaw[liveRawKeys(initial)[0]!];
   assert.ok(liveRef);
   const stableRef = "m09999";
   initial.messageRefs.byRaw["e-assistant"] = stableRef;
@@ -605,7 +614,7 @@ test("omp preserves stable destination when migrating a colliding live ref", asy
   const saved = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
   assert.equal(saved.messageRefs.byRaw["e-assistant"], stableRef);
   assert.equal(saved.messageRefs.byRef[stableRef], "e-assistant");
-  assert.equal(saved.messageRefs.byRaw["live-0"], undefined);
+  assert.equal(liveRawKeys(saved).length, 0);
   assert.equal(saved.messageRefs.byRef[liveRef], undefined);
 });
 
@@ -620,7 +629,9 @@ test.skip("empty live context preserves refs created for an unpersisted message"
   await handlers.get("context")![0]!({ type: "context", messages: [{ role: "user", content: "live-only" }] }, ctx);
   await handlers.get("context")![0]!({ type: "context", messages: [] }, ctx);
   const state = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
-  assert.equal(state.messageRefs.byRaw["live-0"], "m00001");
+  const keys = liveRawKeys(state);
+  assert.equal(keys.length, 1);
+  assert.equal(state.messageRefs.byRaw[keys[0]!], "m00001");
 });
 test("omp keeps compression blocks active when provider context has an extra prefix", async (t) => {
   const { api, handlers } = captureApi();
