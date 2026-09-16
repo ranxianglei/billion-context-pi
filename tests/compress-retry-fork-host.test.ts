@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFile, rm, writeFile } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { createAcpExtension } from "../src/index.js";
 import { retryBreakerKey } from "../src/runtime.js";
 import { isCompressNoopText } from "../src/compress-tool.js";
@@ -9,14 +9,14 @@ import { setRunNpmForTest } from "../src/update.js";
 // Issue #453 (evidence from the #452 log): under a declared fork host
 // (PI_ACP_FORK_HOST=1, e.g. omp) the context handler keyed the compress-retry
 // circuit breaker on lastTurnBoundaryId(MERGED entries) — and the merged tail
-// carries volatile live-N ids for messages the host has not persisted yet.
-// The current user message stays live across every context fire of a long
-// tool loop and renumbers between fires (its own prior ref blocks
-// nextLiveId's base candidate), so the breaker's failTurnKey churned and the
-// counter reset on nearly every fire: the MAX_COMPRESS_ATTEMPTS cap never
-// latched, and a session pinned at emergency kept getting emergency-injected
-// and burning guaranteed-to-fail compress attempts forever (#452 log: cap →
-// inject every ~45 s).
+// carries live ids for messages the host has not persisted yet. The current
+// user message stays live across every context fire of a long tool loop and
+// its host view drifts between fires (the extension's own ref-tag/token-count
+// mutations ride along in the text), so it re-mints a fresh content-addressed
+// id per fire (#459) and the breaker's failTurnKey churned: the
+// MAX_COMPRESS_ATTEMPTS cap never latched, and a session pinned at emergency
+// kept getting emergency-injected and burning guaranteed-to-fail compress
+// attempts forever (#452 log: cap → inject every ~45 s).
 //
 // Contract under test: the breaker keys off PERSISTED boundaries only
 // (retryBreakerKey — immutable ids), so the cap latches through live-id
@@ -105,8 +105,8 @@ test("issue #453: cap latches through fork-host live-id churn; new persisted use
     // event.messages carries RAW AgentMessages — the host's exact send view
     // (cf. prefix-stab.test.ts). Feeding entry-shaped objects as messages
     // breaks mergeLiveEntries' identity matching entirely: every entry
-    // re-mints a live-N id and no turn boundary is ever recognized, so
-    // outcome collection sees nothing.
+    // re-mints a content-addressed live id and no turn boundary is ever
+    // recognized, so outcome collection sees nothing.
     const persisted: any[] = [roleMsg("p-u1", "user", "u1 " + ZH), roleMsg("p-a1", "assistant", "a1 " + ZH)];
     const rawOf = (e: any) => ({ ...e.message });
     const U3_BASE = "u3 " + ZH;
@@ -119,43 +119,20 @@ test("issue #453: cap latches through fork-host live-id churn; new persisted use
     // Stuck-turn dynamics (the #452 log pattern): u3 stays unpersisted across
     // every fire, and each host resend drifts from the prior send view (the
     // extension's own ref-tag/token-count mutations ride along in the text),
-    // so origin identity misses and u3 re-mints — with its own prior ref
-    // occupying the base live-N slot in state.messageRefs.byRaw, a fresh
-    // volatile id per fire. The merged-view boundary id churns; the persisted
-    // boundary stays p-u1.
-    //
-    // This minimal harness prunes live-tail refs on every tool-side
-    // load/apply/save cycle (handleCompress saves the persisted-only view),
-    // so seedLiveSlots re-establishes that production invariant before each
-    // fire: occupy the slots through the previously-minted id so the next
-    // re-mint lands one slot higher.
-    let mintCeiling = 3;
-    const seedLiveSlots = async () => {
-      const st = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
-      st.messageRefs ??= { byRaw: {}, byRef: {} };
-      for (let i = 2; i <= mintCeiling; i++) {
-        const raw = `live-${i}`;
-        const ref = `m009${String(i).padStart(2, "0")}`;
-        st.messageRefs.byRaw[raw] ??= ref;
-        st.messageRefs.byRef[ref] ??= raw;
-      }
-      await writeFile(`${stateFile}.acp.json`, JSON.stringify(st));
-    };
-
+    // so u3 re-mints a fresh content-addressed live id per fire (#459). The
+    // merged-view boundary id churns; the persisted boundary stays p-u1.
     let drift = 0;
     let live: any[] = [{ role: "user", content: "u1 " + ZH, timestamp: 0 }, { role: "assistant", content: "a1 " + ZH, timestamp: 0 }, rawU3(0)];
     const fire = () => handlers.get("context")![0]!({ type: "context", messages: live }, ctx);
     await fire();
 
-    assert.equal(retryBreakerKey(ctx.sessionManager), "p-u1", "breaker key is the persisted boundary, not the live-N tail");
+    assert.equal(retryBreakerKey(ctx.sessionManager), "p-u1", "breaker key is the persisted boundary, not the live tail");
 
     const compressTool = api.tools.find((t: any) => t.name === "compress")!;
     const S = () => [{ startId: "m00999", endId: "m00100", summary: "dead refs" }];
     const run = async (id: string) => {
       const text = textOf(await (compressTool as any).execute(id, { content: S() }, undefined, undefined, ctx));
       if (!persisted.some((e) => e.id === "p-u3")) {
-        await seedLiveSlots();
-        mintCeiling += 1;
         drift += 1;
         live = [live[0]!, live[1]!, rawU3(drift), ...live.slice(3)];
       }
