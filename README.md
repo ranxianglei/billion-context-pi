@@ -221,6 +221,18 @@ billion-context-pi works out of the box with no configuration — it reads your 
 
 Behavior is tuned via an optional `acp.json` config file (`~/.pi/acp.json` for global defaults, `<project>/.pi/acp.json` for per-project overrides) plus a few environment variables. For the complete reference — every key, type, default, and the precedence order — see **[CONFIGURATION.md](./CONFIGURATION.md)** ([中文](./CONFIGURATION.zh-CN.md)).
 
+### Strict JSON
+
+`acp.json` is parsed by a **strict** JSON parser. Any of these makes the whole file fail to parse, so **every setting in it is ignored** and ACP behaves as if the file were absent:
+
+- object keys must be double-quoted — `"enabled": false`, not `enabled: false`
+- no trailing commas — `{ "enabled": false }`, not `{ "enabled": false, }`
+- no comments — `//` and `/* */` are not allowed
+- no BOM — Windows Notepad saves "UTF-8 with BOM" by default, which breaks parsing; use *Save as* → encoding **UTF-8** (not "UTF-8 with BOM"), or edit in VS Code (plain UTF-8)
+- `enabled` must be a literal boolean `false`, not the string `"false"`
+
+A malformed file no longer fails silently: the failure is printed to stderr at startup, shown as a warning at session start (TUI), written to `~/.pi/acp.log`, and listed under the `acp.json` section of `/acp` with the specific reason. Note the `enabled` master switch is read once when the agent starts, so after fixing the file you must fully restart the agent.
+
 ### Logging
 
 billion-context-pi writes a structured, always-on log to `~/.pi/acp.log` (override with `ACP_LOG_FILE`). It covers the model's whole working session and is useful for diagnosing problems:

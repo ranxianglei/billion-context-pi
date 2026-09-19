@@ -4,11 +4,8 @@ import type {
   ExtensionFactory,
   SessionMessageEntry,
 } from "@earendil-works/pi-coding-agent";
-import { CONFIG_DIR_NAME } from "./config-dir.js";
 import type { KeyId } from "@earendil-works/pi-tui";
-import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { readAcpFiles, resolveAcpDisabled, enabledTypeHint } from "./user-config.js";
 import type { CoreMessage, NudgeDecision, CompressionBlock, Prompts } from "acp-kernel";
 import { renderNudgeText, resolvePrompts, defaultPrompts, viableRanges } from "acp-kernel";
 import { type AdapterConfig, resolveDelegate, resolveHostSession, DEFAULT_DELEGATE_POLICY } from "./config.js";
@@ -141,21 +138,22 @@ export default createAcpExtension();
 // no tools, no system prompt, no context transform, and no compaction-cancel,
 // leaving Pi's native context management in control (issue #250: models too
 // small to handle ACP). Project acp.json overrides global; only a literal
-// enabled:true/false counts; missing/bad files mean "not disabled".
+// enabled:true/false counts; missing/bad files mean "not disabled". A bad file
+// stays "not disabled" but is now reported loudly (#467): here at startup (all
+// host modes) and again at session_start (TUI); /acp shows it on demand.
 function userConfigDisabled(cwd: string): boolean {
-  let disabled: boolean | undefined;
-  for (const base of [join(homedir(), CONFIG_DIR_NAME), join(cwd, CONFIG_DIR_NAME)]) {
-    try {
-      const parsed: unknown = JSON.parse(readFileSync(join(base, "acp.json"), "utf8"));
-      if (parsed && typeof parsed === "object") {
-        const v = (parsed as Record<string, unknown>).enabled;
-        if (v === true || v === false) disabled = v;
-      }
-    } catch {
-      // missing file / bad JSON → not disabled
-    }
+  const files = readAcpFiles(cwd);
+  for (const f of files) {
+    if (f.status !== "failed") continue;
+    console.error(`[bcp] acp.json ${f.scope} config could not be parsed: ${f.file}\n      ${f.reason}\n      Ignoring it — ACP stays ENABLED. Fix the JSON (strict JSON: quoted keys, no comments/trailing commas/BOM) and restart, or run /acp to re-check.`);
+    logWarn("config", { event: "load-failed", scope: f.scope, file: f.file, error: f.reason });
   }
-  return disabled === false;
+  const typeHint = enabledTypeHint(files);
+  if (typeHint) {
+    console.error(`[bcp] acp.json: ${typeHint}`);
+    logWarn("config", { event: "enabled-type-invalid", detail: typeHint });
+  }
+  return resolveAcpDisabled(files);
 }
 
 // ACP owns compression; cancel Pi's built-in auto-compaction entirely (mirrors
@@ -242,6 +240,17 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     setDelegateDisplayUsage("separate");
     setDelegatePolicy(DEFAULT_DELEGATE_POLICY);
     const sid = ctx.sessionManager.getSessionId();
+    {
+      const cfgFiles = readAcpFiles(ctx.cwd);
+      const problems: string[] = [];
+      for (const x of cfgFiles) if (x.status === "failed") problems.push(`${x.scope} acp.json ${x.file}: ${x.reason}`);
+      const typeHint = enabledTypeHint(cfgFiles);
+      if (typeHint) problems.push(typeHint);
+      if (problems.length > 0 && ctx.hasUI) {
+        logWarn("config", { event: "config-load-problems", sid, count: problems.length });
+        ctx.ui.notify(`[ACP] acp.json could not be applied:\n${problems.map((p) => "  - " + p).join("\n")}\nACP is running with defaults for those settings. Fix the file and restart, or run /acp.`, "warning");
+      }
+    }
     // Model identity on every session start: diagnosing "which model loops
     // on compress rejections" from user logs required cwd forensics — the log
     // never said which model it was. id + contextWindow also catch window

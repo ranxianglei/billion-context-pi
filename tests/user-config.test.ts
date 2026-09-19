@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
-import { loadUserConfig, applyUserConfig } from "../src/user-config.js";
+import { loadUserConfig, applyUserConfig, diagnoseJsonFailure, readAcpFiles, resolveAcpDisabled, enabledTypeHint, type AcpFileResult } from "../src/user-config.js";
 import type { AdapterConfig } from "../src/config.js";
 
 const CONFIG_DIR_NAME = ".pi";
@@ -222,4 +222,130 @@ test("applyUserConfig supports all user config keys", () => {
   assert.equal(result.toolBashDefaultTimeout, 120);
   assert.equal(result.toolOutputMaxBytes, 100_000);
   assert.equal(result.outputHeadroomMaxPct, 0.1);
+});
+
+function mkOk(scope: "global" | "project", value: Record<string, unknown>): AcpFileResult {
+  return { file: `/x/${scope}/acp.json`, scope, status: "ok", value };
+}
+
+function mkFailed(scope: "global" | "project"): AcpFileResult {
+  return { file: `/x/${scope}/acp.json`, scope, status: "failed", reason: "bad" };
+}
+
+async function writeRawAcp(baseDir: string, raw: string): Promise<void> {
+  const d = path.join(baseDir, CONFIG_DIR_NAME);
+  await fs.mkdir(d, { recursive: true });
+  await fs.writeFile(path.join(d, "acp.json"), raw, "utf8");
+}
+
+test("diagnoseJsonFailure classifies BOM prefix", () => {
+  assert.match(diagnoseJsonFailure("\uFEFF{}", new Error("Unexpected token")), /BOM/);
+});
+
+test("diagnoseJsonFailure classifies trailing comma", () => {
+  assert.match(diagnoseJsonFailure('{ "a": 1, }', new Error("Expected double-quoted property name")), /trailing comma/);
+});
+
+test("diagnoseJsonFailure classifies comment", () => {
+  assert.match(diagnoseJsonFailure('{ // c\n "a": 1 }', new Error("Unexpected token '/'")), /comment/i);
+});
+
+test("diagnoseJsonFailure classifies unquoted key", () => {
+  assert.match(diagnoseJsonFailure("{ a: 1 }", new Error("Expected property name or '}' in JSON at position 2")), /double quotes/);
+});
+
+test("diagnoseJsonFailure falls back to parser message", () => {
+  assert.equal(diagnoseJsonFailure("{}", new Error("custom boom")), "custom boom");
+});
+
+test("readAcpFiles reports missing for absent files", async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "acp-h-"));
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "acp-c-"));
+  const env = snapshotHome(); setHome(home);
+  try {
+    const res = readAcpFiles(cwd);
+    assert.deepEqual(res.map((r) => [r.scope, r.status]), [["global", "missing"], ["project", "missing"]]);
+  } finally {
+    restoreHome(env);
+    await Promise.all([fs.rm(home, { recursive: true, force: true }), fs.rm(cwd, { recursive: true, force: true })]);
+  }
+});
+
+test("readAcpFiles parses valid global and project", async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "acp-h-"));
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "acp-c-"));
+  const env = snapshotHome(); setHome(home);
+  try {
+    await writeConfig(home, { debug: true });
+    await writeConfig(cwd, { modelContextLimit: 123 });
+    const res = readAcpFiles(cwd);
+    assert.equal(res[0]?.status, "ok");
+    assert.equal(res[0]?.value?.debug, true);
+    assert.equal(res[1]?.status, "ok");
+    assert.equal(res[1]?.value?.modelContextLimit, 123);
+  } finally {
+    restoreHome(env);
+    await Promise.all([fs.rm(home, { recursive: true, force: true }), fs.rm(cwd, { recursive: true, force: true })]);
+  }
+});
+
+test("readAcpFiles flags malformed project file with hint, leaves global intact", async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "acp-h-"));
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "acp-c-"));
+  const env = snapshotHome(); setHome(home);
+  try {
+    await writeConfig(home, { debug: true });
+    await writeRawAcp(cwd, "{ enabled : false }");
+    const res = readAcpFiles(cwd);
+    assert.equal(res[0]?.status, "ok");
+    assert.equal(res[1]?.status, "failed");
+    assert.match(res[1]?.reason ?? "", /double quotes/);
+  } finally {
+    restoreHome(env);
+    await Promise.all([fs.rm(home, { recursive: true, force: true }), fs.rm(cwd, { recursive: true, force: true })]);
+  }
+});
+
+test("readAcpFiles flags BOM-prefixed global file", async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "acp-h-"));
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "acp-c-"));
+  const env = snapshotHome(); setHome(home);
+  try {
+    await writeRawAcp(home, "\uFEFF{ \"enabled\": false }");
+    const res = readAcpFiles(cwd);
+    assert.equal(res[0]?.status, "failed");
+    assert.match(res[0]?.reason ?? "", /BOM/);
+    assert.equal(res[1]?.status, "missing");
+  } finally {
+    restoreHome(env);
+    await Promise.all([fs.rm(home, { recursive: true, force: true }), fs.rm(cwd, { recursive: true, force: true })]);
+  }
+});
+
+test("resolveAcpDisabled: empty -> not disabled", () => {
+  assert.equal(resolveAcpDisabled([]), false);
+});
+
+test("resolveAcpDisabled: literal false disables, true and non-boolean do not", () => {
+  assert.equal(resolveAcpDisabled([mkOk("global", { enabled: false })]), true);
+  assert.equal(resolveAcpDisabled([mkOk("global", { enabled: true })]), false);
+  assert.equal(resolveAcpDisabled([mkOk("global", { enabled: "false" })]), false);
+});
+
+test("resolveAcpDisabled: project overrides global", () => {
+  assert.equal(resolveAcpDisabled([mkOk("global", { enabled: true }), mkOk("project", { enabled: false })]), true);
+  assert.equal(resolveAcpDisabled([mkOk("global", { enabled: false }), mkOk("project", { enabled: true })]), false);
+});
+
+test("resolveAcpDisabled: failed file ignored, valid global stands", () => {
+  assert.equal(resolveAcpDisabled([mkOk("global", { enabled: false }), mkFailed("project")]), true);
+});
+
+test("enabledTypeHint: silent for absent/boolean enabled, flags non-boolean", () => {
+  assert.equal(enabledTypeHint([]), null);
+  assert.equal(enabledTypeHint([mkOk("global", { enabled: false })]), null);
+  assert.equal(enabledTypeHint([mkOk("global", { other: 1 })]), null);
+  const h = enabledTypeHint([mkOk("global", { enabled: "false" })]);
+  assert.match(h ?? "", /boolean/);
+  assert.match(h ?? "", /"false"/);
 });

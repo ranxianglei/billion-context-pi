@@ -1,4 +1,4 @@
-import { promises as fs } from "node:fs";
+import { readFileSync } from "node:fs";
 import * as path from "node:path";
 import { homedir } from "node:os";
 import { CONFIG_DIR_NAME } from "./config-dir.js";
@@ -36,32 +36,110 @@ export interface UserAcpConfig {
   hostSession?: boolean | HostSessionConfig;
 }
 
-/** Read global + project acp.json, project overrides global. Returns {} on any
- *  error (missing file, bad JSON) — never throws. */
-export async function loadUserConfig(cwd: string): Promise<UserAcpConfig> {
-  const home = homedir();
-  const merged: UserAcpConfig = {};
-  for (const base of [join(home, CONFIG_DIR_NAME), join(cwd, CONFIG_DIR_NAME)]) {
-    const file = join(base, "acp.json");
-    try {
-      const raw = await fs.readFile(file, "utf8");
-      const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed === "object") {
-        Object.assign(merged, pickKnown(parsed));
-        debug.event("config-loaded", { file });
-      }
-    } catch (e) {
-      const code = (e as NodeJS.ErrnoException).code;
-      if (code !== "ENOENT") {
-        logWarn("config", { event: "load-failed", file, error: e instanceof Error ? e.message : String(e) });
-      }
-    }
-  }
-  return merged;
+export type AcpFileStatus = "missing" | "ok" | "failed";
+export type AcpFileScope = "global" | "project";
+
+export interface AcpFileResult {
+  file: string;
+  scope: AcpFileScope;
+  status: AcpFileStatus;
+  /** only when status === "failed" */
+  reason?: string;
+  /** only when status === "ok" */
+  value?: Record<string, unknown>;
 }
 
 function join(... parts: string[]): string {
   return path.join(...parts);
+}
+
+// Ordered regex heuristics: most specific common cause first, parser msg as fallback.
+export function diagnoseJsonFailure(raw: string, err: unknown): string {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (raw.length > 0 && raw.charCodeAt(0) === 0xfeff) {
+    return 'file starts with a BOM (byte-order mark); save it as plain UTF-8 without BOM (Windows Notepad → Save as → encoding "UTF-8", not "UTF-8 with BOM")';
+  }
+  if (/\,\s*[}\]]/.test(raw)) {
+    return "trailing comma is not allowed in JSON (remove the last comma before } or ])";
+  }
+  if (/\/\/|\/\*/.test(raw)) {
+    return "comments are not allowed in JSON (delete // and /* */ lines)";
+  }
+  if (/property name/i.test(msg)) {
+    return 'object keys must be wrapped in double quotes (write "enabled": false, not enabled: false)';
+  }
+  if (/Unexpected token/i.test(msg)) {
+    return `invalid JSON syntax (${msg})`;
+  }
+  return msg;
+}
+
+export function readAcpFiles(cwd: string): AcpFileResult[] {
+  const home = homedir();
+  return [
+    readAcpFile(join(home, CONFIG_DIR_NAME, "acp.json"), "global"),
+    readAcpFile(join(cwd, CONFIG_DIR_NAME, "acp.json"), "project"),
+  ];
+}
+
+function readAcpFile(file: string, scope: AcpFileScope): AcpFileResult {
+  let raw: string;
+  try {
+    raw = readFileSync(file, "utf8");
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return { file, scope, status: "missing" };
+    return { file, scope, status: "failed", reason: `cannot read file: ${e instanceof Error ? e.message : String(e)}` };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    return { file, scope, status: "failed", reason: diagnoseJsonFailure(raw, e) };
+  }
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+    return { file, scope, status: "ok", value: parsed as Record<string, unknown> };
+  }
+  return { file, scope, status: "failed", reason: `top-level JSON must be an object, got ${Array.isArray(parsed) ? "an array" : typeof parsed}` };
+}
+
+// Project overrides global; only a literal boolean counts; missing/failed ignored.
+export function resolveAcpDisabled(files: AcpFileResult[]): boolean {
+  let disabled: boolean | undefined;
+  for (const f of files) {
+    if (f.status !== "ok" || !f.value) continue;
+    const v = f.value.enabled;
+    if (v === true || v === false) disabled = v;
+  }
+  return disabled === false;
+}
+
+export function enabledTypeHint(files: AcpFileResult[]): string | null {
+  const problems: string[] = [];
+  for (const f of files) {
+    if (f.status !== "ok" || !f.value) continue;
+    if (!("enabled" in f.value)) continue;
+    const v = f.value.enabled;
+    if (typeof v !== "boolean") {
+      problems.push(`${f.file}: "enabled" must be a boolean (true/false), got ${JSON.stringify(v)}`);
+    }
+  }
+  return problems.length > 0 ? problems.join("; ") : null;
+}
+
+// Project overrides global; returns {} on any per-file error (never throws).
+// Failed files log a `load-failed` warn carrying the diagnosed reason (#467).
+export async function loadUserConfig(cwd: string): Promise<UserAcpConfig> {
+  const merged: UserAcpConfig = {};
+  for (const f of readAcpFiles(cwd)) {
+    if (f.status === "ok" && f.value) {
+      Object.assign(merged, pickKnown(f.value));
+      debug.event("config-loaded", { file: f.file });
+    } else if (f.status === "failed") {
+      logWarn("config", { event: "load-failed", scope: f.scope, file: f.file, error: f.reason });
+    }
+  }
+  return merged;
 }
 
 const KNOWN = new Set([

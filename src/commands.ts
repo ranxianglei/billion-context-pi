@@ -15,6 +15,7 @@ import { openFleetInspector } from "./fleet-inspector.js";
 import { resolveDelegate } from "./config.js";
 import { ensureSubagentAcpTools } from "./setup-subagent-tools.js";
 import { cacheReportText } from "./cache-tool.js";
+import { readAcpFiles, enabledTypeHint } from "./user-config.js";
 
 declare const CURRENT_VERSION: string;
 
@@ -265,6 +266,18 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
     const costStr = cost > 0 ? ` ($${cost.toFixed(4)})` : "";
     text += "\n\n── Session delegate usage (excluded from main totals) ──\n";
     text += `Tokens: ${delegateUsage.input.toLocaleString()} in, ${delegateUsage.output.toLocaleString()} out (${delegateUsage.totalTokens.toLocaleString()} total)${costStr}`;
+  }
+  {
+    const cwd = ctx.cwd ?? process.cwd();
+    const cfgFiles = readAcpFiles(cwd);
+    const cfgLines = cfgFiles.map((f) => {
+      if (f.status === "missing") return `${f.scope}: (absent) ${f.file}`;
+      if (f.status === "ok") return `${f.scope}: ok — ${f.file}`;
+      return `${f.scope}: FAILED — ${f.file}\n    ${f.reason ?? ""}`;
+    });
+    text += "\n\n── acp.json ──\n" + cfgLines.join("\n");
+    const t = enabledTypeHint(cfgFiles);
+    if (t) text += `\n    ⚠ ${t}`;
   }
   return text;
 }
