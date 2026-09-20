@@ -135,6 +135,7 @@ All keys below are currently **ACTIVE**.
 | `repetitionGuard` | boolean \| object | `true` | 🟢 ACTIVE | Break infinite loops of byte-identical tool calls (warn at 3 consecutive, block + abort at 5). |
 | `degenerationGuard` | boolean \| object | `true` | 🟢 ACTIVE | Collapse degenerate single-codepoint runs (e.g. 4655×「【」) in assistant text/thinking of the outgoing view and inject a one-shot recovery notice — breaks the abort loop where pi replays degenerated thinking back to the provider on every request (#351). |
 | `hostSession` | boolean \| object | `false` | 🟢 ACTIVE | Turn-boundary policy for multi-session hosts: count injected `custom_message` entries as turn starts. Off by default (pi-native behavior). |
+| `rules` | boolean | `false` | 🟢 ACTIVE | Register the opt-in `acp_rule` record tool: short, principle-level reminders hard-protected from compression. Off by default. |
 
 **Delegate keys**
 
@@ -303,6 +304,19 @@ All keys below are currently **ACTIVE**.
   ```
 
   without restating (or freezing a stale hand-copy of) the built-in list, and it keeps following built-in evolution. Composable with an explicit `neverPreserveRecentTools` (subtraction applies to the explicit list too); glob-suffix patterns subtract matching entries (`"bash*"` removes `bash`). **⚠ Empty array `[]` is INVALID** here — it is a pure no-op, so a bare `[]` is almost certainly a typo for `neverPreserveRecentTools: []` (the max-protection escape hatch); malformed values warn and fall back to the adapter value.
+
+---
+
+## Rules
+
+The `rules` key controls the `acp_rule` record tool — an opt-in way to persist short, principle-level reminders in the session so they survive context compression.
+
+### `rules`
+
+- **Type:** `boolean`
+- **Default:** `false`
+- **Status:** 🟢 ACTIVE
+- **Description:** When `true`, registers the `acp_rule` tool on session start. Call it with a short reminder to record it (echoes `Recorded ruleN: …`); call it with no argument to list all recorded rules. Rules live in the session's ACP state sidecar (persisted across restarts) and are **hard-protected from compression** — their tool call and result stay visible even when everything around them is compressed away. There is no system-prompt involvement: usage guidance lives entirely in the tool description, and nothing is re-injected per turn. Validation errors (empty / over-length / duplicate / limit reached) are returned verbatim to the model. Defaults: up to 50 rules × 300 chars each.
 
 ---
 

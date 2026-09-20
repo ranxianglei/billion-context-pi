@@ -131,6 +131,19 @@ test("loadUserConfig reads hostSession (object form survives pickKnown)", async 
   }
 });
 
+test("loadUserConfig reads rules (boolean survives pickKnown)", async () => {
+  const tmpDir = path.join(os.tmpdir(), `acp-test-rules-${Date.now()}`);
+  await fs.mkdir(tmpDir, { recursive: true });
+  await writeConfig(tmpDir, { rules: true, unknownKey: "nope" });
+  try {
+    const config = await loadUserConfig(tmpDir);
+    assert.equal(config.rules, true, "rules is a known key");
+    assert.equal((config as Record<string, unknown>).unknownKey, undefined, "unknown keys still filtered");
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
 test("loadUserConfig ignores unknown keys", async () => {
   const tmpDir = path.join(os.tmpdir(), `acp-test-unknown-${Date.now()}`);
   await fs.mkdir(tmpDir, { recursive: true });
@@ -213,6 +226,7 @@ test("applyUserConfig supports all user config keys", () => {
     toolBashDefaultTimeout: 120,
     toolOutputMaxBytes: 100_000,
     outputHeadroomMaxPct: 0.1,
+    rules: true,
   };
   const result = applyUserConfig(adapter, user);
   assert.equal(result.debug, true);
@@ -222,6 +236,7 @@ test("applyUserConfig supports all user config keys", () => {
   assert.equal(result.toolBashDefaultTimeout, 120);
   assert.equal(result.toolOutputMaxBytes, 100_000);
   assert.equal(result.outputHeadroomMaxPct, 0.1);
+  assert.equal(result.rules, true);
 });
 
 test("loadUserConfig picks up protection keys from acp.json", async () => {
