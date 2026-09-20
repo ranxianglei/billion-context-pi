@@ -10,18 +10,19 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { CoreMessage, NudgeDecision, CompressionBlock, Prompts } from "acp-kernel";
-import { renderNudgeText, resolvePrompts, defaultPrompts, viableRanges } from "acp-kernel";
-import { type AdapterConfig, resolveDelegate, resolveHostSession, DEFAULT_DELEGATE_POLICY } from "./config.js";
+import { renderNudgeText, resolvePrompts, defaultPrompts, viableRanges, buildAbsorbSystemPrompt } from "acp-kernel";
+import { type AdapterConfig, resolveDelegate, resolveHostSession, resolveAbsorb, DEFAULT_DELEGATE_POLICY } from "./config.js";
 import { createRuntime, isPiHost, retryBreakerKey, type AcpRuntime } from "./runtime.js";
 import { makeCompressTool, isCompressSuccessText, isCompressNoopText } from "./compress-tool.js";
 import { makeDecompressTool } from "./decompress-tool.js";
 import { makeSearchTool } from "./search-tool.js";
 import { makeStatusTool } from "./status-tool.js";
 import { makeCacheTool } from "./cache-tool.js";
+import { makeAbsorbTool } from "./absorb-tool.js";
 import { makeDelegateTool, makeDelegateWaitTool, makeDelegateCancelTool, runningRunsSnapshot, resetDelegateUsage, setDelegateDisplayUsage, setDelegatePolicy, setDelegateDefaults, setDelegateNotifyIfRead, markDelegateResultRead, markDelegateRunReadByCommand } from "./delegate-tool.js";
 import { makeCommands } from "./commands.js";
 import { mergeSurface, readToolSurfaceWithPacks, resolveActivePack, resolvePackName, surfaceMetaOf } from "./prompt-pack.js";
-import type { NudgeSectionsConfig } from "./surface.js";
+import type { NudgeSectionsConfig, ToolPromptOverrides } from "./surface.js";
 import { coreOutToAgentMessages, extractText } from "./messages.js";
 import { liveOnlyTail } from "./live-only-tail.js";
 import { carryHostSystemMessages } from "./system-passthrough.js";
@@ -128,6 +129,7 @@ export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactor
     pi.registerTool(makeSearchTool(runtime, toolSurface.search_context));
     pi.registerTool(makeStatusTool(runtime, toolSurface.acp_status));
     pi.registerTool(makeCacheTool(runtime, toolSurface.acp_cache));
+    registerAbsorbIfEnabled(pi, runtime, runtime.adapter, toolSurface.absorb);
     for (const { name, options } of makeCommands(runtime, pi)) {
       pi.registerCommand(name, options);
     }
@@ -284,6 +286,7 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     } catch (e) {
       logThrow("config", e, { sid, phase: "session_start" });
     }
+    registerAbsorbIfEnabled(pi, runtime, runtime.adapter, readToolSurfaceWithPacks(ctx.cwd).absorb);
     runtime.delegateStoodDown = delegateStoodDown;
     try {
       runtime.setPrompts(resolvePrompts(runtime.adapter.prompts, { acknowledgeRisk: runtime.adapter.acknowledgePromptsRisk === true }));
@@ -739,6 +742,12 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
 
 let lastPackPromptGateKeys: string | null = null;
 
+function registerAbsorbIfEnabled(pi: ExtensionAPI, runtime: AcpRuntime, adapter: AdapterConfig, overrides?: ToolPromptOverrides): void {
+  const absorb = resolveAbsorb(adapter);
+  if (!absorb.enabled) return;
+  pi.registerTool(makeAbsorbTool(runtime, absorb.toolName, overrides));
+}
+
 function wireSystemPrompt(pi: ExtensionAPI, runtime: AcpRuntime): void {
   pi.on("before_agent_start", (event, ctx) => {
     // Refused host (OMP): don't inject the ACP system prompt — the model must
@@ -770,10 +779,12 @@ function wireSystemPrompt(pi: ExtensionAPI, runtime: AcpRuntime): void {
       runtime.setPrompts(defaultPrompts);
     }
     const delegate = resolveDelegate(runtime.adapter).enabled && !runtime.delegateStoodDown;
-    const acp = buildAcpSystemPrompt(runtime.prompts, merged.promptSections);
+    const sections: string[] = [buildAcpSystemPrompt(runtime.prompts, merged.promptSections)];
+    const absorb = resolveAbsorb(runtime.adapter);
+    if (absorb.enabled) sections.push(buildAbsorbSystemPrompt(absorb.toolName));
     const delegateText = merged.delegatePrompt !== undefined ? merged.delegatePrompt : ACP_DELEGATE_PROMPT;
-    const prompt = delegate && delegateText !== null ? `${acp}\n${delegateText}` : acp;
-    return { systemPrompt: formatSystemPromptForEvent(event.systemPrompt, prompt) };
+    if (delegate && delegateText !== null) sections.push(delegateText);
+    return { systemPrompt: formatSystemPromptForEvent(event.systemPrompt, sections.join("\n")) };
   });
 }
 

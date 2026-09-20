@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { homedir } from "node:os";
 import { CONFIG_DIR_NAME } from "./config-dir.js";
 import type { Prompts } from "acp-kernel";
-import type { AdapterConfig, CompressConfig, DelegateConfig, HostSessionConfig, RepetitionGuardConfig } from "./config.js";
+import type { AbsorbSettings, AdapterConfig, CompressConfig, DelegateConfig, HostSessionConfig, RepetitionGuardConfig } from "./config.js";
 import type { PiPromptSections } from "./system-prompt.js";
 import type { NudgeSectionsConfig, ToolPromptsConfig } from "./surface.js";
 import type { DegenerationGuardConfig } from "./degeneration.js";
@@ -22,6 +22,7 @@ export interface UserAcpConfig {
   toolOutputMaxBytes?: number;
   delegate?: boolean | DelegateConfig;
   compress?: CompressConfig;
+  absorb?: boolean | AbsorbSettings;
   outputHeadroomMaxPct?: number | string;
   throttleRetry?: boolean | ThrottleRetryConfig;
   repetitionGuard?: boolean | RepetitionGuardConfig;
@@ -67,7 +68,7 @@ function join(... parts: string[]): string {
 const KNOWN = new Set([
   "enabled", "debug", "autoUpdate", "modelContextLimit",
   "toolBashDefaultTimeout", "toolOutputMaxBytes",
-  "delegate", "compress", "displayUsage", "throttleRetry",
+  "delegate", "compress", "absorb", "displayUsage", "throttleRetry",
   "outputHeadroomMaxPct",
   "repetitionGuard", "degenerationGuard",
   "prompts", "acknowledgePromptsRisk",

@@ -1,4 +1,4 @@
-import { defaultConfig, type Config, type Prompts } from "acp-kernel";
+import { defaultConfig, DEFAULT_ABSORB_CONFIG, type AbsorbConfig, type Config, type Prompts } from "acp-kernel";
 import type { CompressReasoningConfig } from "./reasoning-drop.js";
 import type { DegenerationGuardConfig } from "./degeneration.js";
 import type { ThrottleRetryConfig } from "./throttle-retry.js";
@@ -261,6 +261,14 @@ export interface AdapterConfig {
   delegate?: boolean | DelegateConfig;
   /** Compression tuning. */
   compress?: CompressConfig;
+  /** Instant tool-result absorption (#14): when enabled, large tool results
+   *  get a forced `[ACP absorb]` suffix demanding an immediate
+   *  `absorb({ ref, summary })` distill, and the original tool-call + result
+   *  pair is hidden from later turns (the absorb call is the durable record).
+   *  For small-context setups where waiting for a nudge starves the model of
+   *  working room. Accepts a boolean shorthand (`true` enables with kernel
+   *  defaults) or an AbsorbSettings object. Default: disabled. */
+  absorb?: boolean | AbsorbSettings;
   /** Provider token-throttle (Bedrock "Too many tokens, please wait before
    *  trying again.") auto-retry. Accepts a boolean shorthand (`false`
    *  disables) or a ThrottleRetryConfig object. Default: enabled, 10 retries,
@@ -514,6 +522,34 @@ export function resolveCompress(
   return mergeCompress(compress, prov, model);
 }
 
+/** Instant tool-result absorption settings (see AdapterConfig.absorb). */
+export interface AbsorbSettings {
+  enabled?: boolean;
+  toolName?: string;
+  minToolTokens?: number;
+  contextThresholdPct?: number | string;
+  excludeTools?: string[];
+}
+
+/** Resolve the absorb shorthand/object into kernel-ready settings. Kernel
+ *  defaults (DEFAULT_ABSORB_CONFIG) fill anything the user leaves unset; the
+ *  boolean shorthand enables with all defaults. Default: off. */
+export function resolveAbsorb(adapter: AdapterConfig): AbsorbConfig {
+  const a = adapter.absorb;
+  if (a === true) return { ...DEFAULT_ABSORB_CONFIG, enabled: true };
+  if (a && typeof a === "object") {
+    return {
+      ...DEFAULT_ABSORB_CONFIG,
+      enabled: a.enabled !== false,
+      ...(a.toolName !== undefined ? { toolName: a.toolName } : {}),
+      ...(a.minToolTokens !== undefined ? { minToolTokens: a.minToolTokens } : {}),
+      ...(a.contextThresholdPct !== undefined ? { contextThresholdPct: parsePercent(a.contextThresholdPct) } : {}),
+      ...(a.excludeTools !== undefined ? { excludeTools: a.excludeTools } : {}),
+    };
+  }
+  return { ...DEFAULT_ABSORB_CONFIG, enabled: false };
+}
+
 export function resolveConfig(adapter: AdapterConfig, liveContextLimit: number, provider?: string, modelId?: string): Config {
   const envLimit = process.env.ACP_MODEL_CONTEXT_LIMIT;
   const envLimitNum = envLimit ? Number(envLimit) : NaN;
@@ -545,6 +581,8 @@ export function resolveConfig(adapter: AdapterConfig, liveContextLimit: number, 
   if (c.minPressureBenefitTokens !== undefined) {
     config.nudge.minPressureBenefitTokens = c.minPressureBenefitTokens;
   }
+  const absorb = resolveAbsorb(adapter);
+  if (absorb.enabled) config.absorb = absorb;
   return config;
 }
 
