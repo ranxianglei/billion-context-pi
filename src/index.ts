@@ -51,7 +51,7 @@ import {
 } from "./throttle-retry.js";
 import { defaultCountTokens } from "acp-kernel";
 import { formatSystemPromptForEvent, getSystemPromptText } from "./compat.js";
-import { applyOutputHeadroom, inspectOverflowMessage, resolveOutputHeadroomCap } from "./overflow-selfheal.js";
+import { applyOutputHeadroom, inspectOverflowMessage, isNoBody4xxError, resolveOutputHeadroomCap } from "./overflow-selfheal.js";
 import { FORK_HOST_WARNING_MESSAGE, UNSUPPORTED_HOST_MESSAGE } from "./omp.js";
 import { isDeclaredForkHost, isUnsupportedHost } from "./host.js";
 import { isBiliProxyBaseUrl, PROXY_STAND_DOWN_MESSAGE, nativeStandDownMessage } from "./proxy-detect.js";
@@ -483,7 +483,15 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
       const calibrate = (base: number): number =>
         hostUsageStable ? Math.min(base, Math.ceil(realPromptTokens * 1.2)) : base;
       const applyFloors = (base: number): number => Math.max(calibrate(base), hostFloorActive ? realPromptTokens : 0, armedFloor);
+      // Basis for the no-body-4xx overflow guard (wireOverflowSelfHeal): the
+      // sent-view estimate of the request about to be sent, on the same scale
+      // as the turn log below — but WITHOUT the armed 95% floor: that floor is
+      // an artifact of a prior arm, not evidence of size, and feeding it back
+      // into the ratio guard would re-arm unconditionally right after any
+      // emergency.
+      const guardBasis = (base: number): number => Math.max(calibrate(base), hostFloorActive ? realPromptTokens : 0);
       let tokenCount = applyFloors(sentTokens);
+      let guardTokens = guardBasis(sentTokens);
       // View-based recount (issue #289): the raw-view estimate counts uncovered
       // messages that prune strips from the sent view every turn (orphaned tool
       // pairs straddling block boundaries, absorbed/filtered messages) — in long
@@ -495,9 +503,11 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
         const view = sentViewTokenCount(runtime.core, coreMessages, state, config, tokenCount, imageTokens, systemPromptTokens);
         if (view.drifted) {
           tokenCount = applyFloors(view.viewTokens);
+          guardTokens = guardBasis(view.viewTokens);
           logInfo("turn", { sid, event: "view-recount", prelim: sentTokens, viewTokens: view.viewTokens, tokenCount });
         }
       }
+      ov.noteSentView(guardTokens, config.modelContextLimit);
       // Divergence watch (issue #455): persistent >2x disagreement between the
       // internal meter and the FRESH provider measurement means calibration
       // could not engage (stale anchor or jittering usage) — warn once per
@@ -897,21 +907,46 @@ function wireOverflowSelfHeal(pi: ExtensionAPI, runtime: AcpRuntime): void {
   pi.on("message_end", (event, ctx) => {
     const msg = event.message;
     if (msg.role !== "assistant") return;
-    if (msg.stopReason !== "error") return;
+    const sid = ctx.sessionManager.getSessionId();
+    const ov = runtime.overflowFor(sid);
+    if (msg.stopReason !== "error") {
+      // Successful assistant turn: the request loop is unwedged, so the
+      // consecutive no-body-4xx count (possible-overflow path below)
+      // restarts from zero.
+      ov.noteSuccess();
+      return;
+    }
     // Haystack = errorMessage + error content: some relays put the upstream
     // error body in the streamed content and leave errorMessage generic
     // ("Provider finish_reason: error_finish") — errorMessage alone would miss
     // them. (Same haystack approach as isThrottleError.)
     const haystack = `${msg.errorMessage ?? ""}\n${extractText(msg.content)}`;
     const info = inspectOverflowMessage(haystack);
-    if (!info.isOverflow) return;
-    const sid = ctx.sessionManager.getSessionId();
     const modelId = (ctx.model as { id?: string } | undefined)?.id ?? "default";
-    const ov = runtime.overflowFor(sid);
-    if (info.window) ov.setLearnedWindow(modelId, info.window);
+    if (info.isOverflow) {
+      if (info.window) ov.setLearnedWindow(modelId, info.window);
+      ov.armed = true;
+      logWarn("overflow-selfheal", { sid, modelId, event: "detected", window: info.window ?? null, message: info.message.slice(0, 200) });
+      if (ctx.hasUI) ctx.ui.notify(`[ACP] context overflow detected${info.window ? ` (window ${info.window})` : ""} — forcing emergency compression next turn`);
+      return;
+    }
+    // Possible overflow: pi's bodyless "4xx ... (no body)" (incident
+    // 2026-08-23: a huge bash tool result pushed every request past sglang's
+    // input+max_tokens cap; each retry returned "400 status code (no body)"
+    // forever and the text-marker path above never matched, so the emergency
+    // never fired and the session dead-looped). The text is ambiguous — the
+    // same 4xx comes back for invalid models / malformed requests (see
+    // messages.ts) — so arm only with corroboration: sent-view >= 50% of the
+    // effective limit, or the >=2nd consecutive no-body since the last
+    // successful turn. Unlike the path above no window can be parsed from a
+    // bodyless error, so none is learned: the armed emergency uses the
+    // already-resolved effective limit (wireContextTransform).
+    if (!isNoBody4xxError(haystack)) return;
+    const decision = ov.onNoBody4xx();
+    if (!decision.arm) return;
     ov.armed = true;
-    logWarn("overflow-selfheal", { sid, modelId, event: "detected", window: info.window ?? null, message: info.message.slice(0, 200) });
-    if (ctx.hasUI) ctx.ui.notify(`[ACP] context overflow detected${info.window ? ` (window ${info.window})` : ""} — forcing emergency compression next turn`);
+    logWarn("overflow-selfheal", { sid, modelId, event: "no-body-arm", consecutive: decision.consecutive, ratio: decision.ratio, message: haystack.slice(0, 200) });
+    if (ctx.hasUI) ctx.ui.notify(`[ACP] possible context overflow (4xx no-body error, ${decision.consecutive} consecutive) — forcing emergency compression next turn`);
   });
   pi.on("session_shutdown", (_event, ctx) => {
     runtime.overflowDrop(ctx.sessionManager.getSessionId());
