@@ -76,7 +76,14 @@ jobs:
 
       - name: Publish
         if: steps.check.outputs.is_release == 'true'
-        run: npm publish --tag ${{ steps.pre.outputs.tag }} --access public
+        run: |
+          npm publish --tag ${{ steps.pre.outputs.tag }} --access public
+          # Stable releases move the `stable` dist-tag too, so installs pinned
+          # to the stable channel (npm:billion-context-pi@stable) auto-update
+          # to stable releases only; prereleases stay on `dev`.
+          if [ "${{ steps.pre.outputs.tag }}" = "latest" ]; then
+            npm dist-tag add billion-context-pi@${{ steps.version.outputs.version }} stable
+          fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 

@@ -76,6 +76,14 @@ pi install npm:billion-context-pi
 
 That's it. The extension auto-loads on next Pi startup. No configuration needed — it reads your model's context window automatically.
 
+**Prefer a stable channel?** Install with the `stable` dist-tag instead:
+
+```bash
+pi install npm:billion-context-pi@stable
+```
+
+Stable installs auto-update to the latest *stable* release only — dev prereleases never reach them. Plain installs track `latest`. Switch channels at any time by reinstalling with the other spec.
+
 > **Using another sub-agent extension?** billion-context-pi ships its own `acp_delegate` sub-agent tool (see below) at a fraction of the context cost (~600 tok vs ~7K tok/turn). Two delegation tools in one session only make the model's choice noisier, so pick one:
 > - **Use ACP's delegate** — remove the other extension: `pi remove npm:pi-subagents`
 > - **Keep your own sub-agent** — turn ACP's delegate off in `acp.json`: `{ "delegate": false }` (see *Using your own sub-agent instead* below)

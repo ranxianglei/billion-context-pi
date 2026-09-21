@@ -285,6 +285,32 @@ test("checkForUpdate: npm view fails → falls back to registry fetch", async ()
   assert.match(notes[0], /88\.0\.0 available/);
 });
 
+test("checkForUpdate: npm view fails on stable channel → falls back to registry fetch of /stable", async () => {
+  resetThrottle();
+  setRunNpmForTest(async () => ({ code: 1, stdout: "", stderr: "npm error ENOENT" }));
+  const fetchCalls: string[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: string | URL | Request) => {
+    fetchCalls.push(String(url));
+    return new Response(JSON.stringify({ version: "88.0.0" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }) as typeof fetch;
+  const notes: string[] = [];
+  try {
+    setInstalledSpecForTest("stable");
+    await checkForUpdate(true, (m) => notes.push(m));
+  } finally {
+    setInstalledSpecForTest(null);
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(fetchCalls.length, 1);
+  assert.match(fetchCalls[0], /registry\.npmjs\.org\/billion-context-pi\/stable/);
+  assert.equal(notes.length, 1);
+  assert.match(notes[0], /88\.0\.0 available/);
+});
+
 test("checkForUpdate: npm view fails and fetch throws → no notify, check-fetch-error logged", async () => {
   resetThrottle();
   setRunNpmForTest(async () => ({ code: 1, stdout: "", stderr: "" }));
