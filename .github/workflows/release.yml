@@ -27,10 +27,23 @@ jobs:
           MERGE_BRANCH=$(echo "$COMMIT_MSG" | sed -n 's/^Merge pull request #[0-9]* from [^/]*\/\(.*\)$/\1/p' || echo "")
           # Accept both `YYYY-MM-DD_release-vX.Y.Z` (documented) and the
           # common `YYYY-MM-DD_release-X.Y.Z` variant (missing `v`).
+          # A trailing `-stable` on the ref designates a stable-channel
+          # release: CI additionally moves the `stable` npm dist-tag for it.
+          # Stable is cut rarely — regular releases never touch it.
           if echo "$MERGE_BRANCH" | grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}_release-(v)?[0-9]'; then
             echo "is_release=true" >> $GITHUB_OUTPUT
+            if echo "$MERGE_BRANCH" | grep -qE -- '-stable$'; then
+              echo "is_stable=true" >> $GITHUB_OUTPUT
+            else
+              echo "is_stable=false" >> $GITHUB_OUTPUT
+            fi
           elif echo "$COMMIT_MSG" | grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}_release-(v)?[0-9]'; then
             echo "is_release=true" >> $GITHUB_OUTPUT
+            if echo "$COMMIT_MSG" | grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}_release-(v)?[0-9].*-stable$'; then
+              echo "is_stable=true" >> $GITHUB_OUTPUT
+            else
+              echo "is_stable=false" >> $GITHUB_OUTPUT
+            fi
           else
             # A release-looking branch that does not match must not skip the
             # publish silently (that is how v0.1.44 was lost on 2026-08-21).
@@ -38,6 +51,7 @@ jobs:
               echo "::warning::Merge from release-looking branch '$MERGE_BRANCH' does not match the release pattern; publish skipped. Rename to YYYY-MM-DD_release-vX.Y.Z and re-merge."
             fi
             echo "is_release=false" >> $GITHUB_OUTPUT
+            echo "is_stable=false" >> $GITHUB_OUTPUT
           fi
 
       - name: Setup
@@ -76,7 +90,14 @@ jobs:
 
       - name: Publish
         if: steps.check.outputs.is_release == 'true'
-        run: npm publish --tag ${{ steps.pre.outputs.tag }} --access public
+        run: |
+          npm publish --tag ${{ steps.pre.outputs.tag }} --access public
+          # Only explicitly designated stable releases (branch named
+          # `...-stable`) move the `stable` dist-tag; regular releases keep
+          # moving `latest` only, prereleases stay on `dev`.
+          if [ "${{ steps.pre.outputs.tag }}" = "latest" ] && [ "${{ steps.check.outputs.is_stable }}" = "true" ]; then
+            npm dist-tag add billion-context-pi@${{ steps.version.outputs.version }} stable
+          fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 

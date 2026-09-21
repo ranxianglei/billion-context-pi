@@ -118,6 +118,8 @@ Problems discovered or fixed while working MUST leave a trace in the issue track
 
 Same baseline as acp-kernel (branch naming, CI auto-publish, PR-merge-is-human-only, pre-flight checks, release-commit convention). See [acp-kernel AGENTS.md §5](https://github.com/ranxianglei/acp-kernel/blob/master/AGENTS.md). Release branches: `YYYY-MM-DD_release-v{VERSION}`.
 
+**Stable channel:** stable releases are cut rarely and are *designated*, not automatic. Name the release branch `YYYY-MM-DD_release-v{VERSION}-stable` to also move the npm `stable` dist-tag on publish (CI detects the `-stable` suffix in the merge commit). Regular releases only move `latest`; prereleases stay on `dev`. Installs pinned to the stable channel (`pi install npm:billion-context-pi@stable`) auto-update across designated stable releases only.
+
 ### Cross-repo dependency: acp-kernel MUST ship first
 
 `acp-kernel` is pinned in **devDependencies** (exact version, no `^`) and **bundled inline** at build time (tsup does NOT mark it `external`), so `dist/index.js` is self-contained.

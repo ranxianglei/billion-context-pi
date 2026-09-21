@@ -75,6 +75,14 @@ pi install npm:billion-context-pi
 
 完成。扩展在下次 Pi 启动时自动加载。无需配置 —— 它会自动读取模型的上下文窗口。
 
+**想用 stable 通道?** 改用 `stable` dist-tag 安装:
+
+```bash
+pi install npm:billion-context-pi@stable
+```
+
+stable 版本是显式指定发布的(频率低于常规发版)。stable 安装的自动更新只追最新的 *stable* 正式版 —— 常规正式版和 dev 预发布版都不会推给它们。普通安装跟踪 `latest`。随时可以用另一个 spec 重装来切换通道。
+
 > **你另有子代理扩展?** billion-context-pi 自带 `acp_delegate` 子代理工具(见下文),上下文成本极低(~600 tok vs ~7K tok/轮)。同一会话里两套委派工具只会让模型的选择更混乱,二选一:
 > - **用 ACP 的 delegate** —— 卸载另一个扩展:`pi remove npm:pi-subagents`
 > - **保留你自己的子代理** —— 在 `acp.json` 里关掉 ACP 的 delegate:`{ "delegate": false }`(见下文*改用你自己的子代理*)
