@@ -80,6 +80,15 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
+      - name: Compute compare base
+        if: steps.check.outputs.is_release == 'true'
+        id: cmp
+        run: |
+          VER="${{ steps.version.outputs.version }}"
+          LAST="$(git describe --match 'v[0-9]*' --tags --abbrev=0 "v$VER"^ 2>/dev/null || true)"
+          if [ -z "$LAST" ]; then LAST="$(git rev-list --max-parents=0 HEAD)"; fi
+          echo "base=$LAST" >> "$GITHUB_OUTPUT"
+
       - name: Create GitHub Release
         if: steps.check.outputs.is_release == 'true'
         uses: actions/create-release@v1
@@ -92,4 +101,4 @@ jobs:
           body: |
             ## Release v${{ steps.version.outputs.version }}
 
-            See [commits since last tag](https://github.com/${{ github.repository }}/compare/$(git describe --tags --abbrev=0 v${{ steps.version.outputs.version }}^ 2>/dev/null || echo HEAD~10)...v${{ steps.version.outputs.version }})
+            See [commits since last tag](https://github.com/${{ github.repository }}/compare/${{ steps.cmp.outputs.base }}...v${{ steps.version.outputs.version }})
