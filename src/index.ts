@@ -6,7 +6,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { CONFIG_DIR_NAME } from "./config-dir.js";
 import { parseAcpJson } from "./user-config.js";
-import type { KeyId } from "@earendil-works/pi-tui";
+import { Box, Text, type KeyId } from "@earendil-works/pi-tui";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -23,7 +23,7 @@ import { makeDelegateTool, makeDelegateWaitTool, makeDelegateCancelTool, running
 import { makeCommands } from "./commands.js";
 import { mergeSurface, readToolSurfaceWithPacks, resolveActivePack, resolvePackName, surfaceMetaOf } from "./prompt-pack.js";
 import type { NudgeSectionsConfig } from "./surface.js";
-import { coreOutToAgentMessages, extractText } from "./messages.js";
+import { coreOutToAgentMessages, extractText, ACP_NUDGE_CUSTOM_TYPE, type AcpNudgeRecord } from "./messages.js";
 import { liveOnlyTail } from "./live-only-tail.js";
 import { carryHostSystemMessages } from "./system-passthrough.js";
 import { sanitizeToolPairing } from "./tool-pair-sanitizer.js";
@@ -135,6 +135,7 @@ export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactor
     for (const { name, options } of makeCommands(runtime, pi)) {
       pi.registerCommand(name, options);
     }
+    wireNudgeRecords(pi);
   };
 }
 
@@ -761,6 +762,19 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
         }
         if (!emergency) runtime.markNudgeShown(sid, turnKey, tokenCount);
         debug.event("nudge-injected", { sid: ctx.sessionManager.getSessionId(), voice: rendered.voice, channels: ["context", debugOn ? "terminal" : null].filter(Boolean), emergency, turnKey, reInject: shownAt !== undefined, text: rendered.text + example });
+        // issue #326: persist a compact display-only record so the injection
+        // survives restarts (TUI scrollback + session file). One per user turn:
+        // emergency nudges re-inject on every LLM call and must not flood the
+        // session file; type:"custom" entries are never projected into the
+        // sent view, so model context stays clean.
+        if (typeof pi.appendEntry === "function" && !runtime.nudgeRecordedFor(sid, turnKey)) {
+          try {
+            pi.appendEntry(ACP_NUDGE_CUSTOM_TYPE, { text: formatNudgeRecord(turn.nudge, emergency) });
+            runtime.markNudgeRecorded(sid, turnKey);
+          } catch (e) {
+            logWarn("nudge", { sid: ctx.sessionManager.getSessionId(), event: "persist-failed", error: e instanceof Error ? e.message : String(e) });
+          }
+        }
       } else {
         debug.event("nudge-suppressed", { sid: ctx.sessionManager.getSessionId(), turnKey, reason: turn.nudge.reason, shownAt: shownAt ?? null, tokenCount, adaptiveGrowth, reInjectFloor });
       }
@@ -1049,4 +1063,29 @@ function nudgeMessage(nudge: NudgeDecision, blocks: CompressionBlock[], prompts:
     content: [{ type: "text", text: lines.join("\n") }],
     timestamp: Date.now(),
   } as AgentMessage;
+}
+
+// issue #326: render persisted nudge records in the TUI. Without a registered
+// renderer pi silently drops custom entries on both live append and session
+// rebuild, so this is required for the records to be visible at all.
+function wireNudgeRecords(pi: ExtensionAPI): void {
+  if (typeof pi.registerEntryRenderer !== "function") return;
+  pi.registerEntryRenderer<AcpNudgeRecord>(ACP_NUDGE_CUSTOM_TYPE, (entry, _options, theme) => {
+    const text = entry.data?.text;
+    if (!text) return undefined;
+    const box = new Box(1, 1, (t: string) => theme.bg("customMessageBg", t));
+    box.addChild(new Text(theme.fg("dim", text), 0, 0));
+    return box;
+  });
+}
+
+// Compact one-line twin of nudgeMessage() for the persisted session entry
+// (issue #326): auditability only — the full multi-line nudge deliberately
+// stays out of the session file.
+export function formatNudgeRecord(nudge: NudgeDecision, emergency: boolean): string {
+  const pct = Math.round(nudge.contextUsage * 100);
+  const tier = `T${nudge.tier ?? 1}`;
+  const top = [...nudge.compressibleRanges].sort((a, b) => b.tokens - a.tokens)[0];
+  const range = top ? ` · top range ${top.startRef}–${top.endRef}` : "";
+  return `[ACP nudge]${emergency ? " EMERGENCY" : ""} ${pct}% · ${tier}${range}`;
 }

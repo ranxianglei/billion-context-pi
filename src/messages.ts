@@ -27,6 +27,14 @@ export const ACP_STATUS_CUSTOM_TYPE = "acp-status";
  *  persistent in the session but never projected into LLM context (#255). */
 export const ACP_EXPORT_CUSTOM_TYPE = "acp-export";
 
+/** Nudge persistence record (issue #326): written via pi.appendEntry as a
+ *  type:"custom" entry — never projected into the sent view (see above), so
+ *  the compact one-liner stays out of model context while surviving restarts. */
+export const ACP_NUDGE_CUSTOM_TYPE = "acp-nudge";
+export interface AcpNudgeRecord {
+  text: string;
+}
+
 /** Custom-message types excluded from LLM-context projection (#255, #380):
  *  UI-only panels/docs that persist in the session but must not reach the model.
  *  Shared by isCustomMessageEntry below and the turn-boundary predicate in
