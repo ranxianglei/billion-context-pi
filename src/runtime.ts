@@ -106,6 +106,11 @@ export interface AcpRuntime {
   nudgeShownTokensFor(sid: string, turnKey: string): number | undefined;
   /** Clears the token-count stamps recorded by markNudgeShown — used on a token-scale flip (issue #267) so the same-turn re-inject floor (#269 / PR #316) is not computed against an old-scale stamp. */
   clearNudgeTokenStamps(sid: string): void;
+  /** Like the nudgeShown* pair but tracks the persisted display-only session
+   *  entry (issue #326): at most one record per user turn even when the
+   *  emergency nudge re-injects on every LLM call. */
+  markNudgeRecorded(sid: string, turnKey: string): void;
+  nudgeRecordedFor(sid: string, turnKey: string): boolean;
   /** Process compress toolResults for the CURRENT user turn only (the caller
    *  scopes the list — see collectCompressOutcomes in src/index.ts); idempotent
    *  per toolCallId. turnKey MUST be the stable persisted-boundary key
@@ -376,9 +381,19 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   function clearNudgeTracking(sid: string): void {
     nudgeShownTurns.delete(sid);
     nudgeShownTokens.delete(sid);
+    nudgeRecordedTurns.delete(sid);
   }
   function clearNudgeTokenStamps(sid: string): void {
     nudgeShownTokens.delete(sid);
+  }
+  const nudgeRecordedTurns = new Map<string, Set<string>>();
+  function markNudgeRecorded(sid: string, turnKey: string): void {
+    let turns = nudgeRecordedTurns.get(sid);
+    if (!turns) { turns = new Set(); nudgeRecordedTurns.set(sid, turns); }
+    turns.add(turnKey);
+  }
+  function nudgeRecordedFor(sid: string, turnKey: string): boolean {
+    return nudgeRecordedTurns.get(sid)?.has(turnKey) ?? false;
   }
   // Per-session overflow self-heal state (learned window + armed emergency).
   const overflowEpisodes = new Map<string, OverflowEpisode>();
@@ -727,4 +742,4 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   let refused = false;
   let refusalMessage: string | null = null;
   let delegateStoodDown = false;
-  return { core, store, get refused() { return refused; }, set refused(v: boolean) { refused = v; }, get refusalMessage() { return refusalMessage; }, set refusalMessage(v: string | null) { refusalMessage = v; }, get delegateStoodDown() { return delegateStoodDown; }, set delegateStoodDown(v: boolean) { delegateStoodDown = v; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown, nudgeShownFor, nudgeShownTokensFor, clearNudgeTracking, clearNudgeTokenStamps, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reasoningDropFor, reloadConfig, stateFor, save, deriveChildState: deriveChild, acquireLock, overflowFor, overflowDrop, noteDeadCompress, clearDeadCompress, throttleFor, throttleDrop , noteTokenScale, dropTokenScale, noteHostUsage, dropHostUsageSamples, noteSizeDivergence, dropSizeDivergence, noteTerminalEscape, dropTerminalEscape, noteTruncationSkipped, dropTruncationSkipped, stripImagesFor };}
+  return { core, store, get refused() { return refused; }, set refused(v: boolean) { refused = v; }, get refusalMessage() { return refusalMessage; }, set refusalMessage(v: string | null) { refusalMessage = v; }, get delegateStoodDown() { return delegateStoodDown; }, set delegateStoodDown(v: boolean) { delegateStoodDown = v; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown, nudgeShownFor, nudgeShownTokensFor, clearNudgeTracking, clearNudgeTokenStamps, markNudgeRecorded, nudgeRecordedFor, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reasoningDropFor, reloadConfig, stateFor, save, deriveChildState: deriveChild, acquireLock, overflowFor, overflowDrop, noteDeadCompress, clearDeadCompress, throttleFor, throttleDrop , noteTokenScale, dropTokenScale, noteHostUsage, dropHostUsageSamples, noteSizeDivergence, dropSizeDivergence, noteTerminalEscape, dropTerminalEscape, noteTruncationSkipped, dropTruncationSkipped, stripImagesFor };}
