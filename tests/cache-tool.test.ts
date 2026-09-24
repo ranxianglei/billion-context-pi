@@ -1,8 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { rm } from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { createAcpExtension } from "../src/index.js";
 import { tmpPath } from "./tmp-path.js";
+import type { AdapterConfig } from "../src/config.js";
+import { buildCacheReport, type CacheSample, type FoldEvent } from "acp-kernel";
 
 function captureApi() {
   const handlers = new Map<string, ((event: any, ctx: any) => any)[]>();
@@ -49,9 +53,9 @@ function fakeCtx(entries: any[], stateFile: string, notifies: string[] = []) {
   };
 }
 
-async function setup(entries: any[], stateFile: string, notifies: string[] = []) {
+async function setup(entries: any[], stateFile: string, notifies: string[] = [], adapter: AdapterConfig = { modelContextLimit: 200_000 }) {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+  createAcpExtension(adapter)(api as any);
   await rm(`${stateFile}.acp.json`, { force: true });
   const ctx = fakeCtx(entries, stateFile, notifies);
   await handlers.get("context")![0]!({ type: "context", messages: [] }, ctx);
@@ -66,8 +70,9 @@ test("acp_cache reports grand ledger with closed identity (no folds)", async () 
     userMsg("e2", "and another question to extend the context a bit here.", T0 - 500),
     assistantMsg("a2", "Here you go.", { input: 100, output: 30, cacheRead: 4300, cacheWrite: 0 }, T0 + 1000),
   ];
-  const { tool } = await setup(entries, tmpPath("pai-acp-cache-nofolds.session.json"));
-  const res = await tool.execute("tc1", {}, undefined, undefined, fakeCtx(entries, tmpPath("pai-acp-cache-nofolds.session.json")));
+  const stateFile = tmpPath("pai-acp-cache-nofolds.session.json");
+  const { tool } = await setup(entries, stateFile);
+  const res = await tool.execute("tc1", {}, undefined, undefined, fakeCtx(entries, stateFile));
   const text = (res.content[0] as any).text as string;
 
   assert.match(text, /^ACP CACHE REPORT \(test-session\) — 2 requests/m, "header with request count");
@@ -158,4 +163,76 @@ test("/acp-cache command renders the same report via ui.notify fallback", async 
   assert.equal(notifies.length, 2, "second invocation delivered");
   assert.ok(!/\[summary/.test(notifies[1]), "args 'full' opts out of the summary header");
   assert.match(notifies[1], /^ACP CACHE REPORT \(test-session\) — 1 requests$/m, "full report header without summary marker");
+});
+
+// One compressed message + one post-fold request (the same shape as the
+// re-pay test above) so the fold economics section is present and T > 0.
+async function foldScenario(stateFile: string, adapter: AdapterConfig = { modelContextLimit: 200_000 }): Promise<string> {
+  const T0 = Date.now() - 60_000;
+  const longText = "This is a detailed message that needs to be compressed. ".repeat(130);
+  const entries = [
+    userMsg("e1", longText, T0 - 2000),
+    userMsg("e2", "filler two ".repeat(1200), T0 - 1900),
+    assistantMsg("a1", "Got it.", { input: 400, output: 40, cacheRead: 0, cacheWrite: 4000 }, T0),
+    userMsg("e3", "filler three ".repeat(1200), T0 - 1000),
+    assistantMsg("a2", "Done.", { input: 100, output: 30, cacheRead: 4300, cacheWrite: 0 }, T0 + 1000),
+    userMsg("e4", "filler four ".repeat(1200), T0 - 500),
+  ];
+  const { api, ctx, handlers } = await setup(entries, stateFile, [], adapter);
+  const compressTool = api.tools.find((t: any) => t.name === "compress")!;
+  await compressTool.execute(
+    "tc-c",
+    { content: [{ startId: "m00001", endId: "m00001", summary: "Detailed initial context message for the cache-tool tests." }] },
+    undefined, undefined, ctx,
+  );
+  entries.push(assistantMsg("a3", "After the fold.", { input: 1200, output: 50, cacheRead: 0, cacheWrite: 0 }, Date.now() + 5000));
+  await handlers.get("context")![0]!({ type: "context", messages: [] }, ctx);
+  const res = await api.tools.find((t: any) => t.name === "acp_cache")!.execute("tc-p", {}, undefined, undefined, ctx);
+  return (res.content[0] as any).text as string;
+}
+
+test("acp_cache prices fold economics with the configured priceProfile", async () => {
+  const base = await foldScenario(path.join(os.tmpdir(), "pai-acp-cache-price-base.session.json"));
+  const deepseek = await foldScenario(path.join(os.tmpdir(), "pai-acp-cache-price-ds.session.json"), { modelContextLimit: 200_000, priceProfile: { w: 1, r: 0.1, q: 1.5 } });
+
+  assert.match(base, /FOLD ECONOMICS \(1 folds @ w=1 r=0\.1 q=4\)/, "unset key keeps the built-in profile");
+  assert.match(deepseek, /FOLD ECONOMICS \(1 folds @ w=1 r=0\.1 q=1\.5\)/, "configured profile reaches the report");
+  const nStar = (t: string): number => Number(t.match(/n\*=([\d.]+)/)![1]);
+  assert.ok(nStar(deepseek) < nStar(base), "lower output multiple moves the breakeven earlier");
+});
+
+test("buildCacheReport passthrough pins per-field fallback and provider-shifted economics", () => {
+  // T = 0 by construction (no fresh-input growth after either fold), so
+  // oneTimeCostUnits = q·σ − r·S exactly — clean formula check per profile.
+  const samples: CacheSample[] = [
+    { at: 0, input: 100_000, cached: 99_000, output: 100 },
+    { at: 200, input: 96_000, cached: 96_000, output: 100 },
+    { at: 400, input: 95_100, cached: 95_100, output: 100 },
+  ];
+  const folds: FoldEvent[] = [
+    { at: 100, tokensCompressed: 5_000, summaryTokens: 1_000, firstFoldStartTokens: 100_000, viewAfter: 96_000 },
+    { at: 300, tokensCompressed: 1_000, summaryTokens: 100, firstFoldStartTokens: 96_000, viewAfter: 95_100 },
+  ];
+
+  const def = buildCacheReport(samples, folds);
+  assert.deepEqual(def.profile, { w: 1, r: 0.1, q: 4 }, "unset profile → kernel defaults");
+  const f1 = def.folds[0]!;
+  assert.equal(f1.oneTimeCostUnits, 3500, "q·σ − r·S = 4000 − 500");
+  assert.equal(f1.perTurnSavingUnits, 400, "(S−σ)·r");
+  assert.equal(f1.breakevenTurns, 8.75);
+  assert.equal(f1.turnsToNextFold, 1, "one sample between f1.at and f2.at");
+  assert.equal(f1.paidBack, false, "k=1 < 8.75");
+  const f2 = def.folds[1]!;
+  assert.equal(f2.turnsToNextFold, null, "last fold: cadence unobserved");
+  assert.equal(f2.paidBack, null);
+  assert.equal(f2.breakevenTurns, 300 / 90, "unrounded ratio kept verbatim");
+
+  const ds = buildCacheReport(samples, folds, { priceProfile: { w: 1, r: 0.1, q: 1.5 } }).folds[0]!;
+  assert.equal(ds.oneTimeCostUnits, 1000, "DeepSeek-class: 1500 − 500");
+  assert.equal(ds.breakevenTurns, 2.5);
+  assert.equal(ds.paidBack, false, "k=1 < 2.5");
+
+  const partial = buildCacheReport(samples, folds, { priceProfile: { q: 2 } });
+  assert.deepEqual(partial.profile, { w: 1, r: 0.1, q: 2 }, "per-field fallback fills w and r");
+  assert.equal(partial.folds[0]!.oneTimeCostUnits, 1500, "2000 − 500");
 });

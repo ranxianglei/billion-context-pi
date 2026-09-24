@@ -272,6 +272,63 @@ test("applyUserConfig trims protection entries", () => {
   assert.deepEqual(result.protectedTools, ["skill", "skill_*"]);
 });
 
+test("applyUserConfig passes valid priceProfile blocks through", () => {
+  const adapter: AdapterConfig = { priceProfile: { w: 1, r: 0.1, q: 4 } };
+  assert.deepEqual(applyUserConfig(adapter, { priceProfile: { w: 1, r: 0.1, q: 1.5 } }).priceProfile, { w: 1, r: 0.1, q: 1.5 }, "user block wins");
+  assert.deepEqual(applyUserConfig(adapter, { priceProfile: { q: 0 } }).priceProfile, { q: 0 }, "partial block wins; kernel fills unset fields downstream");
+  assert.deepEqual(applyUserConfig(adapter, {}).priceProfile, { w: 1, r: 0.1, q: 4 }, "absent key preserves adapter value");
+});
+
+test("loadUserConfig + applyUserConfig override priceProfile per project file and ignore unknown subkeys", async () => {
+  const tmpCwd = path.join(os.tmpdir(), `acp-test-price-cwd-${Date.now()}`);
+  const tmpHome = path.join(os.tmpdir(), `acp-test-price-home-${Date.now()}`);
+  await fs.mkdir(tmpCwd, { recursive: true });
+  await fs.mkdir(tmpHome, { recursive: true });
+  const savedHome = snapshotHome();
+  setHome(tmpHome);
+  try {
+    await writeConfig(tmpHome, { priceProfile: { w: 1, r: 0.1, q: 4 } });
+    await writeConfig(tmpCwd, { priceProfile: { q: 1.5, bogus: 3 } });
+    const user = await loadUserConfig(tmpCwd);
+    assert.deepEqual(user.priceProfile, { q: 1.5, bogus: 3 }, "project block survives pickKnown (whole-key override)");
+    const result = applyUserConfig({ priceProfile: { w: 1, r: 0.1, q: 4 } }, user);
+    assert.deepEqual(result.priceProfile, { q: 1.5 }, "unknown subkeys dropped; project block replaces global wholesale");
+  } finally {
+    restoreHome(savedHome);
+    await fs.rm(tmpCwd, { recursive: true, force: true });
+    await fs.rm(tmpHome, { recursive: true, force: true });
+  }
+});
+
+test("malformed priceProfile values in acp.json warn and fall back instead of failing", async () => {
+  const tmpDir = path.join(os.tmpdir(), `acp-test-badprice-${Date.now()}`);
+  await fs.mkdir(tmpDir, { recursive: true });
+  try {
+    for (const body of [
+      '{ "priceProfile": "anthropic" }',
+      '{ "priceProfile": [1, 0.1, 4] }',
+      '{ "priceProfile": null }',
+      '{ "priceProfile": {} }',
+      '{ "priceProfile": { "w": -1 } }',
+      '{ "priceProfile": { "r": "cheap" } }',
+      '{ "priceProfile": { "q": null } }',
+    ]) {
+      const cfgDir = path.join(tmpDir, CONFIG_DIR_NAME);
+      await fs.mkdir(cfgDir, { recursive: true });
+      await fs.writeFile(path.join(cfgDir, "acp.json"), body, "utf8");
+      const user = await loadUserConfig(tmpDir);
+      const result = applyUserConfig({ priceProfile: { w: 1, r: 0.1, q: 4 } }, user);
+      assert.deepEqual(result.priceProfile, { w: 1, r: 0.1, q: 4 }, `malformed ${body} falls back to adapter value`);
+    }
+    const cfgDir = path.join(tmpDir, CONFIG_DIR_NAME);
+    await fs.writeFile(path.join(cfgDir, "acp.json"), '{ "priceProfile": "bad" }', "utf8");
+    const user = await loadUserConfig(tmpDir);
+    assert.equal(applyUserConfig({}, user).priceProfile, undefined, "malformed value deleted when adapter has none");
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
 test("malformed protection values in acp.json warn and fall back instead of failing", async () => {
   const tmpDir = path.join(os.tmpdir(), `acp-test-badprotect-${Date.now()}`);
   await fs.mkdir(tmpDir, { recursive: true });
