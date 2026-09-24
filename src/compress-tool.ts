@@ -380,11 +380,12 @@ function refDriftSignal(ref: string, state: CompressionState, visibleIds: Set<st
   if (!visibleIds.has(rawId) && !hasActiveOwner(state, [rawId], visibleIds)) return "persistent-dangling";
   return "alive";
 }
+const NO_RANGES_REMAIN_TEXT = "No compressible ranges remain — the context is already at its minimum; continue the task without compressing.";
 
 function compressibleSnapshotText(nudge: NudgeDecision | undefined): string {
   const ranges = viableRanges(nudge?.compressibleRanges ?? []);
   if (ranges.length === 0) {
-    return "No compressible ranges remain — the context is already at its minimum; continue the task without compressing.";
+    return NO_RANGES_REMAIN_TEXT;
   }
   return formatRanges(ranges, []);
 }
@@ -589,6 +590,9 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
   });
   const afterTokens = estimateTokens(afterTurn.messages, collectCoveredMessageIds(applied.state), imageTokens);
   const reclaimed = Math.max(0, beforeTokens - afterTokens);
+  // #520: viable ranges left AFTER this run — drives the stop line below so
+  // models don't re-call compress on phantom refs past the session tail.
+  const remainingViable = viableRanges(afterTurn.nudge?.compressibleRanges ?? []);
 
   const newBlocks = changedBlocks;
   debug.event("compress-out", {
@@ -598,6 +602,7 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
     beforeTokens,
     afterTokens,
     afterMsgCount: applied.state.blocks.length,
+    remainingViable: remainingViable.length,
     errors: errors.length,
     errorDetails: errors.slice(0, 3),
     blocksAfter: applied.state.blocks.length,
@@ -655,11 +660,15 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
   // #420: carry the post-compression snapshot so a same-turn follow-up
   // compress has its refs without a planning acp_status call. Computed from
   // afterTurn (processTurn over the applied state), so the list reflects
-  // what actually remains — not the pre-fold view.
+  // what actually remains — not the pre-fold view. #520: when nothing viable
+  // remains, say so explicitly — without a stop signal models re-call
+  // compress on phantom refs past the session tail (skipped when this run
+  // had errors: the model still owes a reaction to them).
   if (blocksCreated > 0) {
-    const afterSnapshot = compressibleSnapshotText(afterTurn.nudge);
-    if (!afterSnapshot.startsWith("No compressible")) {
-      lines.push("Current compressible ranges (use these refs exactly as listed):\n" + afterSnapshot);
+    if (remainingViable.length === 0) {
+      if (errors.length === 0) lines.push(NO_RANGES_REMAIN_TEXT);
+    } else {
+      lines.push("Current compressible ranges (use these refs exactly as listed):\n" + formatRanges(remainingViable, []));
     }
   }
   return lines.join("\n");
