@@ -129,6 +129,8 @@ All keys below are currently **ACTIVE**.
 | `toolOutputMaxBytes` | number | `50000` | 🟢 ACTIVE | Hard byte cap on tool result text. |
 | `protectedTools` | string\[\] | `none` | 🟢 ACTIVE | Tool-name patterns (glob suffix allowed) whose **every** call+result pair is hard-excluded from compression (refs render `BLOCKED`). For low-frequency, high-value tools with independent outputs — see the ⚠ note below. |
 | `protectedLatestTools` | string\[\] | `none` | 🟢 ACTIVE | Tool-name patterns (glob suffix allowed) whose **latest** call+result pair is hard-excluded from compression; older pairs remain compressible. For cumulative-snapshot tools. |
+| `neverPreserveRecentTools` | string\[\] | kernel built-in (`["decompress", "search_context", "read", "bash"]`, acp-kernel >= 0.0.92) | 🟢 ACTIVE | Tool-name patterns **removed from** the soft-protected recent zone so their results fold immediately. Default keeps `read`/`bash` compressible; remove only `read` (keep `decompress`/`search_context`) to stop the batch-read fold→re-read loop. **Empty array `[]` is valid** (max-protection escape hatch). |
+| `preserveRecentTools` | string\[\] | unset (no subtraction; requires `acp-kernel` >= 0.0.93) | 🟢 ACTIVE | The **positive counterpart**: tool-name patterns **kept protected** in the recent zone — removed from the effective exclusion list computed by the kernel. The one-entry #1198/#1277 remedy: `["read"]`, no built-in list restating. **Empty array `[]` is invalid** (pure no-op — typo for `neverPreserveRecentTools: []`). |
 | `throttleRetry` | boolean \| object | `true` | 🟢 ACTIVE | Auto-retry provider token rate-limit errors with progressive backoff. |
 | `repetitionGuard` | boolean \| object | `true` | 🟢 ACTIVE | Break infinite loops of byte-identical tool calls (warn at 3 consecutive, block + abort at 5). |
 | `degenerationGuard` | boolean \| object | `true` | 🟢 ACTIVE | Collapse degenerate single-codepoint runs (e.g. 4655×「【」) in assistant text/thinking of the outgoing view and inject a one-shot recovery notice — breaks the abort loop where pi replays degenerated thinking back to the provider on every request (#351). |
@@ -275,6 +277,32 @@ All keys below are currently **ACTIVE**.
 - **Default:** `none` (empty)
 - **Status:** 🟢 ACTIVE
 - **Description:** Tool-name patterns (glob suffix allowed) whose **latest** call+result pair is hard-excluded from compression (matching refs render as `BLOCKED`); older pairs remain compressible. Intended for cumulative-snapshot tools where each call supersedes the last. Same validation rules as `protectedTools`. See the ⚠ note under `protectedTools` for when to use which knob.
+
+### `neverPreserveRecentTools`
+
+- **Type:** `string[]` (tool-name patterns, glob suffix allowed)
+- **Default:** unset → kernel built-in `["decompress", "search_context", "read", "bash"]` (requires `acp-kernel` >= 0.0.92)
+- **Status:** 🟢 ACTIVE
+- **Description:** Tool-name patterns **excluded from the soft-protected recent zone** (`preserveRecentMessages` window): matching tool results inside the recent window become compressible immediately instead of aging out first. The kernel built-in keeps `read`/`bash` compressible because they are the largest reclaimable mass — but that same default folds freshly-read files right away in batch-read workflows and can descend into the fold→re-read death loop (upstream billion-context #1198/#1277). **Recommended remedy — remove only `read`:**
+
+  ```json
+  { "neverPreserveRecentTools": ["decompress", "search_context", "bash"] }
+  ```
+
+  Fresh read results then stay in the recent zone and age out by position later (unlike `protectedLatestTools`, which would pin the newest read forever, or `protectedTools`, which would never fold any read). **Keep `decompress`/`search_context` in the list**: re-including them pins just-restored blocks in the recent zone where they become unreclaimable — a different disease. **⚠ Empty array `[]` is VALID** here (unlike the two protection keys): it excludes nothing and gives every tool recent-zone protection — the max-protection escape hatch. An explicit array replaces the default verbatim. Prefer the simpler positive form below unless you need verbatim-replace semantics.
+
+### `preserveRecentTools`
+
+- **Type:** `string[]` (tool-name patterns, glob suffix allowed)
+- **Default:** unset → no subtraction (the `neverPreserveRecentTools` ?? kernel built-in list governs verbatim; requires `acp-kernel` >= 0.0.93)
+- **Status:** 🟢 ACTIVE
+- **Description:** The **positive counterpart** of `neverPreserveRecentTools`: tool-name patterns **removed from the effective recent-zone exclusion list**. Effective exclusion = `(neverPreserveRecentTools ?? built-in) minus preserveRecentTools`, computed in the kernel — so the #1198/#1277 batch-read fold→re-read remedy is one entry:
+
+  ```json
+  { "preserveRecentTools": ["read"] }
+  ```
+
+  without restating (or freezing a stale hand-copy of) the built-in list, and it keeps following built-in evolution. Composable with an explicit `neverPreserveRecentTools` (subtraction applies to the explicit list too); glob-suffix patterns subtract matching entries (`"bash*"` removes `bash`). **⚠ Empty array `[]` is INVALID** here — it is a pure no-op, so a bare `[]` is almost certainly a typo for `neverPreserveRecentTools: []` (the max-protection escape hatch); malformed values warn and fall back to the adapter value.
 
 ---
 

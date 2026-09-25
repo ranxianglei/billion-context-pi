@@ -250,6 +250,29 @@ export interface AdapterConfig {
    *  none. Intended for cumulative-snapshot tools where each call supersedes
    *  the last. Settable via acp.json since #499. */
   protectedLatestTools?: string[];
+  /** Tool-name patterns (glob suffix allowed) EXCLUDED from the soft-protected
+   *  recent zone: matching tool results inside the recent window fold
+   *  immediately instead of aging out first (kernel >= 0.0.92). Default:
+   *  unset → kernel built-in ["decompress", "search_context", "read",
+   *  "bash"]. The built-in keeps read/bash compressible — the largest
+   *  reclaimable mass — but that also folds freshly-read files in batch-read
+   *  workflows (#1198-style fold→re-read loop, bili #1277). Recommended
+   *  remedy: ["decompress", "search_context", "bash"] (remove only read).
+   *  ⚠ Unlike the two protection keys, an EMPTY ARRAY IS VALID — it excludes
+   *  nothing and gives every tool recent-zone protection (escape hatch); do
+   *  not re-include decompress/search_context or just-restored blocks get
+   *  pinned in the recent zone and become unreclaimable. */
+  neverPreserveRecentTools?: string[];
+  /** The positive counterpart of neverPreserveRecentTools: tool-name
+   *  patterns REMOVED from the effective recent-zone exclusion list (kernel
+   *  >= 0.0.93) — `(neverPreserveRecentTools ?? built-in) minus
+   *  preserveRecentTools`. The one-entry #1198/#1277 batch-read fold→re-read
+   *  remedy: ["read"] protects fresh read results without restating (or
+   *  freezing a stale copy of) the built-in list. Default: unset → no
+   *  subtraction. Unlike neverPreserveRecentTools an EMPTY ARRAY IS
+   *  INVALID here (pure no-op — use neverPreserveRecentTools: [] for
+   *  protect-everything instead). */
+  preserveRecentTools?: string[];
   preserveRecentMessages?: number;
   /** Check npm for a newer billion-context-pi on startup and auto-install it. Default: true.
    *  Disable via `autoUpdate: false` or env `ACP_AUTO_UPDATE=0` to avoid all
@@ -555,12 +578,21 @@ export function resolveConfig(adapter: AdapterConfig, liveContextLimit: number, 
         : liveContextLimit > 0
           ? liveContextLimit
           : FALLBACK_LIMIT;
-  const config = defaultConfig(limit, {
+  // preserveRecentTools needs acp-kernel >= 0.0.93 (acp-kernel#428); the
+  // package pin may still be 0.0.92 during the release window, whose
+  // Partial<Config> does not know the key. Annotating the overrides keeps
+  // this compiling against BOTH versions — the extra property rides through
+  // defaultConfig's spread and is simply ignored by kernels that don't read
+  // it (validateConfig does not flag unknown keys).
+  const overrides: Partial<Config> & { preserveRecentTools?: string[] } = {
     protectedTools: adapter.protectedTools ?? [],
     protectedLatestTools: adapter.protectedLatestTools ?? [],
+    neverPreserveRecentTools: adapter.neverPreserveRecentTools,
+    preserveRecentTools: adapter.preserveRecentTools,
     preserveRecentMessages: adapter.preserveRecentMessages ?? 5,
     ...adapter.coreOverrides,
-  });
+  };
+  const config = defaultConfig(limit, overrides);
   const c = resolveCompress(adapter.compress, provider, modelId);
   if (c.maxContextLimit !== undefined) config.nudge.maxContextLimitPct = parsePercent(c.maxContextLimit);
   if (c.emergencyThresholdPercent !== undefined) {

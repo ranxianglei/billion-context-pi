@@ -489,3 +489,24 @@ test("resolveConfig defaults protection keys to empty when unset", () => {
   assert.deepEqual(cfg.protectedTools, []);
   assert.deepEqual(cfg.protectedLatestTools, []);
 });
+
+// --- neverPreserveRecentTools (kernel >= 0.0.92, bili #1277) ----------------
+
+test("resolveConfig passes neverPreserveRecentTools verbatim, [] included", () => {
+  const cfg = resolveConfig({ neverPreserveRecentTools: ["decompress", "search_context", "bash"] }, 200_000);
+  assert.deepEqual(cfg.neverPreserveRecentTools, ["decompress", "search_context", "bash"]);
+  // [] is the max-protection escape hatch — must survive, not fall back to the kernel built-in.
+  assert.deepEqual(resolveConfig({ neverPreserveRecentTools: [] }, 200_000).neverPreserveRecentTools, []);
+});
+
+test("resolveConfig leaves neverPreserveRecentTools undefined so the kernel built-in list governs", () => {
+  assert.equal(resolveConfig({}, 200_000).neverPreserveRecentTools, undefined);
+});
+
+// --- preserveRecentTools (kernel >= 0.0.93, bili #1277) ---------------------
+
+test("resolveConfig passes preserveRecentTools verbatim (the one-entry #1198/#1277 remedy)", () => {
+  const cfg = resolveConfig({ preserveRecentTools: ["read"] }, 200_000);
+  assert.deepEqual(cfg.preserveRecentTools, ["read"]);
+  assert.equal(resolveConfig({}, 200_000).preserveRecentTools, undefined, "unset → no subtraction, kernel built-in governs");
+});
