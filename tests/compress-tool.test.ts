@@ -475,3 +475,57 @@ test("compress success panel appends one fingerprint line per created block matc
   assert.equal(stored[0].blockId, "b1");
   assert.equal(stored[0].summary, s1, "panel fingerprint is computed from the round-tripped stored summary");
 });
+
+// ─── #540: in-place refold must not mislabel a non-tail block ──────────────
+
+test("in-place refold of a non-tail block: span clause and fingerprint reference the refolded block, not the tail (#540)", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000, preserveRecentMessages: 1 })(api as any);
+  const BIG = "中".repeat(6000);
+  const stateFile = "/tmp/pai-acp-refold-nontail.session.json";
+  await rm(`${stateFile}.acp.json`, { force: true });
+  const entries = [userMsg("e1", BIG), userMsg("e2", BIG), userMsg("e3", BIG), userMsg("e4", BIG)];
+  const ctx = fakeCtx(entries, stateFile);
+  ctx.__setUsage(100_000);
+  await runContextRound(handlers, ctx);
+
+  const compressTool = api.tools.find((t: any) => t.name === "compress")!;
+  const decompressTool = api.tools.find((t: any) => t.name === "decompress")!;
+  const s1 = "First block pre-refold summary describing the early investigation phase in detail.";
+  const s2 = "Second block summary covering the later phase, untouched by the refold.";
+  const out1 = await compressTool.execute(
+    "tc1",
+    { content: [
+      { startId: "m00001", endId: "m00001", summary: s1 },
+      { startId: "m00003", endId: "m00003", summary: s2 },
+    ] },
+    undefined, undefined, ctx,
+  );
+  const t1 = typeof out1 === "string" ? out1 : out1.content?.[0]?.text ?? String(out1);
+  assert.ok(t1.includes("▣ ACP") && !t1.includes("Errors:"), `setup compress failed: ${t1}`);
+
+  await decompressTool.execute("tc2", { blockId: "b1", inline: true }, undefined, undefined, ctx);
+
+  const s1b = "Refolded b1 summary: replaced after the inline restore completed, mentions src/runtime.ts:88.";
+  const out2 = await compressTool.execute(
+    "tc3",
+    { content: [{ startId: "m00001", endId: "m00001", summary: s1b }] },
+    undefined, undefined, ctx,
+  );
+  const t2 = typeof out2 === "string" ? out2 : out2.content?.[0]?.text ?? String(out2);
+  assert.ok(t2.includes("▣ ACP"), `refold compress failed: ${t2}`);
+  assert.ok(!t2.includes("Errors:"), `refold rejected: ${t2}`);
+
+  // The legacy tail slice (slice(-blocksCreated) over [b1, b2] with a refold
+  // updating b1 in place) presented b2's stale summary as the new one.
+  const lines = t2.split("\n");
+  assert.match(lines[0]!, /blocks: b1=/, `span clause must reference refolded b1: ${lines[0]}`);
+  assert.equal(lines[1], summaryFingerprintLine("b1", s1b), `fingerprint must show b1's NEW summary: ${lines[1]}`);
+  assert.ok(!t2.includes(summaryFingerprintLine("b2", s2)), `must not present untouched b2 as refolded: ${t2}`);
+
+  const raw = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
+  const blocks = raw.blocks as any[];
+  assert.equal(blocks.length, 2, "refold updates in place — no third block");
+  assert.equal(blocks.find((b) => b.blockId === "b1")!.summary, s1b, "b1 summary replaced by the refold");
+  assert.equal(blocks.find((b) => b.blockId === "b2")!.summary, s2, "b2 summary untouched");
+});
