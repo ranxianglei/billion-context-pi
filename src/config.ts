@@ -578,14 +578,21 @@ export function resolveConfig(adapter: AdapterConfig, liveContextLimit: number, 
         : liveContextLimit > 0
           ? liveContextLimit
           : FALLBACK_LIMIT;
-  const config = defaultConfig(limit, {
+  // preserveRecentTools needs acp-kernel >= 0.0.93 (acp-kernel#428); the
+  // package pin may still be 0.0.92 during the release window, whose
+  // Partial<Config> does not know the key. Annotating the overrides keeps
+  // this compiling against BOTH versions — the extra property rides through
+  // defaultConfig's spread and is simply ignored by kernels that don't read
+  // it (validateConfig does not flag unknown keys).
+  const overrides: Partial<Config> & { preserveRecentTools?: string[] } = {
     protectedTools: adapter.protectedTools ?? [],
     protectedLatestTools: adapter.protectedLatestTools ?? [],
     neverPreserveRecentTools: adapter.neverPreserveRecentTools,
     preserveRecentTools: adapter.preserveRecentTools,
     preserveRecentMessages: adapter.preserveRecentMessages ?? 5,
     ...adapter.coreOverrides,
-  });
+  };
+  const config = defaultConfig(limit, overrides);
   const c = resolveCompress(adapter.compress, provider, modelId);
   if (c.maxContextLimit !== undefined) config.nudge.maxContextLimitPct = parsePercent(c.maxContextLimit);
   if (c.emergencyThresholdPercent !== undefined) {
