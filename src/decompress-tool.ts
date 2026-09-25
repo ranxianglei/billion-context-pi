@@ -203,7 +203,7 @@ async function resolveBlockMessages(
  *  live only in an ancestor session's log (inherited block) — scan the
  *  parentSession chain read-only. */
 async function findAncestorMessage(ref: string, ctx: ExtensionContext): Promise<{ text: string; role: string } | null> {
-  const baseId = ref.split("#")[0] ?? ref;
+  const baseId = ref.split("#")[0]!;
   const ancestors = await loadAncestorEntries(ctx.sessionManager.getSessionFile(), new Set([baseId]));
   for (const entry of ancestors) {
     for (const cm of entriesToCoreMessages([entry])) {
