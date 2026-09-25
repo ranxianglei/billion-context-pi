@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFile, rm } from "node:fs/promises";
 import type { CompressionBlock, CompressionState } from "acp-kernel";
 import { createAcpExtension } from "../src/index.js";
-import { blockSpanLabel, compressPanelBlocks, isCompressNoopText, isCompressSuccessText } from "../src/compress-tool.js";
+import { blockSpanLabel, compressPanelBlocks, isCompressNoopText, isCompressSuccessText, summaryFingerprintLine } from "../src/compress-tool.js";
 
 // ─── helpers (mirror decompress-tool.test.ts) ──────────────────────────────
 
@@ -404,4 +404,128 @@ test("compress success result lists remaining compressible ranges, then goes qui
     !second.includes("Current compressible ranges"),
     `no snapshot noise once nothing viable remains: ${second}`,
   );
+});
+
+// ─── #535 P1: per-block summary fingerprint lines ──────────────────────────
+
+test("summaryFingerprintLine: long summary keeps exact char length, head 30 and tail 100", () => {
+  const s = "A".repeat(20) + "B".repeat(200);
+  assert.equal(summaryFingerprintLine("b7", s),
+    ` · b7 summary 220ch · head "${"A".repeat(20)}${"B".repeat(10)}" … tail "${"B".repeat(100)}"`);
+});
+
+test("summaryFingerprintLine: summary below thresholds renders whole, unpadded and unclipped", () => {
+  const s = "tiny note ok";
+  assert.equal(summaryFingerprintLine("b2", s),
+    ` · b2 summary 12ch · head "${s}" … tail "${s}"`);
+});
+
+test("summaryFingerprintLine: CJK counts as single characters (no byte drift)", () => {
+  const s = "中文摘要 mixed en tail";
+  const line = summaryFingerprintLine("b3", s);
+  assert.ok(line.startsWith(` · b3 summary ${s.length}ch`), `charLen must be character-based: ${line}`);
+  assert.ok(line.includes(`head "${s}"`), `short summary appears whole as head: ${line}`);
+  assert.equal(s.length, 18, "precondition: char count includes CJK as one each");
+});
+
+test("summaryFingerprintLine: newlines flatten to spaces and the result stays one line", () => {
+  const s = "first line\nsecond line\n" + "尾".repeat(120);
+  const line = summaryFingerprintLine("b9", s);
+  assert.ok(!line.includes("\n") && !line.includes("\r"), `fingerprint must be a single line: ${JSON.stringify(line)}`);
+  const head = s.slice(0, 30).replace(/\r?\n/g, " ");
+  const tail = s.slice(-100).replace(/\r?\n/g, " ");
+  assert.ok(head.includes("first line second"), `newline became a space in head: ${head}`);
+  assert.equal(line, ` · b9 summary ${s.length}ch · head "${head}" … tail "${tail}"`);
+});
+
+test("compress success panel appends one fingerprint line per created block matching the stored summary (#535 P1)", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000, preserveRecentMessages: 1 })(api as any);
+  const BIG = "中".repeat(6000);
+  const stateFile = "/tmp/pai-acp-compress-fingerprint.session.json";
+  await rm(`${stateFile}.acp.json`, { force: true });
+  const entries = [userMsg("e1", BIG), userMsg("e2", BIG), userMsg("e3", BIG), userMsg("e4", BIG)];
+  const ctx = fakeCtx(entries, stateFile);
+  ctx.__setUsage(100_000);
+  await runContextRound(handlers, ctx);
+
+  const compressTool = api.tools.find((t: any) => t.name === "compress")!;
+  const s1 = "First block fingerprint probe: kept the 50K flat nudge cadence per the frozen design doc.";
+  const s2 = "Second block fingerprint probe: fixed the lock ordering bug at src/runtime.ts:88 (session 01a0d62c).";
+  const out = await compressTool.execute(
+    "tc1",
+    { content: [
+      { startId: "m00001", endId: "m00001", summary: s1 },
+      { startId: "m00003", endId: "m00003", summary: s2 },
+    ] },
+    undefined, undefined, ctx,
+  );
+  const text = typeof out === "string" ? out : out.content?.[0]?.text ?? String(out);
+  assert.ok(text.includes("▣ ACP"), `compress failed: ${text}`);
+  assert.ok(!text.includes("Errors:"), `compress rejected: ${text}`);
+
+  const lines = text.split("\n");
+  assert.match(lines[0]!, /reclaimed, blocks: b1=(?:m\d{5}(?:–m\d{5})?\*?), b2=(?:m\d{5}(?:–m\d{5})?\*?)\)$/);
+  assert.equal(lines[1], summaryFingerprintLine("b1", s1), "line 2 must fingerprint b1 with the EXACT stored summary");
+  assert.equal(lines[2], summaryFingerprintLine("b2", s2), "line 3 must fingerprint b2 with the EXACT stored summary");
+
+  const raw = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
+  const stored = (raw.blocks as any[]).filter((b) => typeof b.summary === "string" && b.summary.length > 0);
+  assert.equal(stored.length, 2, "two blocks stored");
+  assert.equal(stored[0].blockId, "b1");
+  assert.equal(stored[0].summary, s1, "panel fingerprint is computed from the round-tripped stored summary");
+});
+
+// ─── #540: in-place refold must not mislabel a non-tail block ──────────────
+
+test("in-place refold of a non-tail block: span clause and fingerprint reference the refolded block, not the tail (#540)", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000, preserveRecentMessages: 1 })(api as any);
+  const BIG = "中".repeat(6000);
+  const stateFile = "/tmp/pai-acp-refold-nontail.session.json";
+  await rm(`${stateFile}.acp.json`, { force: true });
+  const entries = [userMsg("e1", BIG), userMsg("e2", BIG), userMsg("e3", BIG), userMsg("e4", BIG)];
+  const ctx = fakeCtx(entries, stateFile);
+  ctx.__setUsage(100_000);
+  await runContextRound(handlers, ctx);
+
+  const compressTool = api.tools.find((t: any) => t.name === "compress")!;
+  const decompressTool = api.tools.find((t: any) => t.name === "decompress")!;
+  const s1 = "First block pre-refold summary describing the early investigation phase in detail.";
+  const s2 = "Second block summary covering the later phase, untouched by the refold.";
+  const out1 = await compressTool.execute(
+    "tc1",
+    { content: [
+      { startId: "m00001", endId: "m00001", summary: s1 },
+      { startId: "m00003", endId: "m00003", summary: s2 },
+    ] },
+    undefined, undefined, ctx,
+  );
+  const t1 = typeof out1 === "string" ? out1 : out1.content?.[0]?.text ?? String(out1);
+  assert.ok(t1.includes("▣ ACP") && !t1.includes("Errors:"), `setup compress failed: ${t1}`);
+
+  await decompressTool.execute("tc2", { blockId: "b1", inline: true }, undefined, undefined, ctx);
+
+  const s1b = "Refolded b1 summary: replaced after the inline restore completed, mentions src/runtime.ts:88.";
+  const out2 = await compressTool.execute(
+    "tc3",
+    { content: [{ startId: "m00001", endId: "m00001", summary: s1b }] },
+    undefined, undefined, ctx,
+  );
+  const t2 = typeof out2 === "string" ? out2 : out2.content?.[0]?.text ?? String(out2);
+  assert.ok(t2.includes("▣ ACP"), `refold compress failed: ${t2}`);
+  assert.ok(!t2.includes("Errors:"), `refold rejected: ${t2}`);
+
+  // The legacy tail slice (slice(-blocksCreated) over [b1, b2] with a refold
+  // updating b1 in place) presented b2's stale summary as the new one.
+  const lines = t2.split("\n");
+  assert.match(lines[0]!, /blocks: b1=/, `span clause must reference refolded b1: ${lines[0]}`);
+  assert.equal(lines[1], summaryFingerprintLine("b1", s1b), `fingerprint must show b1's NEW summary: ${lines[1]}`);
+  assert.ok(!t2.includes(summaryFingerprintLine("b2", s2)), `must not present untouched b2 as refolded: ${t2}`);
+
+  const raw = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
+  const blocks = raw.blocks as any[];
+  assert.equal(blocks.length, 2, "refold updates in place — no third block");
+  assert.equal(blocks.find((b) => b.blockId === "b1")!.summary, s1b, "b1 summary replaced by the refold");
+  assert.equal(blocks.find((b) => b.blockId === "b2")!.summary, s2, "b2 summary untouched");
 });

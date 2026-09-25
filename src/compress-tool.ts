@@ -319,6 +319,15 @@ export function blockSpanLabel(block: CompressionBlock, state: CompressionState)
   return `${block.blockId}${tierMark}=${span}${star}`;
 }
 
+// #535 P1: one-line integrity fingerprint per new/updated block — cheap
+// head/tail excerpt + char length so the model can verify its summary was
+// stored intact without decompressing.
+export function summaryFingerprintLine(blockId: string, summary: string): string {
+  const head = summary.slice(0, 30).replace(/\r?\n/g, " ");
+  const tail = summary.slice(-100).replace(/\r?\n/g, " ");
+  return ` · ${blockId} summary ${summary.length}ch · head "${head}" … tail "${tail}"`;
+}
+
 function blockHasVisibleAnchor(block: CompressionBlock, visibleIds: Set<string>): boolean {
   if (visibleIds.has(`acp_summary_${block.blockId}`)) return true;
   return block.effectiveMessageIds.some((id) => visibleIds.has(id));
@@ -502,6 +511,12 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
     beforeMsgCount: messages.length,
     beforeTokens,
   });
+  // #540: select changed blocks by before/after runId diff — every
+  // applyCompression assigns a fresh runId to both NEW and REFOLDED blocks,
+  // while a refold keeps its original array position. A tail slice
+  // (slice(-blocksCreated)) mislabels a non-tail refolded block (e.g. refold
+  // of b1 in [b1,b2,b3] would present b3's stale summary as the new one).
+  const beforeRunIds = new Map(state.blocks.map((b) => [b.blockId, b.runId]));
   const applied = runtime.core.applyCompression({
     ranges: sanitizedRanges.map((r) => ({ startRef: r.startId, endRef: r.endId, summary: r.summary, topic: r.topic ?? topLevelTopic, summaryMaxChars, compressCallId: toolCallId })),
     messages,
@@ -509,8 +524,9 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
     config,
   });
   assertNotAborted(signal);
+  const changedBlocks = applied.state.blocks.filter((b) => beforeRunIds.get(b.blockId) !== b.runId);
   const rewriteSpans = applied.result.blocksCreated > 0
-    ? tier3OnlyRewrite(applied.state.blocks.slice(-applied.result.blocksCreated), applied.state.blocks)
+    ? tier3OnlyRewrite(changedBlocks, applied.state.blocks)
     : null;
   if (rewriteSpans) {
     await runtime.save(state, ctx);
@@ -555,7 +571,7 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
   const afterTokens = estimateTokens(afterTurn.messages, collectCoveredMessageIds(applied.state), imageTokens);
   const reclaimed = Math.max(0, beforeTokens - afterTokens);
 
-  const newBlocks = applied.state.blocks.slice(-blocksCreated);
+  const newBlocks = changedBlocks;
   debug.event("compress-out", {
     sid: ctx.sessionManager.getSessionId(),
     blocksCreated,
@@ -602,6 +618,9 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
     ? `blocks: ${newBlocks.map((b) => blockSpanLabel(b, applied.state)).join(", ")}`
     : "0 blocks";
   const lines = [`▣ ACP | ${formatK(beforeTokens)} → ${formatK(afterTokens)} tokens (~${formatK(reclaimed)} reclaimed, ${spanClause})`];
+  if (blocksCreated > 0) {
+    for (const b of newBlocks) lines.push(summaryFingerprintLine(b.blockId, b.summary));
+  }
   if (warnings.length > 0) lines.push("⚠️ " + warnings.join("; "));
   if (errors.length > 0) lines.push("Errors: " + errors.join("; "));
   // #420: carry the post-compression snapshot so a same-turn follow-up

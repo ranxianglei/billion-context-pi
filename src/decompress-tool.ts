@@ -3,7 +3,7 @@ import type { AgentToolResult, ExtensionContext, ToolDefinition } from "@earendi
 import type { AcpRuntime } from "./runtime.js";
 import { applyToolPromptOverrides, type ToolPromptOverrides } from "./surface.js";
 import { debug, logError, logInfo, logThrow } from "./log.js";
-import { parseBlockIdArg, collectBlockContent, type CompressionBlock } from "acp-kernel";
+import { parseBlockIdArg, collectBlockContent, markBlockRestoredInline, type CompressionBlock, type InlineRestoreResult } from "acp-kernel";
 import { entriesToCoreMessages } from "./messages.js";
 import { assertNotAborted } from "./abort.js";
 import { UNSUPPORTED_HOST_MESSAGE } from "./omp.js";
@@ -59,6 +59,17 @@ export function makeDecompressTool(runtime: AcpRuntime, overrides?: ToolPromptOv
       return { details: undefined, content: [{ type: "text", text: result }] };
     },
   }, overrides);
+}
+
+// #535 P2: close the loop on an inline restore — kernel K2 updates the
+// inline-restored block IN PLACE when re-compressed (same id, replaced
+// summary) instead of rejecting "already compressed". Degrades to a generic
+// hint when the kernel could not derive exact refs (e.g. multi-segment).
+function refoldHint(blockId: string, result: InlineRestoreResult | null): string {
+  if (result !== null && result.restoredStartRef && result.restoredEndRef) {
+    return `Re-fold: call compress("${result.restoredStartRef}–${result.restoredEndRef}", <fresh summary>) → updates block ${blockId} in place (same id, new summary).`;
+  }
+  return `Re-fold: call compress over the restored messages with a fresh summary → updates block ${blockId} in place (same id, new summary).`;
 }
 
 /** Allowed roots for toFile paths. Keeps user-supplied paths from escaping to
@@ -254,9 +265,13 @@ async function handleDecompress(args: DecompressArgs, runtime: AcpRuntime, ctx: 
   // inline mode: return content directly. Model explicitly accepts the context
   // cost (e.g. small restorations or when it must reason over exact text).
   if (args.inline === true && !args.toFile) {
-    debug.event("decompress", { blockId, full, count, mode: "inline" });
-    logInfo("decompress", { sid: ctx.sessionManager.getSessionId(), event: "block", mode: "inline", blockId, full, count });
-    return `Restored block ${blockId} (${count} item${count === 1 ? "" : "s"}) inline:\n\n${text}`;
+    // Flag the block as inline-restored (persisted) so a later compress may
+    // refold it in place (kernel K2), and surface the re-fold hint.
+    const marked = markBlockRestoredInline(state, blockId);
+    await runtime.save(marked.state, ctx);
+    debug.event("decompress", { blockId, full, count, mode: "inline", restoredStartRef: marked.result?.restoredStartRef ?? null, restoredEndRef: marked.result?.restoredEndRef ?? null });
+    logInfo("decompress", { sid: ctx.sessionManager.getSessionId(), event: "block", mode: "inline", blockId, full, count, refold: marked.result !== null });
+    return `Restored block ${blockId} (${count} item${count === 1 ? "" : "s"}) inline:\n\n${text}\n\n${refoldHint(blockId, marked.result)}`;
   }
 
   const targetPath = args.toFile
