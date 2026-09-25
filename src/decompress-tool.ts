@@ -6,6 +6,7 @@ import { debug, logError, logInfo, logThrow } from "./log.js";
 import { parseBlockIdArg, collectBlockContent, markBlockRestoredInline, type CompressionBlock, type InlineRestoreResult } from "acp-kernel";
 import { entriesToCoreMessages } from "./messages.js";
 import { assertNotAborted } from "./abort.js";
+import { loadAncestorEntries } from "./session-log.js";
 import { UNSUPPORTED_HOST_MESSAGE } from "./omp.js";
 import { writeFile, mkdir } from "node:fs/promises";
 import { existsSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
@@ -166,12 +167,15 @@ function findMessageContent(ref: string, ctx: ExtensionContext): { text: string;
  *  (no suffix), so both sides normalize to the base id before comparing.
  *  Re-projecting a fetched entry re-splits multi tool-call assistants back
  *  into `${entryId}#${callId}` CoreMessages, which match
- *  block.effectiveMessageIds verbatim in collectBlockContent's targetIds set. */
-function resolveBlockMessages(
+ *  block.effectiveMessageIds verbatim in collectBlockContent's targetIds set.
+ *  Third fallback (issue #531): a derived child session (Prime RLM inline)
+ *  inherits blocks whose message ids exist only in ANCESTOR session logs —
+ *  walk the parentSession header chain read-only for whatever is still missing. */
+async function resolveBlockMessages(
   block: CompressionBlock,
   coreMessages: ReturnType<typeof entriesToCoreMessages>,
   ctx: ExtensionContext,
-): ReturnType<typeof entriesToCoreMessages> {
+): Promise<ReturnType<typeof entriesToCoreMessages>> {
   const neededBaseIds = new Set(block.effectiveMessageIds.map((id) => id.split("#")[0]!));
   const presentBaseIds = new Set(coreMessages.map((m) => m.id.split("#")[0]!));
   const missingBaseIds = [...neededBaseIds].filter((id) => !presentBaseIds.has(id));
@@ -182,7 +186,31 @@ function resolveBlockMessages(
     const entry = ctx.sessionManager.getEntry(baseId);
     if (entry) extra.push(...entriesToCoreMessages([entry]));
   }
+
+  const coveredBaseIds = new Set([...coreMessages, ...extra].map((m) => m.id.split("#")[0]!));
+  const stillMissing = [...neededBaseIds].filter((id) => !coveredBaseIds.has(id));
+  if (stillMissing.length > 0) {
+    const ancestors = await loadAncestorEntries(ctx.sessionManager.getSessionFile(), new Set(stillMissing));
+    if (ancestors.length > 0) {
+      logInfo("decompress", { sid: ctx.sessionManager.getSessionId(), event: "ancestor-fallback", missing: stillMissing.length, found: ancestors.length });
+      for (const entry of ancestors) extra.push(...entriesToCoreMessages([entry]));
+    }
+  }
   return [...coreMessages, ...extra];
+}
+
+/** Derived-child fallback for a single message ref (issue #531): the entry may
+ *  live only in an ancestor session's log (inherited block) — scan the
+ *  parentSession chain read-only. */
+async function findAncestorMessage(ref: string, ctx: ExtensionContext): Promise<{ text: string; role: string } | null> {
+  const baseId = ref.split("#")[0]!;
+  const ancestors = await loadAncestorEntries(ctx.sessionManager.getSessionFile(), new Set([baseId]));
+  for (const entry of ancestors) {
+    for (const cm of entriesToCoreMessages([entry])) {
+      if (cm.id === ref) return { text: cm.text ?? "", role: cm.role };
+    }
+  }
+  return null;
 }
 
 /** Decompress a single message by its ref. Unlike block decompression (which
@@ -194,7 +222,8 @@ async function handleMessageRef(
   args: DecompressArgs,
   ctx: ExtensionContext,
 ): Promise<string> {
-  const found = findMessageContent(ref, ctx);
+  let found = findMessageContent(ref, ctx);
+  if (!found) found = await findAncestorMessage(ref, ctx);
   if (!found || !found.text) {
     return `Message ${ref} (in block ${ownerBlockId}) has no restorable text content in the session log.`;
   }
@@ -255,9 +284,11 @@ async function handleDecompress(args: DecompressArgs, runtime: AcpRuntime, ctx: 
 
   const full = args.full ?? false;
   // Resolve the block's message refs against the FULL session tree (falling
-  // back to getEntry for refs missing from the active branch), so decompress
-  // still restores original text after a tree navigation (undo/redo//tree).
-  const resolved = resolveBlockMessages(block, coreMessages, ctx);
+  // back to getEntry for refs missing from the active branch, then to ancestor
+  // session logs for derived children — issue #531), so decompress still
+  // restores original text after a tree navigation (undo/redo//tree) or in a
+  // child that inherited the block.
+  const resolved = await resolveBlockMessages(block, coreMessages, ctx);
   const { text, count } = collectBlockContent(state, block, resolved, { full });
 
   if (count === 0) return `Block ${blockId} has no restorable message content.`;
