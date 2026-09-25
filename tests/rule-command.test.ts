@@ -124,6 +124,12 @@ test("/acp-rule warns with the enablement hint instead of an empty list when the
   await command!.handler("some rule", fakeCtx([], stateFile, notifies));
   assert.equal(sent.length, 0, "record path also gated");
   assert.equal(notifies.length, 2, "record path shows the same hint");
+  await command!.handler("remove rule1", fakeCtx([], stateFile, notifies));
+  assert.equal(sent.length, 0, "remove path also gated");
+  assert.equal(notifies.length, 3, "remove path shows the same hint");
+  await command!.handler("clear", fakeCtx([], stateFile, notifies));
+  assert.equal(sent.length, 0, "clear path also gated");
+  assert.equal(notifies.length, 4, "clear path shows the same hint");
 });
 
 test("/acp-rule falls back to raw-text ui.notify on hosts without sendMessage (#527)", async () => {
@@ -133,4 +139,100 @@ test("/acp-rule falls back to raw-text ui.notify on hosts without sendMessage (#
 
   await command!.handler("prefer pnpm", fakeCtx([], stateFile, notifies));
   assert.deepEqual(notifies.map((n) => n.msg), ["Recorded rule1: prefer pnpm"]);
+});
+
+test("/acp-rule remove <id> removes via the kernel API and echoes the removed rule text (#537)", async () => {
+  const sent: SentMessage[] = [];
+  const stateFile = "/tmp/pai-acp-rule-remove.session.json";
+  const { command } = await setup([], stateFile, { rules: true, sendMessage: (m) => sent.push(m) });
+
+  await command!.handler("prefer pnpm", fakeCtx([], stateFile));
+  assert.equal(sent[0]!.content, "Recorded rule1: prefer pnpm");
+
+  await command!.handler("remove rule1", fakeCtx([], stateFile));
+  assert.equal(sent.length, 2);
+  assert.equal(sent[1]!.customType, ACP_RULE_CUSTOM_TYPE);
+  assert.equal(sent[1]!.content, "Removed rule1: prefer pnpm", "same echo shape as the bili model path");
+
+  const sidecar = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8")) as { rules?: unknown[] };
+  assert.deepEqual(sidecar.rules, [], "sidecar emptied after removal");
+
+  await command!.handler("", fakeCtx([], stateFile));
+  assert.equal(sent[2]!.content, "No rules recorded.", "list reflects the removal");
+});
+
+test("/acp-rule remove with an unknown id surfaces the kernel error verbatim without mutating (#537)", async () => {
+  const sent: SentMessage[] = [];
+  const notifies: Array<{ msg: string; type?: string }> = [];
+  const stateFile = "/tmp/pai-acp-rule-remove-unknown.session.json";
+  const { command } = await setup([], stateFile, { rules: true, sendMessage: (m) => sent.push(m) });
+
+  await command!.handler("keep types strict", fakeCtx([], stateFile));
+  await command!.handler("remove rule99", fakeCtx([], stateFile, notifies));
+  assert.equal(sent.length, 1, "no transcript message for a failed removal");
+  assert.equal(notifies.length, 1);
+  assert.equal(notifies[0]!.type, "error");
+  assert.equal(
+    notifies[0]!.msg,
+    'no rule with id "rule99" — list current rules first (omit the text argument).',
+    "kernel error passed through verbatim",
+  );
+
+  await command!.handler("", fakeCtx([], stateFile, notifies));
+  assert.equal(sent[1]!.content, "1. [rule1] keep types strict", "existing rule untouched by the failed removal");
+});
+
+test("/acp-rule clear removes all rules and reports the count; empty clear is honest (#537)", async () => {
+  const sent: SentMessage[] = [];
+  const stateFile = "/tmp/pai-acp-rule-clear.session.json";
+  const { command } = await setup([], stateFile, { rules: true, sendMessage: (m) => sent.push(m) });
+
+  await command!.handler("prefer pnpm", fakeCtx([], stateFile));
+  await command!.handler("always typecheck", fakeCtx([], stateFile));
+  await command!.handler("clear", fakeCtx([], stateFile));
+  assert.equal(sent[2]!.content, "Cleared 2 rule(s).", "count reported for a non-empty clear");
+
+  const sidecar = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8")) as { rules?: unknown[] };
+  assert.deepEqual(sidecar.rules, [], "sidecar emptied after clear");
+
+  await command!.handler("clear", fakeCtx([], stateFile));
+  assert.equal(sent[3]!.content, "No rules to clear.", "honest empty clear, no false success");
+});
+
+test("/acp-rule rejects mixed operations in one call without executing or recording (#537)", async () => {
+  const sent: SentMessage[] = [];
+  const notifies: Array<{ msg: string; type?: string }> = [];
+  const stateFile = "/tmp/pai-acp-rule-conflict.session.json";
+  const { command } = await setup([], stateFile, { rules: true, sendMessage: (m) => sent.push(m) });
+  await command!.handler("prefer pnpm", fakeCtx([], stateFile));
+
+  await command!.handler("remove rule1 clear", fakeCtx([], stateFile, notifies));
+  assert.equal(sent.length, 1, "nothing executed or recorded for a mixed call");
+  assert.equal(notifies.length, 1);
+  assert.equal(notifies[0]!.type, "error");
+  assert.match(notifies[0]!.msg, /One operation per call/);
+
+  await command!.handler("clear clear", fakeCtx([], stateFile, notifies));
+  assert.equal(sent.length, 1, "duplicated op keyword also rejected");
+  assert.equal(notifies.length, 2);
+  assert.match(notifies[1]!.msg, /One operation per call/);
+
+  await command!.handler("", fakeCtx([], stateFile, notifies));
+  assert.equal(sent[1]!.content, "1. [rule1] prefer pnpm", "state unmutated after rejected mixed calls");
+});
+
+test("/acp-rule still records plain text that starts with remove/clear-like words (#537)", async () => {
+  const sent: SentMessage[] = [];
+  const stateFile = "/tmp/pai-acp-rule-plainwords.session.json";
+  const { command } = await setup([], stateFile, { rules: true, sendMessage: (m) => sent.push(m) });
+
+  await command!.handler("removing old logs nightly", fakeCtx([], stateFile));
+  await command!.handler("clear the cache before deploys", fakeCtx([], stateFile));
+  await command!.handler("remove trailing whitespace from configs", fakeCtx([], stateFile));
+  await command!.handler("record a rule about removing things", fakeCtx([], stateFile));
+  assert.equal(sent.length, 4, "all four plain texts recorded, none misparsed as operations");
+  assert.equal(sent[0]!.content, "Recorded rule1: removing old logs nightly");
+  assert.equal(sent[1]!.content, "Recorded rule2: clear the cache before deploys");
+  assert.equal(sent[2]!.content, "Recorded rule3: remove trailing whitespace from configs");
+  assert.equal(sent[3]!.content, "Recorded rule4: record a rule about removing things");
 });

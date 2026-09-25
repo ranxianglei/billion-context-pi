@@ -339,8 +339,8 @@ export interface AdapterConfig {
    *  delimit real turns. See docs/host-adapter.md. */
   hostSession?: boolean | HostSessionConfig;
   /** Persistent-rules feature gate (#526): opt-in `rules: true` in acp.json.
-   *  Gates the human `/acp-rule` command (list + record — kernel
-   *  `listRules`/`addRule` against the session `.acp.json` sidecar state) and
+   *  Gates the human `/acp-rule` command (list + record + remove + clear — kernel
+   *  `listRules`/`addRule`/`removeRule`/`clearRules` against the session `.acp.json` sidecar state) and
    *  the model-side `acp_rule` tool (#490). Custom limits via
    *  coreOverrides.rules ({ maxRules?, maxRuleChars? }). */
   rules?: boolean;
