@@ -6,6 +6,7 @@ import * as path from "node:path";
 import { createAcpExtension } from "../src/index.js";
 import { FORK_HOST_WARNING_MESSAGE, UNSUPPORTED_HOST_MESSAGE } from "../src/omp.js";
 import { setRunNpmForTest } from "../src/update.js";
+import { tmpPath } from "./tmp-path.js";
 
 // Issue #454 stopgap (direction per owner via #452): declared fork hosts
 // (PI_ACP_FORK_HOST=1) are admitted but carry a known ref-drift limitation, so
@@ -49,7 +50,7 @@ function ompCtx(notify: Notify, hasUI: boolean) {
     sessionManager: {
       getBranch: () => [],
       getSessionId: () => "fork-stopgap-session",
-      getSessionFile: () => "/tmp/fork-stopgap.session.json",
+      getSessionFile: () => tmpPath("fork-stopgap.session.json"),
     },
   };
 }
@@ -66,7 +67,7 @@ function piCtx(notify: Notify) {
       buildContextEntries: () => [],
       getBranch: () => [],
       getSessionId: () => "pi-stopgap-session",
-      getSessionFile: () => "/tmp/pi-stopgap.session.json",
+      getSessionFile: () => tmpPath("pi-stopgap.session.json"),
     },
   };
 }

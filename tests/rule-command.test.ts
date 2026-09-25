@@ -144,7 +144,7 @@ test("/acp-rule falls back to raw-text ui.notify on hosts without sendMessage (#
 
 test("/acp-rule remove <id> removes via the kernel API and echoes the removed rule text (#537)", async () => {
   const sent: SentMessage[] = [];
-  const stateFile = "/tmp/pai-acp-rule-remove.session.json";
+  const stateFile = tmpPath("pai-acp-rule-remove.session.json");
   const { command } = await setup([], stateFile, { rules: true, sendMessage: (m) => sent.push(m) });
 
   await command!.handler("prefer pnpm", fakeCtx([], stateFile));
@@ -165,7 +165,7 @@ test("/acp-rule remove <id> removes via the kernel API and echoes the removed ru
 test("/acp-rule remove with an unknown id surfaces the kernel error verbatim without mutating (#537)", async () => {
   const sent: SentMessage[] = [];
   const notifies: Array<{ msg: string; type?: string }> = [];
-  const stateFile = "/tmp/pai-acp-rule-remove-unknown.session.json";
+  const stateFile = tmpPath("pai-acp-rule-remove-unknown.session.json");
   const { command } = await setup([], stateFile, { rules: true, sendMessage: (m) => sent.push(m) });
 
   await command!.handler("keep types strict", fakeCtx([], stateFile));
@@ -185,7 +185,7 @@ test("/acp-rule remove with an unknown id surfaces the kernel error verbatim wit
 
 test("/acp-rule clear removes all rules and reports the count; empty clear is honest (#537)", async () => {
   const sent: SentMessage[] = [];
-  const stateFile = "/tmp/pai-acp-rule-clear.session.json";
+  const stateFile = tmpPath("pai-acp-rule-clear.session.json");
   const { command } = await setup([], stateFile, { rules: true, sendMessage: (m) => sent.push(m) });
 
   await command!.handler("prefer pnpm", fakeCtx([], stateFile));
@@ -203,7 +203,7 @@ test("/acp-rule clear removes all rules and reports the count; empty clear is ho
 test("/acp-rule rejects mixed operations in one call without executing or recording (#537)", async () => {
   const sent: SentMessage[] = [];
   const notifies: Array<{ msg: string; type?: string }> = [];
-  const stateFile = "/tmp/pai-acp-rule-conflict.session.json";
+  const stateFile = tmpPath("pai-acp-rule-conflict.session.json");
   const { command } = await setup([], stateFile, { rules: true, sendMessage: (m) => sent.push(m) });
   await command!.handler("prefer pnpm", fakeCtx([], stateFile));
 
@@ -224,7 +224,7 @@ test("/acp-rule rejects mixed operations in one call without executing or record
 
 test("/acp-rule still records plain text that starts with remove/clear-like words (#537)", async () => {
   const sent: SentMessage[] = [];
-  const stateFile = "/tmp/pai-acp-rule-plainwords.session.json";
+  const stateFile = tmpPath("pai-acp-rule-plainwords.session.json");
   const { command } = await setup([], stateFile, { rules: true, sendMessage: (m) => sent.push(m) });
 
   await command!.handler("removing old logs nightly", fakeCtx([], stateFile));
