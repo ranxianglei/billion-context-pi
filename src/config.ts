@@ -250,6 +250,19 @@ export interface AdapterConfig {
    *  none. Intended for cumulative-snapshot tools where each call supersedes
    *  the last. Settable via acp.json since #499. */
   protectedLatestTools?: string[];
+  /** Tool-name patterns (glob suffix allowed) EXCLUDED from the soft-protected
+   *  recent zone: matching tool results inside the recent window fold
+   *  immediately instead of aging out first (kernel >= 0.0.92). Default:
+   *  unset → kernel built-in ["decompress", "search_context", "read",
+   *  "bash"]. The built-in keeps read/bash compressible — the largest
+   *  reclaimable mass — but that also folds freshly-read files in batch-read
+   *  workflows (#1198-style fold→re-read loop, bili #1277). Recommended
+   *  remedy: ["decompress", "search_context", "bash"] (remove only read).
+   *  ⚠ Unlike the two protection keys, an EMPTY ARRAY IS VALID — it excludes
+   *  nothing and gives every tool recent-zone protection (escape hatch); do
+   *  not re-include decompress/search_context or just-restored blocks get
+   *  pinned in the recent zone and become unreclaimable. */
+  neverPreserveRecentTools?: string[];
   preserveRecentMessages?: number;
   /** Check npm for a newer billion-context-pi on startup and auto-install it. Default: true.
    *  Disable via `autoUpdate: false` or env `ACP_AUTO_UPDATE=0` to avoid all
@@ -558,6 +571,7 @@ export function resolveConfig(adapter: AdapterConfig, liveContextLimit: number, 
   const config = defaultConfig(limit, {
     protectedTools: adapter.protectedTools ?? [],
     protectedLatestTools: adapter.protectedLatestTools ?? [],
+    neverPreserveRecentTools: adapter.neverPreserveRecentTools,
     preserveRecentMessages: adapter.preserveRecentMessages ?? 5,
     ...adapter.coreOverrides,
   });

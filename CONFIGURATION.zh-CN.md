@@ -128,6 +128,7 @@
 | `toolOutputMaxBytes` | number | `50000` | 🟢 ACTIVE | 工具返回文本的硬性字节上限。 |
 | `protectedTools` | string\[\] | `无` | 🟢 ACTIVE | 工具名模式（支持 glob 后缀），其**所有** call+result 对都被硬排除在压缩之外（ref 渲染为 `BLOCKED`）。适用于低频高价值、输出为独立内容的工具——见下方 ⚠ 说明。 |
 | `protectedLatestTools` | string\[\] | `无` | 🟢 ACTIVE | 工具名模式（支持 glob 后缀），仅**最近一次** call+result 对被硬排除在压缩之外；更早的对仍可压缩。适用于累积快照型工具。 |
+| `neverPreserveRecentTools` | string\[\] | 内核内置（`["decompress", "search_context", "read", "bash"]`，需 acp-kernel >= 0.0.92） | 🟢 ACTIVE | 从软保护近期区**移除**的工具名模式，让它们的结果立即可压。默认让 `read`/`bash` 保持可压；只移除 `read`（保留 `decompress`/`search_context`）可解批量读文件的「折叠→重读」死循环。**空数组 `[]` 合法**（最大保护逃生门）。 |
 | `throttleRetry` | boolean \| object | `true` | 🟢 ACTIVE | 自动重试 provider 侧 token 限流错误（递进退避）。 |
 | `repetitionGuard` | boolean \| object | `true` | 🟢 ACTIVE | 打断字节级完全相同的工具调用死循环（连续 3 次告警，连续 5 次拦截并中止本轮）。 |
 | `degenerationGuard` | boolean \| object | `true` | 🟢 ACTIVE | 折叠出站视图中 assistant text/thinking 里的单字符退化连击（如 4655×「【」）并注入一次性恢复通知——打破 pi 每轮请求都回传退化 thinking 导致的连环 abort 死循环（#351）。 |
@@ -271,6 +272,19 @@
 - **默认值：** `无`（空）
 - **状态：** 🟢 ACTIVE
 - **说明：** 工具名模式（支持 glob 后缀）——仅匹配的**最近一次** call+result 对被硬排除在压缩之外（ref 渲染为 `BLOCKED`），更早的对仍可压缩。适用于每次调用取代上一次的累积快照型工具。校验规则与 `protectedTools` 相同。何时用哪个旋钮见 `protectedTools` 下的 ⚠ 说明。
+
+### `neverPreserveRecentTools`
+
+- **类型：** `string[]`（工具名模式，支持 glob 后缀）
+- **默认值：** 未设置 → 内核内置 `["decompress", "search_context", "read", "bash"]`（需 `acp-kernel` >= 0.0.92）
+- **状态：** 🟢 ACTIVE
+- **说明：** 从软保护近期区（`preserveRecentMessages` 窗口）中**排除**的工具名模式：匹配的工具结果在近期窗口内立即可压缩，不再等待超龄。内核内置让 `read`/`bash` 保持可压（它们是最大的可回收体量）—— 但正是这个默认让批量读文件的工作流把刚读的文件立刻折掉，陷入「折叠→重读」死循环（上游 billion-context #1198/#1277）。**推荐解法 —— 只移除 `read`：**
+
+  ```json
+  { "neverPreserveRecentTools": ["decompress", "search_context", "bash"] }
+  ```
+
+  这样新读的文件留在近期区，之后按位置超龄回归可压（不同于 `protectedLatestTools` 会把最新一次 read 永久钉住，也不同于 `protectedTools` 会永不折叠任何 read）。**请保留 `decompress`/`search_context` 在列表里**：重新纳入它们会把刚恢复的大块内容钉死在近期区无法回收 —— 换一种病。**⚠ 空数组 `[]` 在这里合法**（与两个保护旋钮不同）：它什么都不排除，让所有工具都获得近期区保护 —— 最大保护逃生门。显式数组逐字替换默认列表。
 
 ---
 

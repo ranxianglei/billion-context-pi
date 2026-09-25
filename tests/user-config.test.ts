@@ -281,3 +281,40 @@ test("malformed protection values in acp.json warn and fall back instead of fail
     await fs.rm(tmpDir, { recursive: true, force: true });
   }
 });
+
+// --- neverPreserveRecentTools (empty array is a VALID escape hatch) ---------
+
+test("loadUserConfig picks up neverPreserveRecentTools from acp.json", async () => {
+  const tmpDir = path.join(os.tmpdir(), `acp-test-npr-${Date.now()}`);
+  await fs.mkdir(tmpDir, { recursive: true });
+  try {
+    await writeConfig(tmpDir, { neverPreserveRecentTools: ["decompress", "search_context", "bash"] });
+    const config = await loadUserConfig(tmpDir);
+    assert.deepEqual(config.neverPreserveRecentTools, ["decompress", "search_context", "bash"]);
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("applyUserConfig accepts an EMPTY neverPreserveRecentTools array (unlike the protection keys)", () => {
+  const result = applyUserConfig({}, { neverPreserveRecentTools: [] });
+  assert.deepEqual(result.neverPreserveRecentTools, [], "[] is the max-protection escape hatch, not a malformed value");
+});
+
+test("applyUserConfig trims neverPreserveRecentTools and lets the user override the adapter", () => {
+  const result = applyUserConfig(
+    { neverPreserveRecentTools: ["read", "bash"] },
+    { neverPreserveRecentTools: [" decompress ", "search_context", "bash"] },
+  );
+  assert.deepEqual(result.neverPreserveRecentTools, ["decompress", "search_context", "bash"]);
+});
+
+test("applyUserConfig keeps the adapter neverPreserveRecentTools when the user value is malformed", () => {
+  const result = applyUserConfig({ neverPreserveRecentTools: ["read"] }, { neverPreserveRecentTools: [42] });
+  assert.deepEqual(result.neverPreserveRecentTools, ["read"], "malformed user value falls back to adapter value");
+});
+
+test("applyUserConfig drops malformed neverPreserveRecentTools when no adapter value exists", () => {
+  const result = applyUserConfig({}, { neverPreserveRecentTools: "read" });
+  assert.equal(result.neverPreserveRecentTools, undefined);
+});

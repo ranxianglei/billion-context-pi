@@ -20,6 +20,7 @@ export interface UserAcpConfig {
   modelContextLimit?: number;
   protectedTools?: string[];
   protectedLatestTools?: string[];
+  neverPreserveRecentTools?: string[];
   toolBashDefaultTimeout?: number;
   toolOutputMaxBytes?: number;
   delegate?: boolean | DelegateConfig;
@@ -136,7 +137,7 @@ function join(... parts: string[]): string {
 
 const KNOWN = new Set([
   "enabled", "debug", "autoUpdate", "modelContextLimit",
-  "protectedTools", "protectedLatestTools",
+  "protectedTools", "protectedLatestTools", "neverPreserveRecentTools",
   "toolBashDefaultTimeout", "toolOutputMaxBytes",
   "delegate", "compress", "displayUsage", "throttleRetry",
   "outputHeadroomMaxPct",
@@ -173,7 +174,25 @@ export function applyUserConfig(adapter: AdapterConfig, user: UserAcpConfig): Ad
     else if (adapter[key] !== undefined) result[key] = adapter[key];
     else delete result[key];
   }
+  // neverPreserveRecentTools is validated separately from the two protection
+  // keys: an EMPTY ARRAY IS VALID here (max-protection escape hatch — the
+  // kernel built-in list stops excluding anything), so it must not ride the
+  // non-empty-array check above (bili #1277).
+  if ("neverPreserveRecentTools" in user) {
+    const cleaned = cleanNeverPreserveList(user.neverPreserveRecentTools);
+    if (cleaned !== undefined) result.neverPreserveRecentTools = cleaned;
+    else if (adapter.neverPreserveRecentTools !== undefined) result.neverPreserveRecentTools = adapter.neverPreserveRecentTools;
+    else delete result.neverPreserveRecentTools;
+  }
   return result;
+}
+
+function cleanNeverPreserveList(value: unknown): string[] | undefined {
+  if (!Array.isArray(value) || !value.every((v) => typeof v === "string" && v.trim() !== "")) {
+    console.warn(`[bcp] acp.json "neverPreserveRecentTools" must be an array of non-empty strings (empty array allowed — protects everything) — ignoring the value`);
+    return undefined;
+  }
+  return value.map((v) => v.trim());
 }
 
 function cleanProtectionList(key: string, value: unknown): string[] | undefined {
