@@ -159,9 +159,9 @@ export interface AcpRuntime {
    *  is written). Returns the failure count for this exact range fingerprint
    *  in this session (issue #250 loop breaker). */
   noteDeadCompress(sid: string, fingerprint: string): number;
-  /** Drop a session's dead-range repeat tracking (a successful compress
-   *  renumbers refs so old fingerprints are meaningless; session_shutdown for
-   *  memory hygiene). */
+  /** Drop a session's dead-range repeat tracking (a successful compress is
+   *  progress — reset the #250 loop breaker for the next attempt round;
+   *  session_shutdown for memory hygiene). Compress does NOT renumber refs. */
   clearDeadCompress(sid: string): void;
   /** Record one turn's FRESH-anchor provider usage sample and report whether
    *  the recent window is stable enough to calibrate the internal estimate
