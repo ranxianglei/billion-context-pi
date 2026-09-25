@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { rm, readFile } from "node:fs/promises";
 import { createAcpExtension } from "../src/index.js";
+import { tmpPath } from "./tmp-path.js";
 
 const ZH = "概";
 const body = (n: number) => "body " + n + " " + ZH.repeat(6000);
@@ -75,7 +76,7 @@ async function setup(stateFile: string, adapter: Record<string, unknown> = {}) {
 const stateOf = async (f: string) => JSON.parse(await readFile(f + ".acp.json", "utf8"));
 
 test("tier-3-only rewrite is rejected and state is rolled back (dog/billion-context-pi#3)", async () => {
-  const stateFile = "/tmp/pai-acp-t3-guard.session.json";
+  const stateFile = tmpPath("pai-acp-t3-guard.session.json");
   const { run } = await setup(stateFile);
   const sum = (t: string) => t + " " + ZH.repeat(80);
 
@@ -109,7 +110,7 @@ test("tier-3 rewrite rejection names the tier-ready alternative (#344)", async (
   // Default triggers are count-off (kernel #379: tier2Trigger 1000), so this
   // test pins the #344 hint MECHANISM with explicit low triggers — 5 tier-1
   // blocks >= 3 still name the tier-2 alternative in the rejection.
-  const stateFile = "/tmp/pai-acp-t3-hint.session.json";
+  const stateFile = tmpPath("pai-acp-t3-hint.session.json");
   const { run } = await setup(stateFile, {
     preserveRecentMessages: 0,
     coreOverrides: { tiers: { enabled: true, tier2Trigger: 3, tier3Trigger: 6 } },
@@ -133,7 +134,7 @@ test("tier-3 rewrite rejection names the tier-ready alternative (#344)", async (
 });
 
 test("lower-tier distillation still allowed: T2 block condenses to T3", async () => {
-  const stateFile = "/tmp/pai-acp-t3-allow.session.json";
+  const stateFile = tmpPath("pai-acp-t3-allow.session.json");
   const { run } = await setup(stateFile);
   const sum = (t: string) => t + " " + ZH.repeat(80);
 

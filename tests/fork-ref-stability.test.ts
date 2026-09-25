@@ -4,6 +4,7 @@ import { readFile, rm } from "node:fs/promises";
 import { createAcpExtension } from "../src/index.js";
 import { isCompressNoopText } from "../src/compress-tool.js";
 import { setRunNpmForTest } from "../src/update.js";
+import { tmpPath } from "./tmp-path.js";
 
 // Issue #459 (root fix for the #452 loop under declared fork hosts):
 // live-tail ids were positional (live-N) and churned on every context fire,
@@ -71,7 +72,7 @@ const DUP = "重".repeat(800);
 
 test("issue #459: live-tail ids are stable across context fires", async () => {
   const prevForkHost = process.env.PI_ACP_FORK_HOST;
-  const stateFile = "/tmp/pai-acp-fork-stab1.session.json";
+  const stateFile = tmpPath("pai-acp-fork-stab1.session.json");
   process.env.PI_ACP_FORK_HOST = "1";
   try {
     const { api, handlers } = captureApi();
@@ -108,7 +109,7 @@ test("issue #459: live-tail ids are stable across context fires", async () => {
 
 test("issue #459: duplicate-content tail messages keep stable ranks as the tail grows", async () => {
   const prevForkHost = process.env.PI_ACP_FORK_HOST;
-  const stateFile = "/tmp/pai-acp-fork-stab2.session.json";
+  const stateFile = tmpPath("pai-acp-fork-stab2.session.json");
   process.env.PI_ACP_FORK_HOST = "1";
   try {
     const { api, handlers } = captureApi();
@@ -151,7 +152,7 @@ test("issue #459: duplicate-content tail messages keep stable ranks as the tail 
 
 test("issue #459: refs for messages that leave the host view are pruned", async () => {
   const prevForkHost = process.env.PI_ACP_FORK_HOST;
-  const stateFile = "/tmp/pai-acp-fork-stab3.session.json";
+  const stateFile = tmpPath("pai-acp-fork-stab3.session.json");
   process.env.PI_ACP_FORK_HOST = "1";
   try {
     const { api, handlers } = captureApi();
@@ -191,7 +192,7 @@ test("issue #459: refs for messages that leave the host view are pruned", async 
 
 test("issue #459: compress built from refs of a prior fire resolves on the next fire", async () => {
   const prevForkHost = process.env.PI_ACP_FORK_HOST;
-  const stateFile = "/tmp/pai-acp-fork-stab4.session.json";
+  const stateFile = tmpPath("pai-acp-fork-stab4.session.json");
   process.env.PI_ACP_FORK_HOST = "1";
   try {
     const { api, handlers } = captureApi();

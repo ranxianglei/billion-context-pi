@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { rm } from "node:fs/promises";
 import { createAcpExtension } from "../src/index.js";
+import { tmpPath } from "./tmp-path.js";
 
 function captureApi() {
   const handlers = new Map<string, ((event: any, ctx: any) => any)[]>();
@@ -65,8 +66,8 @@ test("acp_cache reports grand ledger with closed identity (no folds)", async () 
     userMsg("e2", "and another question to extend the context a bit here.", T0 - 500),
     assistantMsg("a2", "Here you go.", { input: 100, output: 30, cacheRead: 4300, cacheWrite: 0 }, T0 + 1000),
   ];
-  const { tool } = await setup(entries, "/tmp/pai-acp-cache-nofolds.session.json");
-  const res = await tool.execute("tc1", {}, undefined, undefined, fakeCtx(entries, "/tmp/pai-acp-cache-nofolds.session.json"));
+  const { tool } = await setup(entries, tmpPath("pai-acp-cache-nofolds.session.json"));
+  const res = await tool.execute("tc1", {}, undefined, undefined, fakeCtx(entries, tmpPath("pai-acp-cache-nofolds.session.json")));
   const text = (res.content[0] as any).text as string;
 
   assert.match(text, /^ACP CACHE REPORT \(test-session\) — 2 requests/m, "header with request count");
@@ -98,7 +99,7 @@ test("acp_cache attributes post-fold re-pay to the fold and prices it", async ()
     assistantMsg("a2", "Done.", { input: 100, output: 30, cacheRead: 4300, cacheWrite: 0 }, T0 + 1000),
     userMsg("e4", "filler four ".repeat(1200), T0 - 500),
   ];
-  const stateFile = "/tmp/pai-acp-cache-folds.session.json";
+  const stateFile = tmpPath("pai-acp-cache-folds.session.json");
   const { api, ctx, handlers } = await setup(entries, stateFile);
 
   const compressTool = api.tools.find((t: any) => t.name === "compress")!;
@@ -142,7 +143,7 @@ test("/acp-cache command renders the same report via ui.notify fallback", async 
     userMsg("e1", "hi there, starting a fresh thread to check the cache panel.", T0 - 1000),
     assistantMsg("a1", "Hello.", { input: 300, output: 20, cacheRead: 0, cacheWrite: 2700 }, T0),
   ];
-  const stateFile = "/tmp/pai-acp-cache-cmd.session.json";
+  const stateFile = tmpPath("pai-acp-cache-cmd.session.json");
   const notifies: string[] = [];
   const { api, ctx } = await setup(entries, stateFile, notifies);
 

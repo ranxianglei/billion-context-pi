@@ -5,10 +5,11 @@ import { createAcpExtension } from "../src/index.js";
 import { createCore, createInitialState, defaultConfig, defaultCountTokens, type CoreMessage } from "acp-kernel";
 import { sentViewTokenCount, estimateTokens } from "../src/tokens.js";
 import { entriesToCoreMessages } from "../src/messages.js";
+import { tmpPath } from "./tmp-path.js";
 
 const L = 100_000;
 const MID = "lorem ".repeat(3000);
-const STATE_FILE = "/tmp/pai-acp-view-recount.session.json";
+const STATE_FILE = tmpPath("pai-acp-view-recount.session.json");
 
 function captureApi() {
   const handlers = new Map<string, ((event: any, ctx: any) => any)[]>();

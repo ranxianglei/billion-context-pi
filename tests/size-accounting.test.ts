@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFile, rm } from "node:fs/promises";
 import { createAcpExtension } from "../src/index.js";
+import { tmpPath } from "./tmp-path.js";
 
 // issue #455: the internal meter ran 1.5-2x above provider truth for a whole
 // session because floors are raise-only — nothing pulled the estimate down —
@@ -80,8 +81,8 @@ function setup(stateFile: string, logFile: string, sid: string, limit: number) {
 }
 
 test("#455 first-sight-mass bypass fires once: scale flips re-anchor instead of re-arming", async () => {
-  const STATE = "/tmp/pai-acp-size-a.session.json";
-  const LOG = "/tmp/pai-acp-size-a.log";
+  const STATE = tmpPath("pai-acp-size-a.session.json");
+  const LOG = tmpPath("pai-acp-size-a.log");
   await rm(`${STATE}.acp.json`, { force: true });
   await rm(LOG, { force: true });
   const t = setup(STATE, LOG, "size-a", 120_000);
@@ -115,8 +116,8 @@ test("#455 first-sight-mass bypass fires once: scale flips re-anchor instead of 
 });
 
 test("#455 calibration anchors the estimate to stable fresh provider usage", async () => {
-  const STATE = "/tmp/pai-acp-size-b.session.json";
-  const LOG = "/tmp/pai-acp-size-b.log";
+  const STATE = tmpPath("pai-acp-size-b.session.json");
+  const LOG = tmpPath("pai-acp-size-b.log");
   await rm(`${STATE}.acp.json`, { force: true });
   await rm(LOG, { force: true });
   const t = setup(STATE, LOG, "size-b", 180_000);
@@ -149,8 +150,8 @@ test("#455 calibration anchors the estimate to stable fresh provider usage", asy
 });
 
 test("#455 jittering provider usage refuses calibration and warns once past 2x", async () => {
-  const STATE = "/tmp/pai-acp-size-c.session.json";
-  const LOG = "/tmp/pai-acp-size-c.log";
+  const STATE = tmpPath("pai-acp-size-c.session.json");
+  const LOG = tmpPath("pai-acp-size-c.log");
   await rm(`${STATE}.acp.json`, { force: true });
   await rm(LOG, { force: true });
   const t = setup(STATE, LOG, "size-c", 180_000);

@@ -4,6 +4,7 @@ import { rm, readFile, mkdtemp, symlink } from "node:fs/promises";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import { createAcpExtension } from "../src/index.js";
+import { tmpPath } from "./tmp-path.js";
 
 function captureApi() {
   const handlers = new Map<string, ((event: any, ctx: any) => any)[]>();
@@ -60,7 +61,7 @@ async function setupWithCompressedBlock() {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api as any);
 
-  const stateFile = "/tmp/pai-acp-decompress-tool-it.session.json";
+  const stateFile = tmpPath("pai-acp-decompress-tool-it.session.json");
   await cleanState(stateFile);
   const longText = "This is a detailed message that needs to be compressed. ".repeat(130);
   const filler = (n: string) => `filler ${n} `.repeat(400);
@@ -174,7 +175,7 @@ test("decompress keeps the block active after a file-mode call", async () => {
 test("decompress restores a block's original text via getEntry fallback after tree navigation (undo)", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api as any);
-  const stateFile = "/tmp/pai-acp-decompress-fallback-undo.session.json";
+  const stateFile = tmpPath("pai-acp-decompress-fallback-undo.session.json");
   await cleanState(stateFile);
   const longText = "This is a detailed message that needs to be compressed. ".repeat(130);
   const filler = (n: string) => `filler ${n} `.repeat(400);
@@ -211,7 +212,7 @@ test("decompress restores a block's original text via getEntry fallback after tr
 test("decompress keeps the degraded message when the ref is gone from both branch and full tree", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api as any);
-  const stateFile = "/tmp/pai-acp-decompress-fallback-gone.session.json";
+  const stateFile = tmpPath("pai-acp-decompress-fallback-gone.session.json");
   await cleanState(stateFile);
   const longText = "This is a detailed message that needs to be compressed. ".repeat(130);
   const filler = (n: string) => `filler ${n} `.repeat(400);
@@ -240,7 +241,7 @@ test("decompress keeps the degraded message when the ref is gone from both branc
 test("decompress restores multi tool-call assistant messages (refs carry # suffix) after undo", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api as any);
-  const stateFile = "/tmp/pai-acp-decompress-fallback-tools.session.json";
+  const stateFile = tmpPath("pai-acp-decompress-fallback-tools.session.json");
   await cleanState(stateFile);
   const filler = (n: string) => `filler ${n} `.repeat(400);
 
@@ -286,7 +287,7 @@ test("decompress restores multi tool-call assistant messages (refs carry # suffi
 test("decompress survives repeated compress → navigate → decompress cycles (state not lost)", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api as any);
-  const stateFile = "/tmp/pai-acp-decompress-fallback-cycles.session.json";
+  const stateFile = tmpPath("pai-acp-decompress-fallback-cycles.session.json");
   await cleanState(stateFile);
   const longText = "This is a detailed message that needs to be compressed. ".repeat(130);
   const filler = (n: string) => `filler ${n} `.repeat(600);

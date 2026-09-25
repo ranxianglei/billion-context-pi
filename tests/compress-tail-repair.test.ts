@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { rm } from "node:fs/promises";
 import { createAcpExtension } from "../src/index.js";
 import { normalizeRanges, tailRepair } from "../src/compress-tool.js";
+import { tmpPath } from "./tmp-path.js";
 
 // issue #253: Qwen-family non-strict tool calls drop the last entry's closing
 // `}` (tail `"]` instead of `"}]`). The kernel parser then drops the last range
@@ -124,7 +125,7 @@ test("compress tool succeeds on a missing-`}` string payload (end-to-end)", asyn
     registerCommand(name: string, options: any) { this.commands.set(name, options); },
   };
   createAcpExtension({ modelContextLimit: 200_000 })(api);
-  const stateFile = "/tmp/pai-acp-tail-repair-e2e.session.json";
+  const stateFile = tmpPath("pai-acp-tail-repair-e2e.session.json");
   await rm(`${stateFile}.acp.json`, { force: true });
 
   const ZH = "中".repeat(6000);

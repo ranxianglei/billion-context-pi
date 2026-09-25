@@ -6,6 +6,7 @@ import { defaultCountTokens } from "acp-kernel";
 import { createAcpExtension } from "../src/index.js";
 import { estimateTokens } from "../src/tokens.js";
 import { entriesToCoreMessages, thinkingTokenCount } from "../src/messages.js";
+import { tmpPath } from "./tmp-path.js";
 
 // Thinking blocks are resent with every request but were invisible to the
 // projection (extractText collects text blocks only), so every ACP meter
@@ -13,7 +14,7 @@ import { entriesToCoreMessages, thinkingTokenCount } from "../src/messages.js";
 // (billion-context-pi#353). Thinking now rides on CoreMessage.thinkingTokens,
 // attached to exactly one core per assistant turn.
 
-const STATE_FILE = "/tmp/pai-acp-thinking-tokens-it.session.json";
+const STATE_FILE = tmpPath("pai-acp-thinking-tokens-it.session.json");
 
 function captureApi() {
   const handlers = new Map<string, ((event: any, ctx: any) => any)[]>();

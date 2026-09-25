@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { rm } from "node:fs/promises";
 import { createAcpExtension } from "../src/index.js";
+import { tmpPath } from "./tmp-path.js";
 
 // issue #269: the per-turn nudge dedup suppressed ALL re-shows within one user
 // turn, so a model that ignored a 78% pressure nudge was driven straight into
@@ -85,7 +86,7 @@ const nudgeCount = (rebuilt: any[]) =>
   }).length;
 
 test("same-turn pressure nudge re-injects only after a full growth floor (issue #269)", async () => {
-  stateFile = "/tmp/pai-acp-reinject-a.session.json";
+  stateFile = tmpPath("pai-acp-reinject-a.session.json");
   await rm(`${stateFile}.acp.json`, { force: true });
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: LIMIT })(api as any);
@@ -107,7 +108,7 @@ test("same-turn pressure nudge re-injects only after a full growth floor (issue 
 });
 
 test("drop re-anchor: post-compress regrowth into the pressure band re-injects without exceeding the old peak", async () => {
-  stateFile = "/tmp/pai-acp-reinject-b.session.json";
+  stateFile = tmpPath("pai-acp-reinject-b.session.json");
   await rm(`${stateFile}.acp.json`, { force: true });
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: LIMIT })(api as any);
@@ -133,7 +134,7 @@ test("drop re-anchor: post-compress regrowth into the pressure band re-injects w
 });
 
 test("emergency bypass is unchanged (95% injects on every event)", async () => {
-  stateFile = "/tmp/pai-acp-reinject-c.session.json";
+  stateFile = tmpPath("pai-acp-reinject-c.session.json");
   await rm(`${stateFile}.acp.json`, { force: true });
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: LIMIT })(api as any);
