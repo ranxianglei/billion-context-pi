@@ -443,7 +443,7 @@ test("compress success panel appends one fingerprint line per created block matc
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000, preserveRecentMessages: 1 })(api as any);
   const BIG = "中".repeat(6000);
-  const stateFile = "/tmp/pai-acp-compress-fingerprint.session.json";
+  const stateFile = tmpPath("pai-acp-compress-fingerprint.session.json");
   await rm(`${stateFile}.acp.json`, { force: true });
   const entries = [userMsg("e1", BIG), userMsg("e2", BIG), userMsg("e3", BIG), userMsg("e4", BIG)];
   const ctx = fakeCtx(entries, stateFile);
@@ -483,7 +483,7 @@ test("in-place refold of a non-tail block: span clause and fingerprint reference
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000, preserveRecentMessages: 1 })(api as any);
   const BIG = "中".repeat(6000);
-  const stateFile = "/tmp/pai-acp-refold-nontail.session.json";
+  const stateFile = tmpPath("pai-acp-refold-nontail.session.json");
   await rm(`${stateFile}.acp.json`, { force: true });
   const entries = [userMsg("e1", BIG), userMsg("e2", BIG), userMsg("e3", BIG), userMsg("e4", BIG)];
   const ctx = fakeCtx(entries, stateFile);
