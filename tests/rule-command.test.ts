@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { rm, readFile } from "node:fs/promises";
 import { createAcpExtension } from "../src/index.js";
 import { ACP_RULE_CUSTOM_TYPE } from "../src/messages.js";
+import { tmpPath } from "./tmp-path.js";
 
 type SentMessage = { customType: string; content: string; display: boolean };
 
@@ -49,7 +50,7 @@ async function setup(entries: any[], stateFile: string, opts?: { rules?: boolean
 
 test("/acp-rule is registered alongside /acp-cache and lists recorded rules via sendMessage (#527)", async () => {
   const sent: SentMessage[] = [];
-  const stateFile = "/tmp/pai-acp-rule-list.session.json";
+  const stateFile = tmpPath("pai-acp-rule-list.session.json");
   const { api, command } = await setup([], stateFile, { rules: true, sendMessage: (m) => sent.push(m) });
   assert.ok(command, "acp-rule command registered");
   assert.ok(api.commands.has("acp-cache"), "acp-cache still registered");
@@ -63,7 +64,7 @@ test("/acp-rule is registered alongside /acp-cache and lists recorded rules via 
 
 test("/acp-rule <text> records via the kernel API, echoes the same confirmation as the model path, then lists it (#527)", async () => {
   const sent: SentMessage[] = [];
-  const stateFile = "/tmp/pai-acp-rule-record.session.json";
+  const stateFile = tmpPath("pai-acp-rule-record.session.json");
   const { command } = await setup([], stateFile, { rules: true, sendMessage: (m) => sent.push(m) });
 
   await command!.handler("  always run typecheck before done  ", fakeCtx([], stateFile));
@@ -79,7 +80,7 @@ test("/acp-rule <text> records via the kernel API, echoes the same confirmation 
 });
 
 test("/acp-rule records survive a restart (fresh extension reading the same sidecar) (#527)", async () => {
-  const stateFile = "/tmp/pai-acp-rule-restart.session.json";
+  const stateFile = tmpPath("pai-acp-rule-restart.session.json");
   const first = await setup([], stateFile, { rules: true });
   await first.command!.handler("prefer pnpm", fakeCtx([], stateFile));
 
@@ -92,7 +93,7 @@ test("/acp-rule records survive a restart (fresh extension reading the same side
 test("/acp-rule surfaces kernel validation errors verbatim without recording (#527)", async () => {
   const sent: SentMessage[] = [];
   const notifies: Array<{ msg: string; type?: string }> = [];
-  const stateFile = "/tmp/pai-acp-rule-invalid.session.json";
+  const stateFile = tmpPath("pai-acp-rule-invalid.session.json");
   const { command } = await setup([], stateFile, {
     rules: true,
     coreOverrides: { rules: { maxRuleChars: 10 } },
@@ -112,7 +113,7 @@ test("/acp-rule surfaces kernel validation errors verbatim without recording (#5
 test("/acp-rule warns with the enablement hint instead of an empty list when the feature is off (#527)", async () => {
   const sent: SentMessage[] = [];
   const notifies: Array<{ msg: string; type?: string }> = [];
-  const stateFile = "/tmp/pai-acp-rule-off.session.json";
+  const stateFile = tmpPath("pai-acp-rule-off.session.json");
   const { command } = await setup([], stateFile, { rules: false, sendMessage: (m) => sent.push(m) });
 
   await command!.handler("", fakeCtx([], stateFile, notifies));
@@ -134,7 +135,7 @@ test("/acp-rule warns with the enablement hint instead of an empty list when the
 
 test("/acp-rule falls back to raw-text ui.notify on hosts without sendMessage (#527)", async () => {
   const notifies: Array<{ msg: string; type?: string }> = [];
-  const stateFile = "/tmp/pai-acp-rule-notify.session.json";
+  const stateFile = tmpPath("pai-acp-rule-notify.session.json");
   const { command } = await setup([], stateFile, { rules: true });
 
   await command!.handler("prefer pnpm", fakeCtx([], stateFile, notifies));

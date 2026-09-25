@@ -10,6 +10,7 @@ import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 import { setRunNpmForTest } from "../src/update.js";
 import { DELEGATE_STAND_DOWN_MESSAGE } from "../src/setup-subagent-tools.js";
 import { DEFAULT_FLEET_SHORTCUT } from "../src/config.js";
+import { tmpPath } from "./tmp-path.js";
 
 // Headless handlers await the update check — keep every test hermetic by
 // resolving it through this fake (no network, no update available).
@@ -101,7 +102,7 @@ test("context handler tags every message with a ref even when length matches eve
   createAcpExtension({ modelContextLimit: 200_000 })(api as any);
 
   const entries = [userMsg("e1", "first"), userMsg("e2", "second"), userMsg("e3", "third")];
-  const ctx = fakeCtx(entries, "/tmp/nonexistent-pai-acp-it.session.json");
+  const ctx = fakeCtx(entries, tmpPath("nonexistent-pai-acp-it.session.json"));
   // Real Pi passes event.messages with the same length/roles as the session — the
   // handler must STILL return {messages} (not undefined), or the model never sees tags.
   const sameLengthMessages = entries.map(() => ({ role: "user", content: "x", timestamp: 0 }));
@@ -120,11 +121,11 @@ test("context handler works under omp (oh-my-pi) where sessionManager exposes ge
 
   const entries = [userMsg("e1", "first"), userMsg("e2", "second")];
   const ctx = {
-    ...fakeCtx(entries, "/tmp/nonexistent-pai-acp-omp.session.json"),
+    ...fakeCtx(entries, tmpPath("nonexistent-pai-acp-omp.session.json")),
     sessionManager: {
       getBranch: () => entries,
       getSessionId: () => "test-session",
-      getSessionFile: () => "/tmp/nonexistent-pai-acp-omp.session.json",
+      getSessionFile: () => tmpPath("nonexistent-pai-acp-omp.session.json"),
     },
   };
   const sameLengthMessages = entries.map(() => ({ role: "user", content: "x", timestamp: 0 }));
@@ -140,7 +141,7 @@ test("context handler works under omp (oh-my-pi) where sessionManager exposes ge
 test("omp context handler keeps the current (not-yet-persisted) user message: branch lags event.messages by one", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api as any);
-  const stateFile = "/tmp/nonexistent-pai-acp-omp-lag.session.json";
+  const stateFile = tmpPath("nonexistent-pai-acp-omp-lag.session.json");
   await rm(`${stateFile}.acp.json`, { force: true });
   // Simulate omp's real timing: the branch only holds the PREVIOUS turn's
   // messages (the current user message is persisted only after the LLM call,
@@ -181,11 +182,11 @@ test("omp live message keeps the same entry id once persisted (stable refs acros
   // Turn 1: branch empty (brand-new session), event carries the first message.
   const turn1Messages = [{ role: "user", content: [{ type: "text", text: "hello" }], timestamp: Date.now() }];
   const ctx1 = {
-    ...fakeCtx([], "/tmp/nonexistent-pai-acp-omp-stable.session.json"),
+    ...fakeCtx([], tmpPath("nonexistent-pai-acp-omp-stable.session.json")),
     sessionManager: {
       getBranch: () => [] as any[],
       getSessionId: () => "test-session",
-      getSessionFile: () => "/tmp/nonexistent-pai-acp-omp-stable.session.json",
+      getSessionFile: () => tmpPath("nonexistent-pai-acp-omp-stable.session.json"),
     },
   };
   const r1 = await handlers.get("context")![0]!({ type: "context", messages: turn1Messages }, ctx1);
@@ -200,11 +201,11 @@ test("omp live message keeps the same entry id once persisted (stable refs acros
     { role: "user", content: [{ type: "text", text: "world" }], timestamp: Date.now() },
   ];
   const ctx2 = {
-    ...fakeCtx(persistedTurn2, "/tmp/nonexistent-pai-acp-omp-stable.session.json"),
+    ...fakeCtx(persistedTurn2, tmpPath("nonexistent-pai-acp-omp-stable.session.json")),
     sessionManager: {
       getBranch: () => persistedTurn2,
       getSessionId: () => "test-session",
-      getSessionFile: () => "/tmp/nonexistent-pai-acp-omp-stable.session.json",
+      getSessionFile: () => tmpPath("nonexistent-pai-acp-omp-stable.session.json"),
     },
   };
   const r2 = await handlers.get("context")![0]!({ type: "context", messages: turn2Messages }, ctx2);
@@ -215,7 +216,7 @@ test("omp live message keeps the same entry id once persisted (stable refs acros
 test("omp migrates tagged live refs to stable entry ids", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api);
-  const stateFile = "/tmp/nonexistent-pai-acp-identity.session.json";
+  const stateFile = tmpPath("nonexistent-pai-acp-identity.session.json");
   await rm(`${stateFile}.acp.json`, { force: true });
   const texts = ["This tagged message must retain its stable persisted identity. ".repeat(130), "filler two ".repeat(400)];
   let persisted: ReturnType<typeof userMsg>[] = [];
@@ -232,7 +233,7 @@ test("omp migrates tagged live refs to stable entry ids", async () => {
 test("omp matches a persisted context suffix before assigning live refs", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api);
-  const stateFile = "/tmp/nonexistent-pai-acp-suffix.session.json";
+  const stateFile = tmpPath("nonexistent-pai-acp-suffix.session.json");
   await rm(`${stateFile}.acp.json`, { force: true });
   const texts = ["This suffix message must retain its persisted identity. ".repeat(130), "filler two ".repeat(400)];
   const persisted = [userMsg("older", "This older branch message is absent from provider context."), ...texts.map((text, index) => userMsg(`e${index + 1}`, text))];
@@ -247,7 +248,7 @@ test("omp matches a persisted context suffix before assigning live refs", async 
 test("omp rejects a non-contiguous persisted subsequence", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api);
-  const stateFile = "/tmp/nonexistent-pai-acp-gap.session.json";
+  const stateFile = tmpPath("nonexistent-pai-acp-gap.session.json");
   await rm(`${stateFile}.acp.json`, { force: true });
   const persisted = [userMsg("e1", "A"), userMsg("gap", "X"), userMsg("e2", "B")];
   const ctx = fakeCtx(persisted, stateFile);
@@ -266,7 +267,7 @@ test("omp rejects a non-contiguous persisted subsequence", async () => {
 test("omp resolves an ambiguous equal-length run against the persisted tail (#459)", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api);
-  const stateFile = "/tmp/nonexistent-pai-acp-ambiguous-run.session.json";
+  const stateFile = tmpPath("nonexistent-pai-acp-ambiguous-run.session.json");
   await rm(`${stateFile}.acp.json`, { force: true });
   const persisted = [userMsg("e1", "same"), userMsg("gap", "different"), userMsg("e2", "same")];
   const ctx = fakeCtx(persisted, stateFile);
@@ -284,7 +285,7 @@ test("omp resolves an ambiguous equal-length run against the persisted tail (#45
 test("omp migrates a live ref after the provider context evicts its prefix", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api);
-  const stateFile = "/tmp/nonexistent-pai-acp-shifted-live-ref.session.json";
+  const stateFile = tmpPath("nonexistent-pai-acp-shifted-live-ref.session.json");
   await rm(`${stateFile}.acp.json`, { force: true });
   let persisted: ReturnType<typeof userMsg>[] = [];
   const ctx = { ...fakeCtx(persisted, stateFile), sessionManager: { getBranch: () => persisted, getSessionId: () => "test-session", getSessionFile: () => stateFile } };
@@ -304,7 +305,7 @@ type PersistedEntry = { type: "message"; id: string; parentId: null; timestamp: 
 test.skip("omp does not bind a different toolCallId with identical visible text to the persisted identity", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api);
-  const stateFile = "/tmp/nonexistent-pai-acp-toolcallid.session.json";
+  const stateFile = tmpPath("nonexistent-pai-acp-toolcallid.session.json");
   await rm(`${stateFile}.acp.json`, { force: true });
   const toolResult = (toolCallId: string) => ({
     role: "toolResult",
@@ -329,7 +330,7 @@ test.skip("omp does not bind a different toolCallId with identical visible text 
 test.skip("omp does not bind differing image content with identical visible text to the persisted identity", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api);
-  const stateFile = "/tmp/nonexistent-pai-acp-image.session.json";
+  const stateFile = tmpPath("nonexistent-pai-acp-image.session.json");
   await rm(`${stateFile}.acp.json`, { force: true });
   const imgMsg = (data: string) => ({
     role: "user",
@@ -392,11 +393,11 @@ test("omp does not collapse distinct multimodal user messages with identical tex
   ];
   const liveMessages = [{ role: "user", content: [{ type: "text", text: "what is this?" }, liveImage], timestamp: Date.now() }];
   const ctx = {
-    ...fakeCtx(persisted, "/tmp/nonexistent-pai-acp-omp-images.session.json"),
+    ...fakeCtx(persisted, tmpPath("nonexistent-pai-acp-omp-images.session.json")),
     sessionManager: {
       getBranch: () => persisted,
       getSessionId: () => "test-session",
-      getSessionFile: () => "/tmp/nonexistent-pai-acp-omp-images.session.json",
+      getSessionFile: () => tmpPath("nonexistent-pai-acp-omp-images.session.json"),
     },
   };
 
@@ -427,11 +428,11 @@ test("omp does not collapse distinct multimodal tool results with identical text
   ];
   const liveMessages = [{ role: "toolResult", toolName: "read", toolCallId: "call-read", content: [{ type: "text", text: "same tool output" }, liveImage], timestamp: Date.now() }];
   const ctx = {
-    ...fakeCtx(persisted, "/tmp/nonexistent-pai-acp-omp-toolresult-images.session.json"),
+    ...fakeCtx(persisted, tmpPath("nonexistent-pai-acp-omp-toolresult-images.session.json")),
     sessionManager: {
       getBranch: () => persisted,
       getSessionId: () => "test-session",
-      getSessionFile: () => "/tmp/nonexistent-pai-acp-omp-toolresult-images.session.json",
+      getSessionFile: () => tmpPath("nonexistent-pai-acp-omp-toolresult-images.session.json"),
     },
   };
 
@@ -448,7 +449,7 @@ test("omp does not collapse distinct multimodal tool results with identical text
 test("acp_status refs remain usable by the next compress call", async () => {
   const { api } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api);
-  const stateFile = "/tmp/nonexistent-pai-acp-status-compress.session.json";
+  const stateFile = tmpPath("nonexistent-pai-acp-status-compress.session.json");
   await rm(`${stateFile}.acp.json`, { force: true });
   const originalText = "This range is reported by acp_status and must remain addressable by compress. ".repeat(130);
   const persisted = [userMsg("e1", originalText), ...["two", "three", "four", "five", "six", "seven"].map((n, index) => userMsg(`e${index + 2}`, `filler ${n} `.repeat(400)))];
@@ -464,7 +465,7 @@ test("acp_status refs remain usable by the next compress call", async () => {
 test("omp rebuilds refs after stale live state before status compression", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api);
-  const stateFile = "/tmp/nonexistent-pai-acp-stale-live.session.json";
+  const stateFile = tmpPath("nonexistent-pai-acp-stale-live.session.json");
   await rm(`${stateFile}.acp.json`, { force: true });
   const longText = "This stale live state must be rebuilt against the current persisted branch. ".repeat(130);
   const filler = (n: string) => `filler ${n} `.repeat(400);
@@ -512,7 +513,7 @@ test("context handler persists state so a second call is idempotent on the same 
   createAcpExtension({ modelContextLimit: 200_000 })(api as any);
 
   const entries = [userMsg("e1", "alpha"), userMsg("e2", "beta")];
-  const ctx = fakeCtx(entries, "/tmp/nonexistent-pai-acp-it2.session.json");
+  const ctx = fakeCtx(entries, tmpPath("nonexistent-pai-acp-it2.session.json"));
 
 
   const first = await handlers.get("context")![0]!({ type: "context", messages: [] }, ctx);
@@ -526,7 +527,7 @@ test("context handler persists state so a second call is idempotent on the same 
 test("omp migrates assistant tool-call refs after prefix eviction", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api);
-  const stateFile = "/tmp/nonexistent-pai-acp-assistant-origin.session.json";
+  const stateFile = tmpPath("nonexistent-pai-acp-assistant-origin.session.json");
   await rm(`${stateFile}.acp.json`, { force: true });
   const assistant = (id: string) => ({ role: "assistant", content: [{ type: "toolCall", id, name: "read", arguments: { path: "x" } }], timestamp: Date.now() });
   let persisted: ReturnType<typeof userMsg>[] = [];
@@ -546,7 +547,7 @@ test("omp migrates assistant tool-call refs after prefix eviction", async () => 
 test("omp migrates parallel assistant tool-call child refs after prefix eviction", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api);
-  const stateFile = "/tmp/nonexistent-pai-acp-parallel-origin.session.json";
+  const stateFile = tmpPath("nonexistent-pai-acp-parallel-origin.session.json");
   await rm(`${stateFile}.acp.json`, { force: true });
   const assistant = () => ({ role: "assistant", content: [
     { type: "text", text: "parallel" },
@@ -570,7 +571,7 @@ test("omp migrates parallel assistant tool-call child refs after prefix eviction
 });
 
 test("omp reloads assistant origins before migrating after prefix eviction", async () => {
-  const stateFile = "/tmp/nonexistent-pai-acp-assistant-reload.session.json";
+  const stateFile = tmpPath("nonexistent-pai-acp-assistant-reload.session.json");
   await rm(`${stateFile}.acp.json`, { force: true });
   const assistant = (id: string) => ({ role: "assistant", content: [{ type: "toolCall", id, name: "read", arguments: { path: "x" } }], timestamp: Date.now() });
   let persisted: ReturnType<typeof userMsg>[] = [];
@@ -592,7 +593,7 @@ test("omp reloads assistant origins before migrating after prefix eviction", asy
 });
 
 test("omp preserves stable destination when migrating a colliding live ref", async () => {
-  const stateFile = "/tmp/nonexistent-pai-acp-collision.session.json";
+  const stateFile = tmpPath("nonexistent-pai-acp-collision.session.json");
   await rm(`${stateFile}.acp.json`, { force: true });
   const assistant = (id: string) => ({ role: "assistant", content: [{ type: "toolCall", id, name: "read", arguments: { path: "x" } }], timestamp: Date.now() });
   let persisted: ReturnType<typeof userMsg>[] = [];
@@ -624,7 +625,7 @@ test("omp preserves stable destination when migrating a colliding live ref", asy
 test.skip("empty live context preserves refs created for an unpersisted message", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api);
-  const stateFile = "/tmp/nonexistent-pai-acp-empty-live.session.json";
+  const stateFile = tmpPath("nonexistent-pai-acp-empty-live.session.json");
   await rm(`${stateFile}.acp.json`, { force: true });
   const ctx = fakeCtx([], stateFile);
   await handlers.get("context")![0]!({ type: "context", messages: [{ role: "user", content: "live-only" }] }, ctx);
@@ -840,7 +841,7 @@ test("headless (hasUI=false) context handler awaits the update check so an exiti
     const npm = pendingNpm();
     const { api, handlers } = captureApi();
     createAcpExtension({ modelContextLimit: 200_000 })(api as any);
-    const stateFile = "/tmp/nonexistent-pai-acp-headless-update.session.json";
+    const stateFile = tmpPath("nonexistent-pai-acp-headless-update.session.json");
     await rm(`${stateFile}.acp.json`, { force: true });
     const ctx = fakeCtx([userMsg("e1", "hi")], stateFile);
 
@@ -878,7 +879,7 @@ test("TUI (hasUI=true) context handler resolves without waiting for the update c
     const npm = pendingNpm();
     const { api, handlers } = captureApi();
     createAcpExtension({ modelContextLimit: 200_000 })(api as any);
-    const stateFile = "/tmp/nonexistent-pai-acp-tui-update.session.json";
+    const stateFile = tmpPath("nonexistent-pai-acp-tui-update.session.json");
     await rm(`${stateFile}.acp.json`, { force: true });
     const ctx = { ...fakeCtx([userMsg("e1", "hi")], stateFile), hasUI: true };
 

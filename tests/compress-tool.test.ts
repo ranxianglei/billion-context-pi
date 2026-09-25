@@ -4,6 +4,7 @@ import { readFile, rm } from "node:fs/promises";
 import type { CompressionBlock, CompressionState } from "acp-kernel";
 import { createAcpExtension } from "../src/index.js";
 import { blockSpanLabel, compressPanelBlocks, isCompressNoopText, isCompressSuccessText, summaryFingerprintLine } from "../src/compress-tool.js";
+import { tmpPath } from "./tmp-path.js";
 
 // ─── helpers (mirror decompress-tool.test.ts) ──────────────────────────────
 
@@ -64,7 +65,7 @@ async function runContextRound(handlers: Map<string, any[]>, ctx: any) {
 test("compress beforeTokens is the raw CJK-aware estimate", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api as any);
-  const stateFile = "/tmp/pai-acp-compress-density-a.session.json";
+  const stateFile = tmpPath("pai-acp-compress-density-a.session.json");
   await rm(`${stateFile}.acp.json`, { force: true });
   const entries = [userMsg("e1", "hello world"), userMsg("e2", ZH)];
   const ctx = fakeCtx(entries, stateFile);
@@ -94,7 +95,7 @@ test("compress beforeTokens is the raw CJK-aware estimate", async () => {
 test("compress afterTokens is measured on the same sent-view scale as beforeTokens (multi-block)", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000, preserveRecentMessages: 1 })(api as any);
-  const stateFile = "/tmp/pai-acp-compress-scales.session.json";
+  const stateFile = tmpPath("pai-acp-compress-scales.session.json");
   await rm(`${stateFile}.acp.json`, { force: true });
   const big = "中".repeat(6000); // clears minCompressRange (default 5000 chars)
   const entries = [userMsg("e1", big), userMsg("e2", big), userMsg("e3", big), userMsg("e4", big)];
@@ -148,7 +149,7 @@ test("compress normalizes double-escaped \\uXXXX summaries before storage", asyn
   // so e2 carries ≥5000 tokens of its own and preserveRecentMessages:1 makes
   // e1 (the compress target) fall outside every protected zone.
   createAcpExtension({ modelContextLimit: 200_000, preserveRecentMessages: 1 })(api as any);
-  const stateFile = "/tmp/pai-acp-compress-unescape.session.json";
+  const stateFile = tmpPath("pai-acp-compress-unescape.session.json");
   await rm(`${stateFile}.acp.json`, { force: true });
   const entries = [userMsg("e1", "中".repeat(6000)), userMsg("e2", "中".repeat(6000))];
   const ctx = fakeCtx(entries, stateFile);
@@ -229,7 +230,7 @@ test("compress panel lists every new block id with its actual ref span (#376)", 
   // minCompressRange gate needs ≥5000 chars per range (same pattern as #309/#322).
   createAcpExtension({ modelContextLimit: 200_000, preserveRecentMessages: 1 })(api as any);
   const BIG = "中".repeat(6000);
-  const stateFile = "/tmp/pai-acp-compress-spans.session.json";
+  const stateFile = tmpPath("pai-acp-compress-spans.session.json");
   await rm(`${stateFile}.acp.json`, { force: true });
   const entries = [userMsg("e1", BIG), userMsg("e2", BIG), userMsg("e3", BIG), userMsg("e4", BIG)];
   const ctx = fakeCtx(entries, stateFile);
@@ -263,7 +264,7 @@ test("partial compress panel lists only the created blocks accurately (#376)", a
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000, preserveRecentMessages: 1 })(api as any);
   const BIG = "中".repeat(6000);
-  const stateFile = "/tmp/pai-acp-compress-partial-spans.session.json";
+  const stateFile = tmpPath("pai-acp-compress-partial-spans.session.json");
   await rm(`${stateFile}.acp.json`, { force: true });
   const entries = [userMsg("e1", BIG), userMsg("e2", BIG), userMsg("e3", BIG), userMsg("e4", BIG)];
   const ctx = fakeCtx(entries, stateFile);
@@ -375,7 +376,7 @@ test("compress success result lists remaining compressible ranges, then goes qui
   createAcpExtension({ modelContextLimit: 200_000, preserveRecentMessages: 1 })(api as any);
   const BIG = "中".repeat(6000);
   const entries = [userMsg("e1", BIG), userMsg("e2", BIG), userMsg("e3", BIG)];
-  const stateFile = "/tmp/pai-acp-compress-success-ranges.session.json";
+  const stateFile = tmpPath("pai-acp-compress-success-ranges.session.json");
   await rm(`${stateFile}.acp.json`, { force: true });
   const ctx = fakeCtx(entries, stateFile);
   ctx.__setUsage(100_000);

@@ -4,13 +4,14 @@ import { readFile, rm } from "node:fs/promises";
 import { createAcpExtension } from "../src/index.js";
 import { estimateTokens, collectImageTokens, modelSupportsImages, IMAGE_TOKEN_COST } from "../src/tokens.js";
 import { countImageBlocks } from "../src/messages.js";
+import { tmpPath } from "./tmp-path.js";
 
 // Image blocks were invisible to the sent-view estimate (extractText drops
 // them), so the meter under-counted image-heavy sessions (the provider's real
 // usage includes image tokens, the estimate did not).
 // dog/billion-context-pi#200.
 
-const STATE_FILE = "/tmp/pai-acp-image-tokens-it.session.json";
+const STATE_FILE = tmpPath("pai-acp-image-tokens-it.session.json");
 
 function captureApi() {
   const handlers = new Map<string, ((event: any, ctx: any) => any)[]>();

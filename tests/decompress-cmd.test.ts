@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { rm } from "node:fs/promises";
 import { createAcpExtension } from "../src/index.js";
+import { tmpPath } from "./tmp-path.js";
 
 function captureApi() {
   const handlers = new Map<string, ((event: any, ctx: any) => any)[]>();
@@ -53,7 +54,7 @@ test("/acp-decompress returns a block's content and stays repeatable (append mod
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api as any);
 
-  const stateFile = "/tmp/pai-acp-decompress-it.session.json";
+  const stateFile = tmpPath("pai-acp-decompress-it.session.json");
   await cleanState(stateFile);
   // acp-kernel refuses to compress ranges under 5000 chars; pad the target message.
   const longText = "This is a detailed message that needs to be compressed. ".repeat(130);
@@ -102,8 +103,8 @@ test("/acp-decompress rejects invalid input with a usage message", async () => {
   createAcpExtension({ modelContextLimit: 200_000 })(api as any);
 
   const notifies: string[] = [];
-  const ctx = fakeCtx([], "/tmp/pai-acp-decompress-invalid.session.json", notifies);
-  await cleanState("/tmp/pai-acp-decompress-invalid.session.json");
+  const ctx = fakeCtx([], tmpPath("pai-acp-decompress-invalid.session.json"), notifies);
+  await cleanState(tmpPath("pai-acp-decompress-invalid.session.json"));
   const decompressCmd = api.commands.get("acp-decompress");
 
   // parseBlockIdArg accepts bare numbers ("3" -> "b3") and "b<N>"; only truly
@@ -121,8 +122,8 @@ test("/acp-decompress reports not-found for a valid id with no matching block", 
   createAcpExtension({ modelContextLimit: 200_000 })(api as any);
 
   const notifies: string[] = [];
-  const ctx = fakeCtx([userMsg("e1", "only message")], "/tmp/pai-acp-decompress-nf.session.json", notifies);
-  await cleanState("/tmp/pai-acp-decompress-nf.session.json");
+  const ctx = fakeCtx([userMsg("e1", "only message")], tmpPath("pai-acp-decompress-nf.session.json"), notifies);
+  await cleanState(tmpPath("pai-acp-decompress-nf.session.json"));
   await handlers.get("context")![0]!({ type: "context", messages: [] }, ctx);
 
   const decompressCmd = api.commands.get("acp-decompress");

@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFile, rm } from "node:fs/promises";
 import { createAcpExtension } from "../src/index.js";
+import { tmpPath } from "./tmp-path.js";
 
 // issue #267: the meter switches rulers when the usage anchor flips
 // stale↔not-stale (estimate ↔ provider). A growth delta spanning that switch
@@ -9,7 +10,7 @@ import { createAcpExtension } from "../src/index.js";
 // baseline on the flip so growth only accumulates same-source deltas — while
 // the usage bands keep the floor-stale behavior untouched.
 
-const STATE_FILE = "/tmp/pai-acp-growth-scale.session.json";
+const STATE_FILE = tmpPath("pai-acp-growth-scale.session.json");
 
 function captureApi() {
   const handlers = new Map<string, ((event: any, ctx: any) => any)[]>();

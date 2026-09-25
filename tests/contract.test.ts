@@ -4,6 +4,7 @@ import { readFile, rm } from "node:fs/promises";
 import { SIDECAR_SCHEMA_VERSION, sidecarProducer, type BcpBlockV1, type BcpSidecarV1 } from "../src/contract.js";
 import type { CompressionBlock } from "acp-kernel";
 import { createAcpExtension } from "../src/index.js";
+import { tmpPath } from "./tmp-path.js";
 
 // issue #368: downstream tools glob <sessionFile>.acp.json directly. The
 // sidecar must carry an explicit contract: schemaVersion + producer headers,
@@ -11,7 +12,7 @@ import { createAcpExtension } from "../src/index.js";
 test("saved sidecar carries schemaVersion/producer and BcpBlockV1-shaped blocks", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000, preserveRecentMessages: 1 })(api as any);
-  const stateFile = "/tmp/pai-acp-contract.session.json";
+  const stateFile = tmpPath("pai-acp-contract.session.json");
   await rm(`${stateFile}.acp.json`, { force: true });
   const entries = [
     { type: "message", id: "e1", parentId: null, timestamp: "", message: { role: "user", content: "中".repeat(6000), timestamp: Date.now() } },

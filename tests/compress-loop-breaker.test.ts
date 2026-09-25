@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { createAcpExtension } from "../src/index.js";
 import { createRuntime } from "../src/runtime.js";
 import { isCompressSuccessText, isCompressNoopText } from "../src/compress-tool.js";
+import { tmpPath } from "./tmp-path.js";
 
 // Issue #250 loop breaker (small local models, e.g. quantized 27B):
 // the model repeats an identical compress call with refs that can NEVER
@@ -101,7 +102,7 @@ test("noteDeadCompress/clearDeadCompress: per-session, per-fingerprint, cleared 
 test("issue #250: dead-range repeat breaker + turn cap + reset on new turn", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api as any);
-  const stateFile = "/tmp/pai-acp-loop-main.session.json";
+  const stateFile = tmpPath("pai-acp-loop-main.session.json");
   await rm(`${stateFile}.acp.json`, { force: true });
 
   // 16 alternating messages (last user = e15, recent zone = e12..e16, so
@@ -157,7 +158,7 @@ test("issue #250: dead-range repeat breaker + turn cap + reset on new turn", asy
 test("issue #250: unknown-ref dead ranges get the hard rejection with a live snapshot", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api as any);
-  const stateFile = "/tmp/pai-acp-loop-unknown.session.json";
+  const stateFile = tmpPath("pai-acp-loop-unknown.session.json");
   await rm(`${stateFile}.acp.json`, { force: true });
 
   let entries: any[] = [];

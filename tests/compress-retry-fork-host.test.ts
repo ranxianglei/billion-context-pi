@@ -5,6 +5,7 @@ import { createAcpExtension } from "../src/index.js";
 import { retryBreakerKey } from "../src/runtime.js";
 import { isCompressNoopText } from "../src/compress-tool.js";
 import { setRunNpmForTest } from "../src/update.js";
+import { tmpPath } from "./tmp-path.js";
 
 // Issue #453 (evidence from the #452 log): under a declared fork host
 // (PI_ACP_FORK_HOST=1, e.g. omp) the context handler keyed the compress-retry
@@ -98,7 +99,7 @@ test("issue #453: cap latches through fork-host live-id churn; new persisted use
   try {
     const { api, handlers } = captureApi();
     createAcpExtension({ modelContextLimit: 200_000 })(api as any);
-    const stateFile = "/tmp/pai-acp-fork-breaker.session.json";
+    const stateFile = tmpPath("pai-acp-fork-breaker.session.json");
     await rm(`${stateFile}.acp.json`, { force: true });
 
     // Shape contract: getBranch() returns session ENTRIES (stable ids);
