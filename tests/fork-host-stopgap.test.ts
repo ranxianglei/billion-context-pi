@@ -1,6 +1,6 @@
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { createAcpExtension } from "../src/index.js";
@@ -150,7 +150,7 @@ describe("Fork-host ref-drift attribution (issue #454 / #459)", () => {
 
   const textOf = (out: any) => (typeof out === "string" ? out : out.content?.[0]?.text ?? String(out));
 
-  async function driveUnknownRefCompress(sm: any) {
+  async function driveUnknownRefCompress(sm: any, range: { startId: string; endId: string } = { startId: "m99998", endId: "m99999" }) {
     // Drive the tool exactly as the host would: the factory wires the real
     // runtime (adapter bound) into the registered tool definitions.
     const { api } = captureApi();
@@ -166,13 +166,54 @@ describe("Fork-host ref-drift attribution (issue #454 / #459)", () => {
     };
     const out = await tool.execute(
       "call-drift-1",
-      { content: [{ startId: "m99998", endId: "m99999", summary: "s" }] },
+      { content: [{ ...range, summary: "s" }] },
       undefined,
       undefined,
       ctx,
     );
     return textOf(out);
   }
+
+  test("persistent refs hidden by the sent view log anchor-rejected-hidden-orphan, not #459 drift (#532)", async () => {
+    // Branch: user msg + a compress call/result pair whose block (b1) is
+    // INACTIVE — the kernel's hide-consumed stage drops the pair from the sent
+    // view while their stable-id refs stay in byRef. Citing them yields
+    // "cannot be anchored" with zero live-ref involvement.
+    const sessionFile = path.join(dir, "orphan.json");
+    await writeFile(sessionFile + ".acp.json", JSON.stringify({
+      schemaVersion: 1,
+      blocks: [{
+        blockId: "b1", runId: "run-1", tier: 1, topic: "t", summary: "old summary",
+        directMessageIds: ["e-old"], effectiveMessageIds: ["e-old"], directBlockIds: [],
+        compressedTokens: 100, createdAt: Date.now(), survivedCount: 0, generation: "young",
+        active: false, compressCallId: "call-1", startRef: "m00003", endRef: "m00004",
+      }],
+      messageRefs: {
+        byRaw: { "e-user": "m00001", "e-callsite": "m00002", "e-res": "m00005" },
+        byRef: { m00001: "e-user", m00002: "e-callsite", m00005: "e-res" },
+      },
+      nextBlockId: 2,
+    }), "utf8");
+    const before = await readFile(logFile, "utf8").catch(() => "");
+    process.env.PI_ACP_FORK_HOST = "1";
+    try {
+      const text = await driveUnknownRefCompress({
+        getBranch: () => [
+          { type: "message", id: "e-user", parentId: null, timestamp: "1", message: { role: "user", content: [{ type: "text", text: "hello" }] } },
+          { type: "message", id: "e-callsite", parentId: null, timestamp: "2", message: { role: "assistant", content: [{ type: "toolCall", name: "compress", id: "call-1", arguments: { content: [] } }] } },
+          { type: "message", id: "e-res", parentId: null, timestamp: "3", message: { role: "toolResult", toolName: "compress", toolCallId: "call-1", content: [{ type: "text", text: "done" }] } },
+        ],
+        getSessionId: () => "orphan-session",
+        getSessionFile: () => sessionFile,
+      }, { startId: "m00002", endId: "m00005" });
+      assert.match(text, /error/i, "kernel anchor rejection surfaces to the model");
+      const log = (await readFile(logFile, "utf8")).slice(before.length);
+      assert.match(log, /event=anchor-rejected-hidden-orphan/, "hidden-persistent rejection gets its own event");
+      assert.doesNotMatch(log, /fork-ref-drift-suspected/, "not attributed to #459");
+    } finally {
+      delete process.env.PI_ACP_FORK_HOST;
+    }
+  });
 
   test("ref-resolution failure on a declared fork host logs fork-ref-drift-suspected (#459)", async () => {
     process.env.PI_ACP_FORK_HOST = "1";

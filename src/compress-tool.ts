@@ -362,6 +362,25 @@ function refIsDead(ref: string, state: CompressionState, visibleIds: Set<string>
   return !hasActiveOwner(state, [rawId], visibleIds);
 }
 
+// #532: classify one failed range boundary for fork-drift attribution.
+// "live": ref resolves to a content-addressed live-* id (unpersisted tail) —
+// host-view churn territory (#459). "unknown": ref absent from the persisted
+// byRef (pruned stale live ref or cross-generation) — also #459 territory.
+// "persistent-dangling": stable-id ref whose message left the sent view
+// (hide-consumed / orphan hiding, acp-kernel#396) — NOT fork drift.
+// "alive": still resolvable; the range failed for another reason.
+function refDriftSignal(ref: string, state: CompressionState, visibleIds: Set<string>): "live" | "unknown" | "persistent-dangling" | "alive" {
+  const trimmed = ref.trim();
+  if (/^b\d+$/i.test(trimmed)) return "alive";
+  const m = trimmed.match(/^m(\d+)$/i);
+  if (!m) return "unknown";
+  const rawId = state.messageRefs.byRef[trimmed] ?? state.messageRefs.byRef[paddedRef(Number(m[1]))];
+  if (!rawId) return "unknown";
+  if (rawId.startsWith("live-")) return "live";
+  if (!visibleIds.has(rawId) && !hasActiveOwner(state, [rawId], visibleIds)) return "persistent-dangling";
+  return "alive";
+}
+
 function compressibleSnapshotText(nudge: NudgeDecision | undefined): string {
   const ranges = viableRanges(nudge?.compressibleRanges ?? []);
   if (ranges.length === 0) {
@@ -604,10 +623,20 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
     // ref-resolution failures on a declared fork host mean the host rewrote or
     // shrank its in-flight view (see mergeLiveEntries in runtime.ts). Attribute
     // it in support logs so "does not exist" spam is not misread as model
-    // misbehavior.
+    // misbehavior. #532: only live-*/unresolvable refs implicate the host view;
+    // persistent refs left dangling by sent-view hiding (acp-kernel#396) get
+    // their own event so kernel-side orphan hiding is not counted as #459.
     if (blocksCreated === 0 && isDeclaredForkHost() && !isPiHost(ctx.sessionManager)
       && /does not exist|cannot be anchored|is unknown|unknown refs/i.test(errors.join(" "))) {
-      logWarn("compress", { sid: ctx.sessionManager.getSessionId(), event: "fork-ref-drift-suspected", seeIssue: "#459", errors: errors.slice(0, 3) });
+      const signals = ranges.flatMap((r) => [
+        refDriftSignal(r.startId, state, visibleIds),
+        refDriftSignal(r.endId, state, visibleIds),
+      ]);
+      if (signals.includes("live") || signals.includes("unknown")) {
+        logWarn("compress", { sid, event: "fork-ref-drift-suspected", seeIssue: "#459", errors: errors.slice(0, 3) });
+      } else if (signals.includes("persistent-dangling")) {
+        logWarn("compress", { sid, event: "anchor-rejected-hidden-orphan", errors: errors.slice(0, 3) });
+      }
     }
   }
   if (warnings.length > 0) {
