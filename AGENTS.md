@@ -41,6 +41,7 @@ pi-acp/
 │   ├── search-tool.ts        # search_context tool (delegates to kernel.searchBlocks)
 │   ├── search-index.ts       # Builds SearchDoc[] from session log + ACP blocks
 │   ├── status-tool.ts        # acp_status tool (delegates to kernel.buildStatusReport)
+│   ├── rule-tool.ts          # acp_rule record tool handler (opt-in: "rules": true)
 │   ├── commands.ts           # /acp slash command
 │   ├── system-prompt.ts      # System prompt with compression philosophy
 │   ├── update.ts             # Auto-update: checks npm, auto-installs latest
