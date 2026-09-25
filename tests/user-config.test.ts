@@ -318,3 +318,24 @@ test("applyUserConfig drops malformed neverPreserveRecentTools when no adapter v
   const result = applyUserConfig({}, { neverPreserveRecentTools: "read" });
   assert.equal(result.neverPreserveRecentTools, undefined);
 });
+
+// --- preserveRecentTools (positive knob; EMPTY array is INVALID here) -------
+
+test("applyUserConfig trims preserveRecentTools and lets the user override the adapter", () => {
+  const result = applyUserConfig(
+    { preserveRecentTools: ["bash"] },
+    { preserveRecentTools: [" read "] },
+  );
+  assert.deepEqual(result.preserveRecentTools, ["read"]);
+});
+
+test("applyUserConfig REJECTS an EMPTY preserveRecentTools array (no-op, unlike the never-list)", () => {
+  const result = applyUserConfig({ preserveRecentTools: ["read"] }, { preserveRecentTools: [] });
+  assert.deepEqual(result.preserveRecentTools, ["read"], "[] is a pure no-op — falls back to adapter, not accepted");
+});
+
+test("applyUserConfig keeps the adapter preserveRecentTools when the user value is malformed", () => {
+  const result = applyUserConfig({ preserveRecentTools: ["read"] }, { preserveRecentTools: [42] });
+  assert.deepEqual(result.preserveRecentTools, ["read"]);
+  assert.equal(applyUserConfig({}, { preserveRecentTools: "read" }).preserveRecentTools, undefined);
+});

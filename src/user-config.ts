@@ -21,6 +21,7 @@ export interface UserAcpConfig {
   protectedTools?: string[];
   protectedLatestTools?: string[];
   neverPreserveRecentTools?: string[];
+  preserveRecentTools?: string[];
   toolBashDefaultTimeout?: number;
   toolOutputMaxBytes?: number;
   delegate?: boolean | DelegateConfig;
@@ -137,7 +138,7 @@ function join(... parts: string[]): string {
 
 const KNOWN = new Set([
   "enabled", "debug", "autoUpdate", "modelContextLimit",
-  "protectedTools", "protectedLatestTools", "neverPreserveRecentTools",
+  "protectedTools", "protectedLatestTools", "neverPreserveRecentTools", "preserveRecentTools",
   "toolBashDefaultTimeout", "toolOutputMaxBytes",
   "delegate", "compress", "displayUsage", "throttleRetry",
   "outputHeadroomMaxPct",
@@ -184,7 +185,25 @@ export function applyUserConfig(adapter: AdapterConfig, user: UserAcpConfig): Ad
     else if (adapter.neverPreserveRecentTools !== undefined) result.neverPreserveRecentTools = adapter.neverPreserveRecentTools;
     else delete result.neverPreserveRecentTools;
   }
+  // preserveRecentTools is the positive counterpart: patterns REMOVED from
+  // the effective exclusion list (kernel >= 0.0.93). An empty array would be
+  // a pure no-op — reject it like the protection keys, since a bare [] here
+  // is almost certainly a typo for neverPreserveRecentTools: [] (bili #1277).
+  if ("preserveRecentTools" in user) {
+    const cleaned = cleanPreserveRecentList(user.preserveRecentTools);
+    if (cleaned !== undefined) result.preserveRecentTools = cleaned;
+    else if (adapter.preserveRecentTools !== undefined) result.preserveRecentTools = adapter.preserveRecentTools;
+    else delete result.preserveRecentTools;
+  }
   return result;
+}
+
+function cleanPreserveRecentList(value: unknown): string[] | undefined {
+  if (!Array.isArray(value) || value.length === 0 || !value.every((v) => typeof v === "string" && v.trim() !== "")) {
+    console.warn(`[bcp] acp.json "preserveRecentTools" must be a non-empty array of non-empty strings (an empty array is a no-op — for protect-everything use neverPreserveRecentTools: []) — ignoring the value`);
+    return undefined;
+  }
+  return value.map((v) => v.trim());
 }
 
 function cleanNeverPreserveList(value: unknown): string[] | undefined {

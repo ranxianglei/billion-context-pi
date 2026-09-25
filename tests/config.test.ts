@@ -502,3 +502,11 @@ test("resolveConfig passes neverPreserveRecentTools verbatim, [] included", () =
 test("resolveConfig leaves neverPreserveRecentTools undefined so the kernel built-in list governs", () => {
   assert.equal(resolveConfig({}, 200_000).neverPreserveRecentTools, undefined);
 });
+
+// --- preserveRecentTools (kernel >= 0.0.93, bili #1277) ---------------------
+
+test("resolveConfig passes preserveRecentTools verbatim (the one-entry #1198/#1277 remedy)", () => {
+  const cfg = resolveConfig({ preserveRecentTools: ["read"] }, 200_000);
+  assert.deepEqual(cfg.preserveRecentTools, ["read"]);
+  assert.equal(resolveConfig({}, 200_000).preserveRecentTools, undefined, "unset → no subtraction, kernel built-in governs");
+});

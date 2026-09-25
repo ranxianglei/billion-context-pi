@@ -263,6 +263,16 @@ export interface AdapterConfig {
    *  not re-include decompress/search_context or just-restored blocks get
    *  pinned in the recent zone and become unreclaimable. */
   neverPreserveRecentTools?: string[];
+  /** The positive counterpart of neverPreserveRecentTools: tool-name
+   *  patterns REMOVED from the effective recent-zone exclusion list (kernel
+   *  >= 0.0.93) — `(neverPreserveRecentTools ?? built-in) minus
+   *  preserveRecentTools`. The one-entry #1198/#1277 batch-read fold→re-read
+   *  remedy: ["read"] protects fresh read results without restating (or
+   *  freezing a stale copy of) the built-in list. Default: unset → no
+   *  subtraction. Unlike neverPreserveRecentTools an EMPTY ARRAY IS
+   *  INVALID here (pure no-op — use neverPreserveRecentTools: [] for
+   *  protect-everything instead). */
+  preserveRecentTools?: string[];
   preserveRecentMessages?: number;
   /** Check npm for a newer billion-context-pi on startup and auto-install it. Default: true.
    *  Disable via `autoUpdate: false` or env `ACP_AUTO_UPDATE=0` to avoid all
@@ -572,6 +582,7 @@ export function resolveConfig(adapter: AdapterConfig, liveContextLimit: number, 
     protectedTools: adapter.protectedTools ?? [],
     protectedLatestTools: adapter.protectedLatestTools ?? [],
     neverPreserveRecentTools: adapter.neverPreserveRecentTools,
+    preserveRecentTools: adapter.preserveRecentTools,
     preserveRecentMessages: adapter.preserveRecentMessages ?? 5,
     ...adapter.coreOverrides,
   });
