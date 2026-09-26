@@ -12,7 +12,7 @@ import {
 } from "acp-kernel";
 import { resolveCompress, resolveConfig, type AdapterConfig } from "./config.js";
 import { applyStrictReasoningGate, resolveReasoningDrop, type CompressReasoningConfig } from "./reasoning-drop.js";
-import { entriesToCoreMessages, extractText, matchesStoredText, messageIdentity, messageRef } from "./messages.js";
+import { entriesToCoreMessages, EntryProjectionCache, extractText, matchesStoredText, messageIdentity, messageRef } from "./messages.js";
 import { SessionStateStore, deriveChildState, type LiveRefOrigin } from "./state.js";
 import { hasCompressHistory, rebuildStateFromLog } from "./state-rebuild.js";
 import { loadUserConfig, applyUserConfig } from "./user-config.js";
@@ -135,6 +135,18 @@ export interface AcpRuntime {
    *  session_start and on every context event so config edits apply live. */
   reloadConfig(cwd: string): Promise<void>;
   stateFor(ctx: ExtensionContext, liveMessages?: AgentMessage[]): Promise<{ state: CompressionState; coreMessages: ReturnType<typeof entriesToCoreMessages>; entries: SessionEntry[] }>;
+  /** Record the EXACT sent view measured off the real processTurn output for
+   *  this turn (issue #561): `viewTokens` counts turn.messages (the pruned,
+   *  summary-injected projection that actually went on the wire), and `usable`
+   *  marks whether that count is an honest view — a turn that ran with
+   *  tokenCount at/above the truncate band may have truncated its output, so
+   *  its post-truncation size under-reports and must not be trusted next turn. */
+  noteSentViewCount(sid: string, record: { viewTokens: number; blocksLen: number; activeBlocks: number; limit: number; usable: boolean }): void;
+  /** Last turn's measured sent view, or undefined on the first turn / after a
+   *  signature change (blocks added or dropped, window re-centered). */
+  peekSentViewCount(sid: string): { viewTokens: number; blocksLen: number; activeBlocks: number; limit: number; usable: boolean } | undefined;
+  /** Drop a session's sent-view meter (session_shutdown). */
+  dropSentViewCount(sid: string): void;
   save(state: CompressionState, ctx: ExtensionContext): Promise<void>;
   /** #364 inline child sessions (same process, e.g. Prime RLM): derive the
    *  child's compression state from another session's. Inherits blocks /
@@ -391,6 +403,20 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     overflowEpisodes.delete(sid);
   }
 
+  // Issue #561: the sent-view meter replaces the per-turn probe processTurn
+  // (clone + full second pass). Steady-state turns read the previous turn's
+  // measured view instead of re-measuring; see noteSentViewCount for fields.
+  const sentViewMeters = new Map<string, { viewTokens: number; blocksLen: number; activeBlocks: number; limit: number; usable: boolean }>();
+  function noteSentViewCount(sid: string, record: { viewTokens: number; blocksLen: number; activeBlocks: number; limit: number; usable: boolean }): void {
+    sentViewMeters.set(sid, record);
+  }
+  function peekSentViewCount(sid: string): { viewTokens: number; blocksLen: number; activeBlocks: number; limit: number; usable: boolean } | undefined {
+    return sentViewMeters.get(sid);
+  }
+  function dropSentViewCount(sid: string): void {
+    sentViewMeters.delete(sid);
+  }
+
   const deadCompressCounts = new Map<string, Map<string, number>>();
   function noteDeadCompress(sid: string, fingerprint: string): number {
     let per = deadCompressCounts.get(sid);
@@ -635,6 +661,11 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   // repopulates it before any tool can run.
   const lastLiveBySession = new Map<string, AgentMessage[]>();
 
+  // Issue #561: per-session incremental projection cache — pi hosts rebuild the
+  // entries array (fresh objects) every turn from an append-only jsonl, so the
+  // 24k-entry projection is prefix-stable and only the new tail needs work.
+  const projectionCaches = new Map<string, EntryProjectionCache>();
+
   async function stateFor(ctx: ExtensionContext, liveMessages?: AgentMessage[]) {
     const sm = ctx.sessionManager;
     const sessionFile = sm.getSessionFile() ?? undefined;
@@ -684,7 +715,9 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
       pruneOrphanRefs(state, coreMessages);
       return { state, coreMessages, entries: merged };
     }
-    const coreMessages = entriesToCoreMessages(entries);
+    let projection = projectionCaches.get(sessionId);
+    if (!projection) { projection = new EntryProjectionCache(); projectionCaches.set(sessionId, projection); }
+    const coreMessages = projection.project(entries);
     if (live === undefined) pruneOrphanRefs(state, coreMessages);
     return { state, coreMessages, entries };
   }
@@ -727,4 +760,4 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   let refused = false;
   let refusalMessage: string | null = null;
   let delegateStoodDown = false;
-  return { core, store, get refused() { return refused; }, set refused(v: boolean) { refused = v; }, get refusalMessage() { return refusalMessage; }, set refusalMessage(v: string | null) { refusalMessage = v; }, get delegateStoodDown() { return delegateStoodDown; }, set delegateStoodDown(v: boolean) { delegateStoodDown = v; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown, nudgeShownFor, nudgeShownTokensFor, clearNudgeTracking, clearNudgeTokenStamps, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reasoningDropFor, reloadConfig, stateFor, save, deriveChildState: deriveChild, acquireLock, overflowFor, overflowDrop, noteDeadCompress, clearDeadCompress, throttleFor, throttleDrop , noteTokenScale, dropTokenScale, noteHostUsage, dropHostUsageSamples, noteSizeDivergence, dropSizeDivergence, noteTerminalEscape, dropTerminalEscape, noteTruncationSkipped, dropTruncationSkipped, stripImagesFor };}
+  return { core, store, get refused() { return refused; }, set refused(v: boolean) { refused = v; }, get refusalMessage() { return refusalMessage; }, set refusalMessage(v: string | null) { refusalMessage = v; }, get delegateStoodDown() { return delegateStoodDown; }, set delegateStoodDown(v: boolean) { delegateStoodDown = v; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown, nudgeShownFor, nudgeShownTokensFor, clearNudgeTracking, clearNudgeTokenStamps, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reasoningDropFor, reloadConfig, stateFor, save, deriveChildState: deriveChild, acquireLock, overflowFor, overflowDrop, noteSentViewCount, peekSentViewCount, dropSentViewCount, noteDeadCompress, clearDeadCompress, throttleFor, throttleDrop , noteTokenScale, dropTokenScale, noteHostUsage, dropHostUsageSamples, noteSizeDivergence, dropSizeDivergence, noteTerminalEscape, dropTerminalEscape, noteTruncationSkipped, dropTruncationSkipped, stripImagesFor };}
