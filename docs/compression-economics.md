@@ -337,6 +337,13 @@ optional `priceProfile` ({w,r,q} or a $/M triple) on the adapter config; when
 set, `/acp` would show V, last-fold h, S, n\*(S), S\*, and a cadence verdict.
 Awaiting owner sign-off before implementation.
 
+Status update (#529): the `priceProfile` key itself has shipped — as a
+top-level adapter-config entry (`{ w?, r?, q? }`, normalized over the
+input-token unit p_in = 1; validated; report-only) that feeds the `acp_cache`
+report's per-fold P&L verdicts instead of the built-in Anthropic-ratio weights
+(w=1, r=0.1, q=4). The proposed `/acp` readout above remains unimplemented and
+still awaits sign-off, including the $/M-triple variant.
+
 ## References
 
 - [#359](https://github.com/ranxianglei/billion-context-pi/issues/359) — byte-level

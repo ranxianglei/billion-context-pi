@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { CONFIG_DIR_NAME } from "./config-dir.js";
 import type { Prompts } from "acp-kernel";
 import type { AdapterConfig, CompressConfig, DelegateConfig, HostSessionConfig, RepetitionGuardConfig } from "./config.js";
+import type { PriceProfile } from "acp-kernel";
 import type { PiPromptSections } from "./system-prompt.js";
 import type { NudgeSectionsConfig, ToolPromptsConfig } from "./surface.js";
 import type { DegenerationGuardConfig } from "./degeneration.js";
@@ -38,6 +39,7 @@ export interface UserAcpConfig {
   toolPrompts?: ToolPromptsConfig;
   delegatePrompt?: string | null;
   hostSession?: boolean | HostSessionConfig;
+  priceProfile?: PriceProfile;
   rules?: boolean;
 }
 
@@ -145,7 +147,7 @@ const KNOWN = new Set([
   "repetitionGuard", "degenerationGuard",
   "prompts", "acknowledgePromptsRisk",
   "promptSections", "nudgeSections", "toolPrompts", "delegatePrompt",
-  "hostSession", "rules",
+  "hostSession", "priceProfile", "rules",
 ]);
 
 function pickKnown(parsed: Record<string, unknown>): UserAcpConfig {
@@ -195,6 +197,16 @@ export function applyUserConfig(adapter: AdapterConfig, user: UserAcpConfig): Ad
     else if (adapter.preserveRecentTools !== undefined) result.preserveRecentTools = adapter.preserveRecentTools;
     else delete result.preserveRecentTools;
   }
+  if ("priceProfile" in user) {
+    const cleaned = cleanPriceProfile(user.priceProfile);
+    if (cleaned !== undefined) result.priceProfile = cleaned;
+    else if (adapter.priceProfile !== undefined) result.priceProfile = adapter.priceProfile;
+    else delete result.priceProfile;
+  } else if (result.priceProfile !== undefined) {
+    const cleaned = cleanPriceProfile(result.priceProfile);
+    if (cleaned !== undefined) result.priceProfile = cleaned;
+    else delete result.priceProfile;
+  }
   return result;
 }
 
@@ -220,4 +232,29 @@ function cleanProtectionList(key: string, value: unknown): string[] | undefined 
     return undefined;
   }
   return value.map((v) => v.trim());
+}
+
+// The kernel trusts this input (per-field `?? default`, no validation): a NaN or
+// negative weight would poison every fold verdict in the report, so the block is
+// validated here (#499 pattern, bili #1279 parity). Rule set: each present known
+// field must be a finite number >= 0; unknown subkeys are ignored; any malformed
+// known field rejects the WHOLE block. A block with no surviving known fields is
+// treated as unset.
+function cleanPriceProfile(value: unknown): PriceProfile | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    console.warn('[bcp] acp.json "priceProfile" must be an object of non-negative numbers ({ w?, r?, q? }) — ignoring the value');
+    return undefined;
+  }
+  const o = value as Record<string, unknown>;
+  const out: PriceProfile = {};
+  for (const key of ["w", "r", "q"] as const) {
+    if (!(key in o)) continue;
+    const n = o[key];
+    if (typeof n !== "number" || !Number.isFinite(n) || n < 0) {
+      console.warn(`[bcp] acp.json "priceProfile.${key}" must be a finite number >= 0 (got ${JSON.stringify(n)}) — ignoring the whole priceProfile block`);
+      return undefined;
+    }
+    out[key] = n;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
 }
