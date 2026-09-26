@@ -76,6 +76,74 @@ export function entriesToCoreMessages(entries: SessionEntry[]): CoreMessage[] {
   return out;
 }
 
+// Conservative cap on how many entries an incremental projection may append in
+// one turn: a healthy host appends a handful per turn, and anything larger means
+// the structural assumption misfired — fall back to a full projection instead of
+// extending a possibly-wrong cache (same posture as live-only-tail's tail cap).
+const MAX_INCREMENTAL_ENTRIES = 64;
+
+/** Append-only incremental cache for entriesToCoreMessages (issue #561).
+ *
+ *  Projection is a pure prefix-stable function: each entry contributes a fixed
+ *  slice of CoreMessages, so projecting entries[0..n) then appending the
+ *  projection of entries[n..m) equals projecting entries[0..m) — as long as the
+ *  first n entries are UNCHANGED. Hosts rebuild the entries array (and the entry
+ *  objects) from the append-only session jsonl every turn, so identity caching
+ *  is useless; validate structurally instead:
+ *    - count only ever GROWS (a drop = host rewind/truncate → full reproject),
+ *    - the first and last cached boundary entries still carry the same ids
+ *      (canaries against in-place rewrites the count check cannot see),
+ *    - at most MAX_INCREMENTAL_ENTRIES new entries per turn.
+ *  Any doubt → full entriesToCoreMessages, identical result, just slower. */
+export class EntryProjectionCache {
+  private count = 0;
+  private firstId: string | null = null;
+  private lastId: string | null = null;
+  private cores: CoreMessage[] = [];
+
+  /** Project `entries`, reusing the previous turn's work when the array is a
+   *  structural extension of the last one seen. Returns a defensive copy: the
+   *  internal array is shared across turns, and callers hand it to kernel code
+   * that must never observe (or mutate) cross-turn state. */
+  project(entries: SessionEntry[]): CoreMessage[] {
+    if (
+      this.count > 0 &&
+      entries.length >= this.count &&
+      entries.length - this.count <= MAX_INCREMENTAL_ENTRIES &&
+      this.firstId !== null &&
+      this.lastId !== null &&
+      entries[0]?.id === this.firstId &&
+      entries[this.count - 1]?.id === this.lastId
+    ) {
+      for (let i = this.count; i < entries.length; i++) {
+        const entry = entries[i]!;
+        if (entry.type === "message") {
+          this.cores.push(...projectMessage(entry.message, entry.id));
+        } else if (isCustomMessageEntry(entry)) {
+          const text = extractText(entry.content);
+          if (text.length > 0) this.cores.push({ id: entry.id, role: "user", contentType: "text", text });
+        }
+      }
+      this.count = entries.length;
+      this.lastId = entries[entries.length - 1]!.id;
+      return this.cores.slice();
+    }
+    this.cores = entriesToCoreMessages(entries);
+    this.count = entries.length;
+    this.firstId = entries[0]?.id ?? null;
+    this.lastId = entries[entries.length - 1]?.id ?? null;
+    return this.cores.slice();
+  }
+
+  /** Drop the cache (state rebuilt, session switched). */
+  reset(): void {
+    this.count = 0;
+    this.firstId = null;
+    this.lastId = null;
+    this.cores = [];
+  }
+}
+
 function projectMessage(message: AgentMessage, id: string): CoreMessage[] {
   const msg = message as AnyMessage;
   const role = msg.role;

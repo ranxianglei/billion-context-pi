@@ -25,7 +25,7 @@ import { makeCommands } from "./commands.js";
 import { mergeSurface, readToolSurfaceWithPacks, resolveActivePack, resolvePackName, surfaceMetaOf } from "./prompt-pack.js";
 import type { NudgeSectionsConfig } from "./surface.js";
 import { coreOutToAgentMessages, extractText } from "./messages.js";
-import { liveOnlyTail } from "./live-only-tail.js";
+import { liveOnlyTailCached, dropLiveOnlyTailCache } from "./live-only-tail.js";
 import { carryHostSystemMessages } from "./system-passthrough.js";
 import { sanitizeToolPairing } from "./tool-pair-sanitizer.js";
 import { countThinkingChars, dropCompressReasoning } from "./reasoning-drop.js";
@@ -36,7 +36,7 @@ import { openFleetInspector } from "./fleet-inspector.js";
 import { applyStripImages } from "./strip-images.js";
 import { wireToolGuardrails } from "./tool-guardrails.js";
 import { debug, logError, logInfo, logWarn, logThrow, closeLogStream } from "./log.js";
-import { collectCoveredMessageIds, estimateTokens, collectImageTokens, modelSupportsImages, sentViewTokenCount } from "./tokens.js";
+import { collectCoveredMessageIds, estimateTokens, collectImageTokens, modelSupportsImages, sentViewTokenCount, sentViewMeterMatches } from "./tokens.js";
 import { lastTurnBoundaryId, lastTurnBoundaryIndex } from "./turn-boundary.js";
 import { compressionAnchorStaleness } from "./floor-stale.js";
 import { checkForUpdate } from "./update.js";
@@ -264,6 +264,9 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     runtime.dropSizeDivergence(ctx.sessionManager.getSessionId());
     runtime.dropTerminalEscape(ctx.sessionManager.getSessionId());
     runtime.dropTruncationSkipped(ctx.sessionManager.getSessionId());
+    runtime.dropSentViewCount(ctx.sessionManager.getSessionId());
+    runtime.dropProjectionCache(ctx.sessionManager.getSessionId());
+    dropLiveOnlyTailCache(ctx.sessionManager.getSessionId());
     resetDelegateUsage();
     setDelegateDisplayUsage("separate");
     setDelegatePolicy(DEFAULT_DELEGATE_POLICY);
@@ -358,6 +361,9 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     runtime.dropSizeDivergence(sid);
     runtime.dropTerminalEscape(sid);
     runtime.dropTruncationSkipped(sid);
+    runtime.dropSentViewCount(sid);
+    runtime.dropProjectionCache(sid);
+    dropLiveOnlyTailCache(sid);
     delegateStatusWidget.dispose();
     closeLogStream();
   });
@@ -502,14 +508,27 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
       // pairs straddling block boundaries, absorbed/filtered messages) — in long
       // multi-block sessions that pins tokenCount far above reality, holding
       // usage in the emergency band and driving low/zero-yield compression loops.
-      // Re-measure on the actual post-processTurn view and adopt it when the two
-      // diverge beyond noise (the probe runs on a clone; see sentViewTokenCount).
+      // Issue #561: re-measuring that view used to cost a second full processTurn
+      // (structuredClone + whole-history pass) EVERY turn. Steady state now adopts
+      // the previous turn's exact measured view (recorded after the real pass
+      // below) whenever the signature matches; the probe only runs to resync —
+      // first turn, structural change (compress/decompress/window), or after a
+      // truncation-band turn whose output under-reports.
       if (state.blocks.some((b) => b.active && b.effectiveMessageIds.length > 0)) {
-        const view = sentViewTokenCount(runtime.core, coreMessages, state, config, tokenCount, imageTokens, systemPromptTokens);
-        if (view.drifted) {
-          tokenCount = applyFloors(view.viewTokens);
-          guardTokens = guardBasis(view.viewTokens);
-          logInfo("turn", { sid, event: "view-recount", prelim: sentTokens, viewTokens: view.viewTokens, tokenCount });
+        const meter = runtime.peekSentViewCount(sid);
+        if (meter && sentViewMeterMatches(meter, state, config)) {
+          if (Math.abs(meter.viewTokens - sentTokens) > Math.max(1000, 0.1 * sentTokens)) {
+            tokenCount = applyFloors(meter.viewTokens);
+            guardTokens = guardBasis(meter.viewTokens);
+            logInfo("turn", { sid, event: "view-recount", source: "prev-turn", prelim: sentTokens, viewTokens: meter.viewTokens, tokenCount });
+          }
+        } else {
+          const view = sentViewTokenCount(runtime.core, coreMessages, state, config, tokenCount, imageTokens, systemPromptTokens);
+          if (view.drifted) {
+            tokenCount = applyFloors(view.viewTokens);
+            guardTokens = guardBasis(view.viewTokens);
+            logInfo("turn", { sid, event: "view-recount", source: "probe", prelim: sentTokens, viewTokens: view.viewTokens, tokenCount });
+          }
         }
       }
       ov.noteSentView(guardTokens, config.modelContextLimit);
@@ -563,6 +582,20 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
 
       const turn = runtime.core.processTurn({ messages: coreMessages, state, config, tokenCount });
       await runtime.save(turn.state, ctx);
+
+      // Issue #561: measure the EXACT view that just went out (turn.messages is
+      // the pruned, summary-injected projection the provider receives) and
+      // record it as next turn's recount source — this is what lets the probe
+      // processTurn above stay on the resync-only path. Unusable when this turn
+      // ran in the truncate band (output may be post-truncation → under-reports).
+      const truncateBand = config.modelContextLimit > 0 ? Math.floor(config.truncate.threshold * config.modelContextLimit) : Number.MAX_SAFE_INTEGER;
+      runtime.noteSentViewCount(sid, {
+        viewTokens: estimateTokens(turn.messages, collectCoveredMessageIds(turn.state), imageTokens) + systemPromptTokens,
+        blocksLen: turn.state.blocks.length,
+        activeBlocks: turn.state.blocks.filter((b) => b.active).length,
+        limit: config.modelContextLimit,
+        usable: tokenCount < truncateBand,
+      });
 
       // [#464] Surface the kernel's end-game observability signals: they fire
       // every stuck turn inside the kernel, but before this were invisible —
@@ -802,7 +835,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     // rebuild from entries alone drops them). null = no-op: normal turns align
     // byte-for-byte and non-Pi hosts already merged live into entries. Append-only
     // — never touches refs/blocks, so it stays orthogonal to the #459 ref churn.
-    const liveTail = liveOnlyTail(entries, event.messages);
+    const liveTail = liveOnlyTailCached(sid, entries, event.messages);
     if (liveTail && liveTail.length > 0) {
       rebuilt.push(...liveTail);
       logInfo("live-only-tail", { sid, event: "appended", tail: liveTail.length, outMsgs: rebuilt.length });
