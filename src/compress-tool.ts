@@ -207,6 +207,13 @@ function isRangeLikeObject(o: unknown): o is Record<string, unknown> {
 }
 
 function describeDiagnostics(diagnostics: CompressParseDiagnostics, content: unknown): string {
+  if (content === undefined) {
+    const keys = (diagnostics.keys ?? []).filter((k) => typeof k === "string");
+    const hint = keys.length > 0 && !keys.includes("content")
+      ? ` Top-level keys were [${keys.join(", ")}] — pass the ranges under "content".`
+      : "";
+    return `Invalid compress content (${diagnostics.kind}): no "content" argument was provided.${hint}`;
+  }
   const shape = typeof content === "string"
     ? "a JSON-encoded string (non-strict-tool providers stringify array arguments)"
     : content === null ? "null" : `a ${typeof content}`;

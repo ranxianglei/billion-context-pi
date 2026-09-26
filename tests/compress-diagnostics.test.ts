@@ -57,6 +57,22 @@ test("clean stringified array still parses (regression guard)", () => {
   );
 });
 
+test("missing content argument: no 'a undefined', renamed key named in hint", () => {
+  const out = normalizeRanges({ ranges: [{ startId: "m00001", endId: "m00010", summary: "s" }] } as unknown as CompressArgs);
+  assert.equal(typeof out, "string");
+  assert.doesNotMatch(out, /a undefined/);
+  assert.match(out, /no "content" argument was provided/);
+  assert.match(out, /Top-level keys were \[ranges\]/);
+});
+
+test("missing content argument without other keys: no bogus key hint", () => {
+  const out = normalizeRanges({} as unknown as CompressArgs);
+  assert.equal(typeof out, "string");
+  assert.doesNotMatch(out, /a undefined/);
+  assert.match(out, /no "content" argument was provided/);
+  assert.doesNotMatch(out, /Top-level keys/);
+});
+
 test("non-string content shapes keep their wording (number)", () => {
   const out = normalizeRanges({ content: 42 } as unknown as CompressArgs);
   assert.equal(typeof out, "string");
