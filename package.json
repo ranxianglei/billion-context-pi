@@ -1,6 +1,6 @@
 {
 	"name": "billion-context-pi",
-	"version": "0.1.79",
+	"version": "0.1.80",
 	"description": "One billion, not one million. Model-driven context management for the Pi coding agent.",
 	"main": "dist/index.js",
 	"types": "dist/index.d.ts",
