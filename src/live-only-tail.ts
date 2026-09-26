@@ -86,6 +86,11 @@ interface AlignmentResult {
   /** True when the walk reached min(persisted, live) — persisted and live
    *  aligned on the whole common prefix. False = diverged mid-history. */
   alignedFully: boolean;
+  /** Length of the proven-aligned prefix [0, alignedPrefix). In the suffix-
+   *  recovery case this is i, NOT i+1: the final pair is the divergence point
+   *  itself (persisted text vs suffixed live text) and must be re-walked next
+   *  turn — storing i+1 would let the cached path skip it and drop the tail. */
+  alignedPrefix: number;
 }
 
 function alignAndExtract(entries: SessionEntry[], live: AgentMessage[]): AlignmentResult {
@@ -101,7 +106,7 @@ function alignAndExtract(entries: SessionEntry[], live: AgentMessage[]): Alignme
   if (i === max) {
     // Persisted is a prefix of live (or identical); the extension is the tail.
     const tail = live.slice(max);
-    return { tail: tail.length > 0 && tail.length <= MAX_LIVE_ONLY_TAIL ? tail : null, alignedFully: true };
+    return { tail: tail.length > 0 && tail.length <= MAX_LIVE_ONLY_TAIL ? tail : null, alignedFully: true, alignedPrefix: max };
   }
 
   // Diverged before the end: recover only the safe case — equal-length arrays, all
@@ -115,13 +120,13 @@ function alignAndExtract(entries: SessionEntry[], live: AgentMessage[]): Alignme
       if (before && after && after.startsWith(before)) {
         const suffix = after.slice(before.length).trim();
         if (suffix.length > 0) {
-          return { tail: [{ role: "user", content: [{ type: "text", text: suffix }], timestamp: Date.now() } as AgentMessage], alignedFully: true };
+          return { tail: [{ role: "user", content: [{ type: "text", text: suffix }], timestamp: Date.now() } as AgentMessage], alignedFully: true, alignedPrefix: i };
         }
       }
     }
   }
 
-  return { tail: null, alignedFully: false };
+  return { tail: null, alignedFully: false, alignedPrefix: i };
 }
 
 export function liveOnlyTail(entries: SessionEntry[], live: AgentMessage[]): AgentMessage[] | null {
@@ -188,7 +193,7 @@ export function liveOnlyTailCached(sid: string, entries: SessionEntry[], live: A
         return tail.length > 0 && tail.length <= MAX_LIVE_ONLY_TAIL ? tail : null;
       }
       // New pairs diverged (host rewrote history past the boundary): fall
- // through to the full walk so the mid-history recovery logic runs.
+      // through to the full walk so the mid-history recovery logic runs.
     }
   }
   const result = alignAndExtract(entries, live);
@@ -196,7 +201,7 @@ export function liveOnlyTailCached(sid: string, entries: SessionEntry[], live: A
   tailCache.set(sid, {
     persistedCount,
     liveCount: live.length,
-    alignedTo: result.alignedFully ? Math.min(persistedCount, live.length) : 0,
+    alignedTo: result.alignedPrefix,
     lastPersistedSig: lastEntry ? weakMessageSig(entryAsLiveShape(lastEntry)) : null,
   });
   return result.tail;

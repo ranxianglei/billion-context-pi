@@ -86,6 +86,27 @@ test("oversized live-only tail returns null exactly like the plain walk", () => 
   assert.equal(liveOnlyTail(entries, live), null);
 });
 
+test("suffix-recovery repeated across turns still returns the suffix (cached ≡ plain)", () => {
+  dropLiveOnlyTailCache("s7");
+  const entries: SessionEntry[] = [];
+  const live: object[] = [];
+  for (let i = 0; i < 5; i++) {
+    entries.push(msgEntry(`u${i}`, user(`q${i}`)));
+    entries.push(msgEntry(`a${i}`, assistant(`r${i}`)));
+    live.push(user(`q${i}`), assistant(`r${i}`));
+  }
+  // Host appended a text suffix INTO the final user message without persisting an
+  // entry (pi-web auto-name shape, #471): persisted ends at "base prompt", live
+  // ends at "base prompt" + suffix. Turn 1 primes the cache through the recovery
+  // branch; turn 2 repeats the SAME inputs (host still hasn't persisted) — the
+  // cached path must not treat the recovered final pair as proven-aligned, or it
+  // skips re-walking it and drops the suffix.
+  entries.push(msgEntry("u5", user("base prompt")));
+  live.push(user("base prompt\n\nGenerate a title"));
+  assert.deepEqual(tailShape(liveOnlyTailCached("s7", entries, live)), tailShape(liveOnlyTail(entries, live)));
+  assert.deepEqual(tailShape(liveOnlyTailCached("s7", entries, live)), tailShape(liveOnlyTail(entries, live)));
+});
+
 test("sessions are isolated by sid", () => {
   dropLiveOnlyTailCache("s5");
   dropLiveOnlyTailCache("s6");
