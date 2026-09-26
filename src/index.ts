@@ -36,7 +36,8 @@ import { openFleetInspector } from "./fleet-inspector.js";
 import { applyStripImages } from "./strip-images.js";
 import { wireToolGuardrails } from "./tool-guardrails.js";
 import { debug, logError, logInfo, logWarn, logThrow, closeLogStream } from "./log.js";
-import { collectCoveredMessageIds, estimateTokens, collectImageTokens, modelSupportsImages, sentViewTokenCount } from "./tokens.js";
+import { collectCoveredMessageIds, estimateTokens, collectImageTokens, modelSupportsImages, sentViewTokenCount, truncateCap } from "./tokens.js";
+import { viewMeterFingerprint } from "./view-meter.js";
 import { lastTurnBoundaryId, lastTurnBoundaryIndex } from "./turn-boundary.js";
 import { compressionAnchorStaleness } from "./floor-stale.js";
 import { checkForUpdate } from "./update.js";
@@ -497,19 +498,38 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
       const guardBasis = (base: number): number => Math.max(calibrate(base), hostFloor);
       let tokenCount = applyFloors(sentTokens);
       let guardTokens = guardBasis(sentTokens);
-      // View-based recount (issue #289): the raw-view estimate counts uncovered
-      // messages that prune strips from the sent view every turn (orphaned tool
-      // pairs straddling block boundaries, absorbed/filtered messages) — in long
-      // multi-block sessions that pins tokenCount far above reality, holding
-      // usage in the emergency band and driving low/zero-yield compression loops.
-      // Re-measure on the actual post-processTurn view and adopt it when the two
-      // diverge beyond noise (the probe runs on a clone; see sentViewTokenCount).
-      if (state.blocks.some((b) => b.active && b.effectiveMessageIds.length > 0)) {
-        const view = sentViewTokenCount(runtime.core, coreMessages, state, config, tokenCount, imageTokens, systemPromptTokens);
-        if (view.drifted) {
-          tokenCount = applyFloors(view.viewTokens);
-          guardTokens = guardBasis(view.viewTokens);
-          logInfo("turn", { sid, event: "view-recount", prelim: sentTokens, viewTokens: view.viewTokens, tokenCount });
+      // View-based recount (issue #289, made incremental in #561): the raw-view
+      // estimate counts uncovered messages that prune strips from the sent view
+      // every turn (orphaned tool pairs straddling block boundaries,
+      // absorbed/filtered messages) — in long multi-block sessions that pins
+      // tokenCount far above reality, holding usage in the emergency band and
+      // driving low/zero-yield compression loops. Steady-state turns therefore
+      // extrapolate the last EXACT sent-view reading over appended entries
+      // (SentViewMeter); structural change, a non-append-only tail, the
+      // emergency-truncate band, or the drift bound fall back to the exact
+      // probe (a second processTurn on a clone — see sentViewTokenCount).
+      // Adoption threshold unchanged. guardTokens (the no-body-4xx overflow
+      // guard basis, #215) tracks the adopted sent-view estimate on both paths.
+      const hasActiveCoverage = state.blocks.some((b) => b.active && b.effectiveMessageIds.length > 0);
+      if (hasActiveCoverage) {
+        const meter = runtime.viewMeterFor(sid);
+        const fp = viewMeterFingerprint(state, systemPromptTokens);
+        const reason = meter.resyncReason({ entries, fingerprint: fp, prelim: tokenCount, config });
+        if (reason === null) {
+          const viewTokens = meter.extrapolate(entries, imageTokens);
+          if (Math.abs(viewTokens - tokenCount) > Math.max(1000, 0.1 * tokenCount)) {
+            tokenCount = applyFloors(viewTokens);
+            guardTokens = guardBasis(viewTokens);
+            logInfo("turn", { sid, event: "view-recount", prelim: sentTokens, viewTokens, tokenCount, source: "meter" });
+          }
+        } else {
+          const view = sentViewTokenCount(runtime.core, coreMessages, state, config, tokenCount, imageTokens, systemPromptTokens);
+          meter.resync(view.viewTokens, entries, fp);
+          if (view.drifted) {
+            tokenCount = applyFloors(view.viewTokens);
+            guardTokens = guardBasis(view.viewTokens);
+            logInfo("turn", { sid, event: "view-recount", prelim: sentTokens, viewTokens: view.viewTokens, tokenCount, source: reason });
+          }
         }
       }
       ov.noteSentView(guardTokens, config.modelContextLimit);
@@ -563,6 +583,17 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
 
       const turn = runtime.core.processTurn({ messages: coreMessages, state, config, tokenCount });
       await runtime.save(turn.state, ctx);
+
+      // #561: refresh the meter base from the ACTUAL sent view — a recount of
+      // this pass's output (~ms), not a second processTurn. Skipped when this
+      // pass could have truncated (tokenCount above the emergency cap): a
+      // truncated pass measures the post-truncation view and would under-report
+      // pressure (#289) — those turns take the clamped exact probe instead.
+      if (hasActiveCoverage && tokenCount <= truncateCap(config)) {
+        const meter = runtime.viewMeterFor(sid);
+        const passView = estimateTokens(turn.messages, collectCoveredMessageIds(turn.state), imageTokens) + systemPromptTokens;
+        meter.resync(passView, entries, viewMeterFingerprint(turn.state, systemPromptTokens));
+      }
 
       // [#464] Surface the kernel's end-game observability signals: they fire
       // every stuck turn inside the kernel, but before this were invisible —
@@ -691,7 +722,12 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     // the not-yet-persisted tail, which can still churn when the host's view
     // of a message drifts between context fires and would reset failCount
     // mid-episode (cap never latches, emergency-inject loops).
-    const retryTurnKey = retryBreakerKey(ctx.sessionManager, turnPolicy) ?? sid;
+    // #561: on pi hosts `entries` IS the persisted buildContextEntries output,
+    // so turnKey above is byte-identical to what retryBreakerKey would derive —
+    // reusing it drops one O(n) host buildContextEntries call per turn. Fork
+    // hosts keep the separate read: their merged live-* tail can churn between
+    // fires (#453), which turnKey (computed pre-pass) would not see.
+    const retryTurnKey = isPiHost(ctx.sessionManager) ? turnKey : retryBreakerKey(ctx.sessionManager, turnPolicy) ?? sid;
 
     // Compress-outcome tracking feeds ONLY the nudge circuit breaker below:
     // failed/no-op attempts are counted (capped at MAX_COMPRESS_ATTEMPTS per
@@ -851,6 +887,11 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     } finally {
       release();
     }
+  });
+  pi.on("session_shutdown", (_event, ctx) => {
+    const s = ctx.sessionManager.getSessionId();
+    runtime.viewMeterDrop(s);
+    runtime.projectionCacheDrop(s);
   });
 }
 

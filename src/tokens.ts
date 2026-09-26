@@ -47,6 +47,14 @@ export function estimateTokens(messages: CoreMessage[], coveredIds?: Set<string>
   return tokens;
 }
 
+// Exact upper bound on tokenCount at which the kernel's emergency truncate
+// cannot fire (the node fires at tokenCount >= threshold*limit — see
+// acp-kernel truncateLargeToolOutputs). Shared by the probe clamp below and
+// the view meter's band check (issue #561).
+export function truncateCap(config: Pick<Config, "modelContextLimit" | "truncate">): number {
+  return config.modelContextLimit > 0 ? Math.max(0, Math.floor(config.truncate.threshold * config.modelContextLimit) - 1) : Number.MAX_SAFE_INTEGER;
+}
+
 // Re-measure tokenCount on the ACTUAL sent view: run processTurn on a throwaway
 // state clone (processTurn mutates state — survival counters, nudge stamps) and
 // count the pruned result (covered removed + summaries injected + orphaned tool
@@ -71,7 +79,7 @@ export function sentViewTokenCount(
   // post-truncation view — under-reporting exactly the pathological case this
   // recount exists for (issue #289). The real pass still truncates when its
   // own (honest) count crosses the band.
-  const cap = config.modelContextLimit > 0 ? Math.max(0, Math.floor(config.truncate.threshold * config.modelContextLimit) - 1) : Number.MAX_SAFE_INTEGER;
+  const cap = truncateCap(config);
   const probe = core.processTurn({ messages, state: structuredClone(state), config, tokenCount: Math.min(prelim, cap) });
   const viewTokens = estimateTokens(probe.messages, collectCoveredMessageIds(probe.state), imageTokensById) + systemPromptTokens;
   return { viewTokens, drifted: Math.abs(viewTokens - prelim) > Math.max(1000, 0.1 * prelim) };
