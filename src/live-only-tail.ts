@@ -50,6 +50,20 @@ function entryAsLiveShape(entry: SessionEntry): Record<string, unknown> | undefi
   return undefined;
 }
 
+// An aborted/errored turn can persist a message with NO content blocks (content: []).
+// Some hosts (pi-web's auto-name route) prune such messages from the context array
+// before sending, while entryAsLiveShape keeps them verbatim — so a single dropped
+// entry shifts persisted/live out of alignment by one forever and the prefix walk
+// never reaches the extension. Dropping these empty shapes from BOTH sides before
+// walking is symmetric (restores alignment whether or not the host pruned) and cannot
+// mask a real divergence, since an empty message carries no text to differ on.
+function isIgnorableEmpty(message: unknown): boolean {
+  const content = (message as Record<string, unknown> | undefined)?.content;
+  if (Array.isArray(content)) return content.length === 0;
+  if (typeof content === "string") return content.trim().length === 0;
+  return false;
+}
+
 /** Messages a host put in the live array WITHOUT writing a session entry. pi-web's
  *  "Generate title" copies session state into a fresh Agent and appends its
  *  instruction to `event.messages` only; on a Pi host ACP rebuilds the request from
@@ -57,29 +71,34 @@ function entryAsLiveShape(entry: SessionEntry): Record<string, unknown> | undefi
  *  and the model replies to nothing (#471). Returns the trailing live-only messages
  *  to re-append after the rebuild, or null when the live array is not a clean
  *  structural extension of the persisted branch — then the caller leaves behaviour
- *  unchanged. Recognised shapes: (1) new trailing message(s); (2) a text suffix
- *  appended INTO the final user message (returned as one fresh user message). */
+ *  unchanged. Empty-content entries (aborted turns) are ignored on both sides so a
+ *  host that prunes them stays aligned. Recognised shapes: (1) new trailing
+ *  message(s); (2) a text suffix appended INTO the final user message (returned as
+ *  one fresh user message). */
 export function liveOnlyTail(entries: SessionEntry[], live: AgentMessage[]): AgentMessage[] | null {
   const persisted = entries
     .filter((e) => e.type === "message" || e.type === "custom_message")
     .map((e) => entryAsLiveShape(e))
-    .filter((shape): shape is Record<string, unknown> => shape !== undefined);
+    .filter((shape): shape is Record<string, unknown> => shape !== undefined)
+    .filter((shape) => !isIgnorableEmpty(shape));
 
-  const max = Math.min(persisted.length, live.length);
+  const seq = live.filter((m) => !isIgnorableEmpty(m));
+
+  const max = Math.min(persisted.length, seq.length);
   let i = 0;
-  while (i < max && weakMessageSig(persisted[i]) === weakMessageSig(live[i])) i++;
+  while (i < max && weakMessageSig(persisted[i]) === weakMessageSig(seq[i])) i++;
 
   if (i === max) {
     // Persisted is a prefix of live (or identical); the extension is the tail.
-    const tail = live.slice(max);
+    const tail = seq.slice(max);
     return tail.length > 0 && tail.length <= MAX_LIVE_ONLY_TAIL ? tail : null;
   }
 
   // Diverged before the end: recover only the safe case — equal-length arrays, all
   // aligned except the final element, which is a user message whose text grew by a
   // strict suffix. Anything else (middle divergence, removals, rewrites) → null.
-  if (i === max - 1 && i === persisted.length - 1 && i === live.length - 1) {
-    const liveMsg = live[i] as Record<string, unknown> | undefined;
+  if (i === max - 1 && i === persisted.length - 1 && i === seq.length - 1) {
+    const liveMsg = seq[i] as Record<string, unknown> | undefined;
     if (liveMsg && typeof liveMsg.role === "string" && liveMsg.role === "user") {
       const before = sigText((persisted[i] as Record<string, unknown> | undefined)?.content);
       const after = sigText(liveMsg.content);
