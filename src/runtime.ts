@@ -22,6 +22,8 @@ import { logInfo, logWarn, setDebugEnabled } from "./log.js";
 import { findPositionalPrefixRun, findUniqueLongestRun, type MatchRange } from "./sequence-match.js";
 import { OverflowEpisode } from "./overflow-selfheal.js";
 import { lastTurnBoundaryId, type TurnBoundaryPolicy } from "./turn-boundary.js";
+import { SentViewMeter } from "./view-meter.js";
+import { EntryProjectionCache } from "./projection-cache.js";
 // pi exposes `sessionManager.buildContextEntries()`; omp (oh-my-pi) only has
 // `getBranch()`. Both return chronological SessionEntry[]; feature-detect so
 // the adapter runs under either host (omp's runner silently swallows the TypeError).
@@ -191,6 +193,14 @@ export interface AcpRuntime {
   noteTruncationSkipped(sid: string, active: boolean): boolean;
   /** Drop a session's truncation-skipped episode (session_shutdown). */
   dropTruncationSkipped(sid: string): void;
+  /** Per-session incremental sent-view meter (issue #561): holds the last
+   *  exact sent-view reading so steady-state turns extrapolate over appended
+   *  entries instead of running a second full processTurn probe. */
+  viewMeterFor(sid: string): SentViewMeter;
+  /** Drop a session's view meter (session_shutdown). */
+  viewMeterDrop(sid: string): void;
+  /** Drop a session's entry→core projection cache (session_shutdown). */
+  projectionCacheDrop(sessionId: string): void;
 }
 // omp fires the context event before the current user message is persisted to
 // the session branch, so merge event.messages (exact messages about to be sent,
@@ -413,6 +423,28 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     const ep = throttleEpisodes.get(sid);
     if (ep) ep.reset(); // abort a pending kick sleep before releasing the entry
     throttleEpisodes.delete(sid);
+  }
+
+  // Issue #561: per-session incremental sent-view meter + entry→core projection
+  // cache. Both are pure in-memory accelerators — dropping them only forces a
+  // one-time exact resync / full re-projection on the next event.
+  const viewMeters = new Map<string, SentViewMeter>();
+  function viewMeterFor(sid: string): SentViewMeter {
+    let m = viewMeters.get(sid);
+    if (!m) { m = new SentViewMeter(); viewMeters.set(sid, m); }
+    return m;
+  }
+  function viewMeterDrop(sid: string): void {
+    viewMeters.delete(sid);
+  }
+  const projectionCaches = new Map<string, EntryProjectionCache>();
+  function projectionCacheFor(sessionId: string): EntryProjectionCache {
+    let c = projectionCaches.get(sessionId);
+    if (!c) { c = new EntryProjectionCache(); projectionCaches.set(sessionId, c); }
+    return c;
+  }
+  function projectionCacheDrop(sessionId: string): void {
+    projectionCaches.delete(sessionId);
   }
 
   // Per-session tokenCount scale (estimate vs provider). When the anchor flips
@@ -684,7 +716,11 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
       pruneOrphanRefs(state, coreMessages);
       return { state, coreMessages, entries: merged };
     }
-    const coreMessages = entriesToCoreMessages(entries);
+    // Issue #561: pi hosts are append-only with stable entry ids — reuse the
+    // projected prefix and project only the appended tail. The omp merge path
+    // above stays uncached: its live-* ids churn between fires.
+    const proj = piHost ? projectionCacheFor(sessionId).project(entries) : undefined;
+    const coreMessages = proj?.coreMessages ?? entriesToCoreMessages(entries);
     if (live === undefined) pruneOrphanRefs(state, coreMessages);
     return { state, coreMessages, entries };
   }
@@ -727,4 +763,4 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   let refused = false;
   let refusalMessage: string | null = null;
   let delegateStoodDown = false;
-  return { core, store, get refused() { return refused; }, set refused(v: boolean) { refused = v; }, get refusalMessage() { return refusalMessage; }, set refusalMessage(v: string | null) { refusalMessage = v; }, get delegateStoodDown() { return delegateStoodDown; }, set delegateStoodDown(v: boolean) { delegateStoodDown = v; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown, nudgeShownFor, nudgeShownTokensFor, clearNudgeTracking, clearNudgeTokenStamps, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reasoningDropFor, reloadConfig, stateFor, save, deriveChildState: deriveChild, acquireLock, overflowFor, overflowDrop, noteDeadCompress, clearDeadCompress, throttleFor, throttleDrop , noteTokenScale, dropTokenScale, noteHostUsage, dropHostUsageSamples, noteSizeDivergence, dropSizeDivergence, noteTerminalEscape, dropTerminalEscape, noteTruncationSkipped, dropTruncationSkipped, stripImagesFor };}
+  return { core, store, get refused() { return refused; }, set refused(v: boolean) { refused = v; }, get refusalMessage() { return refusalMessage; }, set refusalMessage(v: string | null) { refusalMessage = v; }, get delegateStoodDown() { return delegateStoodDown; }, set delegateStoodDown(v: boolean) { delegateStoodDown = v; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown, nudgeShownFor, nudgeShownTokensFor, clearNudgeTracking, clearNudgeTokenStamps, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reasoningDropFor, reloadConfig, stateFor, save, deriveChildState: deriveChild, acquireLock, overflowFor, overflowDrop, noteDeadCompress, clearDeadCompress, throttleFor, throttleDrop , noteTokenScale, dropTokenScale, noteHostUsage, dropHostUsageSamples, noteSizeDivergence, dropSizeDivergence, noteTerminalEscape, dropTerminalEscape, noteTruncationSkipped, dropTruncationSkipped, stripImagesFor, viewMeterFor, viewMeterDrop, projectionCacheDrop };}
