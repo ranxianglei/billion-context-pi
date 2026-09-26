@@ -206,7 +206,14 @@ function isRangeLikeObject(o: unknown): o is Record<string, unknown> {
   return hasStart && hasEnd && typeof r.summary === "string" && r.summary.length > 0;
 }
 
-function describeDiagnostics(diagnostics: CompressParseDiagnostics, content: CompressArgs["content"]): string {
+function describeDiagnostics(diagnostics: CompressParseDiagnostics, content: unknown): string {
+  if (content === undefined) {
+    const keys = (diagnostics.keys ?? []).filter((k) => typeof k === "string");
+    const hint = keys.length > 0 && !keys.includes("content")
+      ? ` Top-level keys were [${keys.join(", ")}] — pass the ranges under "content".`
+      : "";
+    return `Invalid compress content (${diagnostics.kind}): no "content" argument was provided.${hint}`;
+  }
   const shape = typeof content === "string"
     ? "a JSON-encoded string (non-strict-tool providers stringify array arguments)"
     : content === null ? "null" : `a ${typeof content}`;
@@ -215,7 +222,9 @@ function describeDiagnostics(diagnostics: CompressParseDiagnostics, content: Com
     return `${base}; the input was truncated and no complete ranges could be recovered. Shorten the summary or split into smaller ranges.`;
   }
   if (diagnostics.invalidItems > 0) {
-    return `${base}; ${diagnostics.invalidItems} entr${diagnostics.invalidItems === 1 ? "y was" : "ies were"} dropped as invalid. Each range must be an object with string fields startId, endId, summary.`;
+    const reasons = (diagnostics.invalidReasons ?? []).filter((r) => typeof r === "string" && r.length > 0);
+    const detail = reasons.length > 0 ? ` — ${reasons.slice(0, 5).join("; ")}` : "";
+    return `${base}; ${diagnostics.invalidItems} entr${diagnostics.invalidItems === 1 ? "y was" : "ies were"} dropped as invalid${detail}. Each range must be an object with string fields startId, endId, summary.`;
   }
   const parseErr = jsonParseError(content);
   if (parseErr !== undefined) {
@@ -227,7 +236,7 @@ function describeDiagnostics(diagnostics: CompressParseDiagnostics, content: Com
 // Short diagnostic for why a JSON-shaped string fails to parse, or undefined
 // when it parses fine or is not JSON-shaped. Gives the model a retryable signal
 // (the parser's own position) instead of the misleading "must be an ARRAY".
-function jsonParseError(content: CompressArgs["content"]): string | undefined {
+function jsonParseError(content: unknown): string | undefined {
   if (typeof content !== "string") return undefined;
   const t = content.trim();
   if (!t.startsWith("{") && !t.startsWith("[")) return undefined;
