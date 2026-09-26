@@ -72,18 +72,14 @@ A provider rate-limit error (e.g. "Too many tokens, please wait before trying ag
 Retries are capped; when the cap is reached the error is surfaced to the user unchanged. If the user sends new input during a retry wait, the retry is cancelled.`],
 ];
 
-const PROMPT_SECTION_KEYS: ReadonlySet<string> = new Set([
-  "acpTags", "summariesInContext", "tools", "whenToCompress", "whenNotToCompress",
-  "multiTierIntro", "decompressPhilosophy", "contextBreakdown", "throttleRetry",
-]);
-
-const RULE_SLOT_KEYS: ReadonlySet<string> = new Set(["philosophy", "howToCompress", "tier2", "tier3"]);
+// Host owns which sections exist; per-value validity follows the kernel tri-state contract (string/null) — no per-slot type rules.
+export const SECTION_KEYS: ReadonlySet<string> = new Set(SECTIONS.map(([key]) => key));
 
 export function sanitizePromptSections(raw: unknown): Partial<PiPromptSections> {
   if (!raw || typeof raw !== "object") return {};
   const out: Partial<PiPromptSections> = {};
   for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-    if ((PROMPT_SECTION_KEYS.has(k) || RULE_SLOT_KEYS.has(k)) && (typeof v === "string" || v === null)) {
+    if (SECTION_KEYS.has(k) && (typeof v === "string" || v === null)) {
       (out as Record<string, SectionOverride>)[k] = v;
     }
   }
