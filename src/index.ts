@@ -799,13 +799,16 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
 
     // #471 Re-append host-injected live-only messages (pi-web auto-name adds its
     // instruction to event.messages without persisting an entry, so a Pi-host
-    // rebuild from entries alone drops them). null = no-op: normal turns align
-    // byte-for-byte and non-Pi hosts already merged live into entries. Append-only
-    // — never touches refs/blocks, so it stays orthogonal to the #459 ref churn.
-    const liveTail = liveOnlyTail(entries, event.messages);
-    if (liveTail && liveTail.length > 0) {
-      rebuilt.push(...liveTail);
-      logInfo("live-only-tail", { sid, event: "appended", tail: liveTail.length, outMsgs: rebuilt.length });
+    // rebuild from entries alone drops them). Append-only — never touches refs/
+    // blocks, so it stays orthogonal to the #459 ref churn. #559: on a genuine miss
+    // (divergence / over-cap) log one bounded line so an undetected drop stays
+    // diagnosable; the aligned no-op path (normal turns, non-Pi hosts) logs nothing.
+    const liveResult = liveOnlyTail(entries, event.messages);
+    if (liveResult.tail && liveResult.tail.length > 0) {
+      rebuilt.push(...liveResult.tail);
+      logInfo("live-only-tail", { sid, event: "appended", tail: liveResult.tail.length, outMsgs: rebuilt.length });
+    } else if (liveResult.miss) {
+      logInfo("live-only-tail", { sid, event: "miss", ...liveResult.miss });
     }
 
     // #477 pi 0.86 carries the active toolset on the session system message
