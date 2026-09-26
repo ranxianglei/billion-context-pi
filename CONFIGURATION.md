@@ -135,7 +135,7 @@ All keys below are currently **ACTIVE**.
 | `repetitionGuard` | boolean \| object | `true` | 🟢 ACTIVE | Break infinite loops of byte-identical tool calls (warn at 3 consecutive, block + abort at 5). |
 | `degenerationGuard` | boolean \| object | `true` | 🟢 ACTIVE | Collapse degenerate single-codepoint runs (e.g. 4655×「【」) in assistant text/thinking of the outgoing view and inject a one-shot recovery notice — breaks the abort loop where pi replays degenerated thinking back to the provider on every request (#351). |
 | `hostSession` | boolean \| object | `false` | 🟢 ACTIVE | Turn-boundary policy for multi-session hosts: count injected `custom_message` entries as turn starts. Off by default (pi-native behavior). |
-| `rules` | boolean | `false` | 🟢 ACTIVE | Register the opt-in `acp_rule` record tool: short, principle-level reminders hard-protected from compression. Off by default. |
+| `rules` | boolean | `false` | 🟢 ACTIVE | Register the opt-in `acp_rule` tool (record / list / delete by id / clear all) plus the `/acp-rule` human command: short, principle-level reminders hard-protected from compression. Off by default. |
 
 **Delegate keys**
 
@@ -309,14 +309,16 @@ All keys below are currently **ACTIVE**.
 
 ## Rules
 
-The `rules` key controls the `acp_rule` record tool — an opt-in way to persist short, principle-level reminders in the session so they survive context compression.
+The `rules` key controls the `acp_rule` tool and the `/acp-rule` command — an opt-in way to persist short, principle-level reminders in the session so they survive context compression.
 
 ### `rules`
 
 - **Type:** `boolean`
 - **Default:** `false`
 - **Status:** 🟢 ACTIVE
-- **Description:** When `true`, registers the `acp_rule` tool on session start. Call it with a short reminder to record it (echoes `Recorded ruleN: …`); call it with no argument to list all recorded rules. Rules live in the session's ACP state sidecar (persisted across restarts) and are **hard-protected from compression** — their tool call and result stay visible even when everything around them is compressed away. There is no system-prompt involvement: usage guidance lives entirely in the tool description, and nothing is re-injected per turn. Validation errors (empty / over-length / duplicate / limit reached) are returned verbatim to the model. Defaults: up to 50 rules × 300 chars each.
+- **Description:** When `true`, registers the `acp_rule` tool on session start and enables the `/acp-rule` human command. One operation per call: pass a short reminder to record it (echoes `Recorded ruleN: …`); pass no argument to list all recorded rules; pass `delete` with a rule id (e.g. `"rule3"`) to remove that single rule (`Removed ruleN: <text>`); pass `clear: true` to remove every rule at once (`Cleared N rule(s).`). `delete` and `clear` are mutually exclusive with each other and with `rule` — mixed calls are rejected without mutating anything — so stale or mistakenly recorded rules get deleted rather than hedged by recording a counter-rule. The parameter shape is byte-identical to the `acp_rule` served by the [`billion-context`](https://github.com/ranxianglei/billion-context) proxy, so a model trained under one host sees the same tool under the other. Rules live in the session's ACP state sidecar (persisted across restarts) and are **hard-protected from compression** — their tool call and result stay visible even when everything around them is compressed away. There is no system-prompt involvement: usage guidance lives entirely in the tool description, and nothing is re-injected per turn. Validation errors (empty / over-length / duplicate / limit reached / unknown id) are returned verbatim to the model. Defaults: up to 50 rules × 300 chars each.
+
+  > **If you also run the billion-context thin plugin with rules enabled**, both plugins register an `acp_rule` tool in pi; pi dedupes tools by name (first registration per name wins, the other is silently ignored) and the two implementations back different stores. Enable rules on only one side — see the README *`/acp-rule` command* section.
 
 ---
 
