@@ -38,7 +38,7 @@ import { wireToolGuardrails } from "./tool-guardrails.js";
 import { debug, logError, logInfo, logWarn, logThrow, closeLogStream } from "./log.js";
 import { collectCoveredMessageIds, estimateTokens, collectImageTokens, modelSupportsImages, sentViewTokenCount } from "./tokens.js";
 import { lastTurnBoundaryId, lastTurnBoundaryIndex } from "./turn-boundary.js";
-import { usageAnchorPredatesCompression } from "./floor-stale.js";
+import { compressionAnchorStaleness } from "./floor-stale.js";
 import { checkForUpdate } from "./update.js";
 import {
   THROTTLE_RETRY_ERROR_MESSAGE,
@@ -455,20 +455,25 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
       const systemPromptTokens = systemPromptText ? defaultCountTokens(systemPromptText) : 0;
       const imageTokens = collectImageTokens(entries, modelSupportsImages(ctx.model));
       const sentTokens = estimateTokens(coreMessages, coveredIds, imageTokens) + systemPromptTokens;
-      // Floors (raise-only, applied to whichever base wins below): the host's
-      // real context usage (issue #257/#258 — anchored on the last assistant's
-      // provider-reported usage + trailing estimate; skipped while the anchor
-      // predates a successful compress, floor-stale.ts) and the armed self-heal
-      // 95% floor after an upstream overflow. Captured once so both bases see
-      // identical floors; ov.armed is consumed exactly once either way.
+      // Self-heal (armed): after an overflow, force this turn's usage to >=95%
+      // so the kernel's emergency nudge + tool-result truncate fire immediately,
+      // even if the estimate under-reports the sent view. Consumed exactly once.
       let armedFloor = 0;
       if (ov.armed && config.modelContextLimit > 0) {
         ov.armed = false;
         armedFloor = Math.floor(config.modelContextLimit * 0.95);
         logWarn("overflow-selfheal", { sid, event: "armed-emergency", floor: armedFloor, limit: config.modelContextLimit });
       }
-      const hostFloorActive = !usageAnchorPredatesCompression(entries);
+      // Host floor (#257/#258): the provider's real prompt size, anchored on the
+      // last assistant's provider-reported usage + trailing estimate. While the
+      // anchor predates a successful compress its raw value still reflects the
+      // pre-compression request, so subtract the tokens genuinely freed since
+      // it (issue #325, floor-stale.ts) instead of skipping the floor entirely —
+      // the skip dropped the meter onto the undercounting estimate (~70-80K low)
+      // and the next fresh reading snapped it back into the emergency band.
+      const { predates, netReclaimed } = compressionAnchorStaleness(entries, state.blocks, defaultCountTokens);
       const realPromptTokens = realUsage?.tokens ?? 0;
+      const hostFloor = realPromptTokens > 0 ? Math.max(0, realPromptTokens - (predates ? netReclaimed : 0)) : 0;
       // Calibration anchor (issue #455): the estimate carries systematic phantom
       // mass (content counted locally that never goes on the wire) which the
       // raise-only floors below can never pull down — in #452 the meter ran
@@ -479,17 +484,17 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
       // pre-send prediction for growth beyond the lagged-by-one-response
       // measurement. Stale or jittering measurements fall back to the raw
       // estimate; the divergence watch below keeps that fallback visible.
-      const hostUsageStable = hostFloorActive && realPromptTokens > 0 ? runtime.noteHostUsage(sid, realPromptTokens) : false;
+      const hostUsageStable = !predates && realPromptTokens > 0 ? runtime.noteHostUsage(sid, realPromptTokens) : false;
       const calibrate = (base: number): number =>
         hostUsageStable ? Math.min(base, Math.ceil(realPromptTokens * 1.2)) : base;
-      const applyFloors = (base: number): number => Math.max(calibrate(base), hostFloorActive ? realPromptTokens : 0, armedFloor);
+      const applyFloors = (base: number): number => Math.max(calibrate(base), hostFloor, armedFloor);
       // Basis for the no-body-4xx overflow guard (wireOverflowSelfHeal): the
       // sent-view estimate of the request about to be sent, on the same scale
       // as the turn log below — but WITHOUT the armed 95% floor: that floor is
       // an artifact of a prior arm, not evidence of size, and feeding it back
       // into the ratio guard would re-arm unconditionally right after any
       // emergency.
-      const guardBasis = (base: number): number => Math.max(calibrate(base), hostFloorActive ? realPromptTokens : 0);
+      const guardBasis = (base: number): number => Math.max(calibrate(base), hostFloor);
       let tokenCount = applyFloors(sentTokens);
       let guardTokens = guardBasis(sentTokens);
       // View-based recount (issue #289): the raw-view estimate counts uncovered
@@ -514,13 +519,15 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
       // episode instead of silently driving every threshold off the wrong ruler.
       // With calibration engaged the capped tokenCount stays within 20% of the
       // measurement, so this only fires in the fallback states it diagnoses.
-      const sizeDivergent = hostFloorActive && realPromptTokens > 0 && Math.abs(tokenCount - realPromptTokens) / realPromptTokens > 0.5;
+      const sizeDivergent = !predates && realPromptTokens > 0 && Math.abs(tokenCount - realPromptTokens) / realPromptTokens > 0.5;
       if (runtime.noteSizeDivergence(sid, sizeDivergent)) {
         logWarn("turn", { sid, event: "size-divergence", est: tokenCount, host: realPromptTokens, ratio: Number((tokenCount / realPromptTokens).toFixed(2)), stable: hostUsageStable });
       }
       // Growth scale guard (issue #267, re-anchored in #455): the meter switches
-      // rulers when the anchor flips stale↔not-stale (estimate ↔ provider). A
-      // growth delta spanning that switch is a false artifact, not real growth.
+      // rulers when the dominant source flips between the provider floor and the
+      // local estimate (hostFloor vs sentTokens, not raw staleness — a stale anchor
+      // whose adjusted floor still dominates is not a switch, #325). A growth delta
+      // spanning that switch is a false artifact, not real growth.
       // Zeroing the baselines (the original fix) re-armed the kernel's one-shot
       // first-sight-mass bypass on EVERY flip (it requires
       // lastNudgeShownTokens === 0 && baseline === 0) — flips happen twice per
@@ -530,7 +537,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
       // reference resets to zero, cadence baselines stay meaningful on the new
       // ruler, and the mass bypass keeps its consumed state. Genuine cold starts
       // (references already 0) are untouched and keep their one-shot.
-      if (runtime.noteTokenScale(sid, !hostFloorActive)) {
+      if (runtime.noteTokenScale(sid, hostFloor <= sentTokens)) {
         state.nudge.lastNudgeShownTokens = state.nudge.lastNudgeShownTokens > 0 ? tokenCount : 0;
         state.nudge.lastPerMessageNudgeTokens = state.nudge.lastPerMessageNudgeTokens > 0 ? tokenCount : 0;
         const reanchored: Record<number, number> = {};
@@ -539,7 +546,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
         }
         state.nudge.lastShownByTier = reanchored;
         runtime.clearNudgeTokenStamps(sid);
-        logInfo("growth-scale", { sid, event: "scale-flip-reanchor", anchorStale: !hostFloorActive, tokenCount });
+        logInfo("growth-scale", { sid, event: "scale-flip-reanchor", estScaleWins: hostFloor <= sentTokens, predates, tokenCount });
       }
       debug.event("context-in", {
         sid,
