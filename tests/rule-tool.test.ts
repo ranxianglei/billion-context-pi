@@ -158,7 +158,10 @@ test("kernel validation errors come back verbatim (informative, not thrown)", as
   process.env.HOME = home;
   try {
     const { api, ctx } = await boot({ dir, sessionId: "sess-err", adapter: { rules: true } });
-    assert.match(await execRule(api, ctx, { rule: "" }), /rule text is empty/);
+    // #555: an empty/blank rule argument is a no-op, not a validation error —
+    // aligned with billion-context executeRule, where it falls through to list.
+    assert.equal(await execRule(api, ctx, { rule: "" }), "No rules recorded.");
+    assert.equal(await execRule(api, ctx, { rule: "   " }), "No rules recorded.");
     assert.match(await execRule(api, ctx, { rule: "x".repeat(301) }), /exceeds the 300-char limit/);
     assert.equal(await execRule(api, ctx, { rule: "first" }), "Recorded rule1: first");
     assert.match(await execRule(api, ctx, { rule: "first" }), /identical rule already exists \(rule1\)/);
@@ -166,6 +169,121 @@ test("kernel validation errors come back verbatim (informative, not thrown)", as
       assert.match(await execRule(api, ctx, { rule: `filler ${i}` }), /^Recorded rule\d+:/);
     }
     assert.match(await execRule(api, ctx, { rule: "one too many" }), /rule limit reached \(50\)/);
+  } finally {
+    if (prevHome === undefined) delete process.env.HOME;
+    else process.env.HOME = prevHome;
+    await rm(dir, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("delete removes one rule by id and echoes like the command/bili path (#555)", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "acp-rule-del-"));
+  const home = await mkdtemp(join(tmpdir(), "acp-rule-home-"));
+  const prevHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    const { api, ctx } = await boot({ dir, sessionId: "sess-del", adapter: { rules: true } });
+    assert.equal(await execRule(api, ctx, { rule: "prefer pnpm" }), "Recorded rule1: prefer pnpm");
+    assert.equal(await execRule(api, ctx, { rule: "always typecheck" }), "Recorded rule2: always typecheck");
+    assert.equal(await execRule(api, ctx, { delete: "rule1" }), "Removed rule1: prefer pnpm");
+    assert.equal(await execRule(api, ctx, {}), "1. [rule2] always typecheck", "list reflects the removal");
+    const sidecar = JSON.parse(await readFile(`${join(dir, "session.json")}.acp.json`, "utf8")) as { rules?: unknown[] };
+    assert.deepEqual(sidecar.rules, [{ id: "rule2", text: "always typecheck" }], "removal persisted to the sidecar");
+  } finally {
+    if (prevHome === undefined) delete process.env.HOME;
+    else process.env.HOME = prevHome;
+    await rm(dir, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("delete with an unknown id returns the kernel error verbatim without mutating (#555)", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "acp-rule-delmiss-"));
+  const home = await mkdtemp(join(tmpdir(), "acp-rule-home-"));
+  const prevHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    const { api, ctx } = await boot({ dir, sessionId: "sess-delmiss", adapter: { rules: true } });
+    assert.equal(await execRule(api, ctx, { rule: "keep types strict" }), "Recorded rule1: keep types strict");
+    assert.equal(
+      await execRule(api, ctx, { delete: "rule99" }),
+      'no rule with id "rule99" — list current rules first (omit the text argument).',
+      "kernel error passed through verbatim, not thrown or marked FAILED",
+    );
+    assert.match(await execRule(api, ctx, { delete: "not-an-id" }), /^no rule with id "not-an-id"/);
+    assert.equal(await execRule(api, ctx, {}), "1. [rule1] keep types strict", "existing rule untouched by the failed removal");
+  } finally {
+    if (prevHome === undefined) delete process.env.HOME;
+    else process.env.HOME = prevHome;
+    await rm(dir, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("clear removes all rules and reports the count; empty clear is honest (#555)", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "acp-rule-clear-"));
+  const home = await mkdtemp(join(tmpdir(), "acp-rule-home-"));
+  const prevHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    const { api, ctx } = await boot({ dir, sessionId: "sess-clear", adapter: { rules: true } });
+    assert.equal(await execRule(api, ctx, { rule: "prefer pnpm" }), "Recorded rule1: prefer pnpm");
+    assert.equal(await execRule(api, ctx, { rule: "always typecheck" }), "Recorded rule2: always typecheck");
+    assert.equal(await execRule(api, ctx, { clear: true }), "Cleared 2 rule(s).");
+    const sidecar = JSON.parse(await readFile(`${join(dir, "session.json")}.acp.json`, "utf8")) as { rules?: unknown[] };
+    assert.deepEqual(sidecar.rules, [], "sidecar emptied after clear");
+    assert.equal(await execRule(api, ctx, { clear: true }), "No rules to clear.", "honest empty clear, no false success");
+    assert.equal(await execRule(api, ctx, {}), "No rules recorded.");
+  } finally {
+    if (prevHome === undefined) delete process.env.HOME;
+    else process.env.HOME = prevHome;
+    await rm(dir, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("mixed operations are rejected without executing or recording (#555)", async () => {
+  const ONE_OP = "Use one operation per call: record (rule), remove one (delete), remove all (clear: true), or list (no arguments).";
+  const dir = await mkdtemp(join(tmpdir(), "acp-rule-conflict-"));
+  const home = await mkdtemp(join(tmpdir(), "acp-rule-home-"));
+  const prevHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    const { api, ctx } = await boot({ dir, sessionId: "sess-conflict", adapter: { rules: true } });
+    assert.equal(await execRule(api, ctx, { rule: "prefer pnpm" }), "Recorded rule1: prefer pnpm");
+    assert.equal(await execRule(api, ctx, { rule: "always typecheck" }), "Recorded rule2: always typecheck");
+    assert.equal(await execRule(api, ctx, { rule: "new rule", delete: "rule1" }), ONE_OP);
+    assert.equal(await execRule(api, ctx, { rule: "new rule", clear: true }), ONE_OP);
+    assert.equal(await execRule(api, ctx, { delete: "rule1", clear: true }), ONE_OP);
+    assert.equal(
+      await execRule(api, ctx, {}),
+      "1. [rule1] prefer pnpm\n2. [rule2] always typecheck",
+      "state unmutated after rejected mixed calls",
+    );
+  } finally {
+    if (prevHome === undefined) delete process.env.HOME;
+    else process.env.HOME = prevHome;
+    await rm(dir, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("parameter schema mirrors the cross-host shape: rule/delete/clear (#555)", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "acp-rule-schema-"));
+  const home = await mkdtemp(join(tmpdir(), "acp-rule-home-"));
+  const prevHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    const { api } = await boot({ dir, sessionId: "sess-schema", adapter: { rules: true } });
+    const tool = api.tools.find((t: any) => t.name === "acp_rule");
+    const props = tool.parameters.properties as Record<string, any>;
+    assert.deepEqual(Object.keys(props).sort(), ["clear", "delete", "rule"], "same param names as billion-context's RULE_PARAM_SCHEMA");
+    assert.equal(props.rule.type, "string");
+    assert.equal(props.delete.type, "string");
+    assert.equal(props.clear.type, "boolean");
+    assert.match(tool.description, /use one operation per call/, "description teaches the exclusivity contract");
+    assert.match(tool.description, /pass delete with its id/, "description teaches when/how to delete");
   } finally {
     if (prevHome === undefined) delete process.env.HOME;
     else process.env.HOME = prevHome;
