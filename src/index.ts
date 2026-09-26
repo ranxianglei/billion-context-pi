@@ -265,6 +265,7 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     runtime.dropTerminalEscape(ctx.sessionManager.getSessionId());
     runtime.dropTruncationSkipped(ctx.sessionManager.getSessionId());
     runtime.dropSentViewCount(ctx.sessionManager.getSessionId());
+    runtime.dropProjectionCache(ctx.sessionManager.getSessionId());
     dropLiveOnlyTailCache(ctx.sessionManager.getSessionId());
     resetDelegateUsage();
     setDelegateDisplayUsage("separate");
@@ -361,6 +362,7 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     runtime.dropTerminalEscape(sid);
     runtime.dropTruncationSkipped(sid);
     runtime.dropSentViewCount(sid);
+    runtime.dropProjectionCache(sid);
     dropLiveOnlyTailCache(sid);
     delegateStatusWidget.dispose();
     closeLogStream();

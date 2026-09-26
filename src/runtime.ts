@@ -147,6 +147,9 @@ export interface AcpRuntime {
   peekSentViewCount(sid: string): { viewTokens: number; blocksLen: number; activeBlocks: number; limit: number; usable: boolean } | undefined;
   /** Drop a session's sent-view meter (session_shutdown). */
   dropSentViewCount(sid: string): void;
+  /** Drop a session's incremental projection cache (session_shutdown): it
+   *  holds the full projected CoreMessage[] for the session history. */
+  dropProjectionCache(sid: string): void;
   save(state: CompressionState, ctx: ExtensionContext): Promise<void>;
   /** #364 inline child sessions (same process, e.g. Prime RLM): derive the
    *  child's compression state from another session's. Inherits blocks /
@@ -665,6 +668,9 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   // entries array (fresh objects) every turn from an append-only jsonl, so the
   // 24k-entry projection is prefix-stable and only the new tail needs work.
   const projectionCaches = new Map<string, EntryProjectionCache>();
+  function dropProjectionCache(sid: string): void {
+    projectionCaches.delete(sid);
+  }
 
   async function stateFor(ctx: ExtensionContext, liveMessages?: AgentMessage[]) {
     const sm = ctx.sessionManager;
@@ -760,4 +766,4 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   let refused = false;
   let refusalMessage: string | null = null;
   let delegateStoodDown = false;
-  return { core, store, get refused() { return refused; }, set refused(v: boolean) { refused = v; }, get refusalMessage() { return refusalMessage; }, set refusalMessage(v: string | null) { refusalMessage = v; }, get delegateStoodDown() { return delegateStoodDown; }, set delegateStoodDown(v: boolean) { delegateStoodDown = v; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown, nudgeShownFor, nudgeShownTokensFor, clearNudgeTracking, clearNudgeTokenStamps, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reasoningDropFor, reloadConfig, stateFor, save, deriveChildState: deriveChild, acquireLock, overflowFor, overflowDrop, noteSentViewCount, peekSentViewCount, dropSentViewCount, noteDeadCompress, clearDeadCompress, throttleFor, throttleDrop , noteTokenScale, dropTokenScale, noteHostUsage, dropHostUsageSamples, noteSizeDivergence, dropSizeDivergence, noteTerminalEscape, dropTerminalEscape, noteTruncationSkipped, dropTruncationSkipped, stripImagesFor };}
+  return { core, store, get refused() { return refused; }, set refused(v: boolean) { refused = v; }, get refusalMessage() { return refusalMessage; }, set refusalMessage(v: string | null) { refusalMessage = v; }, get delegateStoodDown() { return delegateStoodDown; }, set delegateStoodDown(v: boolean) { delegateStoodDown = v; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown, nudgeShownFor, nudgeShownTokensFor, clearNudgeTracking, clearNudgeTokenStamps, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reasoningDropFor, reloadConfig, stateFor, save, deriveChildState: deriveChild, acquireLock, overflowFor, overflowDrop, noteSentViewCount, peekSentViewCount, dropSentViewCount, dropProjectionCache, noteDeadCompress, clearDeadCompress, throttleFor, throttleDrop , noteTokenScale, dropTokenScale, noteHostUsage, dropHostUsageSamples, noteSizeDivergence, dropSizeDivergence, noteTerminalEscape, dropTerminalEscape, noteTruncationSkipped, dropTruncationSkipped, stripImagesFor };}
