@@ -92,7 +92,7 @@ export function makeCommands(runtime: AcpRuntime, pi?: ExtensionAPI): Array<{ na
         handler: async (args, ctx) => {
           if (runtime.adapter.rules !== true) {
             ctx.ui.notify(
-              'Rules are not enabled — set "rules": true in acp.json (~/.pi/acp.json or project .pi/acp.json) to turn on persistent rules.',
+              'Rules are not enabled — set "rules": true in your global or project acp.json to turn on persistent rules.',
               "warning",
             );
             return;
