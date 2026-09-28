@@ -1,18 +1,20 @@
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
 import { homedir } from "node:os";
-import { CONFIG_DIR_NAME } from "./config-dir.js";
+import { CONFIG_DIR_NAME, getAgentDir } from "./config-dir.js";
 import type { Prompts } from "acp-kernel";
 import type { AdapterConfig, CompressConfig, DelegateConfig, HostSessionConfig, RepetitionGuardConfig } from "./config.js";
 import type { PiPromptSections } from "./system-prompt.js";
 import type { NudgeSectionsConfig, ToolPromptsConfig } from "./surface.js";
 import type { DegenerationGuardConfig } from "./degeneration.js";
 import type { ThrottleRetryConfig } from "./throttle-retry.js";
-import { debug } from "./log.js";
+import { debug, logWarn } from "./log.js";
 
 /** User-facing config keys (subset of AdapterConfig). Loaded from
- *  ~/.<CONFIG_DIR_NAME>/acp.json (global) and <cwd>/.<CONFIG_DIR_NAME>/acp.json
- *  (project-local overrides project-global). Project wins over global. */
+ *  <agentDir>/acp.json (global, e.g. ~/.pi/agent/acp.json) and
+ *  <cwd>/.pi/agent/acp.json (project-local). Project wins over global per-field.
+ *  Legacy locations (~/.pi/acp.json, <cwd>/.pi/acp.json) are still read as a
+ *  fallback for backward compatibility (issue #231). */
 export interface UserAcpConfig {
   enabled?: boolean;
   debug?: boolean;
@@ -41,32 +43,74 @@ export interface UserAcpConfig {
   rules?: boolean;
 }
 
-/** Read global + project acp.json, project overrides global. Returns {} on any
- *  error (missing file, bad JSON) — never throws. Malformed-but-repairable
- *  files are salvaged with a loud warning instead of silently meaning "not
- *  disabled" / "no config" (#467). */
-export async function loadUserConfig(cwd: string): Promise<UserAcpConfig> {
+const CONFIG_FILE_NAME = "acp.json";
+
+export interface AcpJsonScope {
+  name: "global" | "project";
+  fresh: string;
+  legacy: string;
+}
+
+/** Config file locations per scope (issue #231): the agent-dir location first,
+ *  the legacy location as fallback. Single source of truth shared by the async
+ *  loader and the sync factory-time `enabled` gate (#467). */
+export function acpJsonScopes(cwd: string): AcpJsonScope[] {
   const home = homedir();
+  return [
+    {
+      name: "global",
+      fresh: path.join(getAgentDir(), CONFIG_FILE_NAME),
+      legacy: path.join(home, CONFIG_DIR_NAME, CONFIG_FILE_NAME),
+    },
+    {
+      name: "project",
+      fresh: path.join(cwd, CONFIG_DIR_NAME, "agent", CONFIG_FILE_NAME),
+      legacy: path.join(cwd, CONFIG_DIR_NAME, CONFIG_FILE_NAME),
+    },
+  ];
+}
+
+/** Read global + project acp.json, project overrides global per-field. Returns
+ *  {} on any error (missing file, bad JSON) — never throws. Malformed-but-repairable
+ *  files are salvaged with a loud warning instead of silently meaning "not
+ *  disabled" / "no config" (#467).
+ *
+ *  Locations (issue #231): the canonical config now lives under the agent dir —
+ *  global at <agentDir>/acp.json (e.g. ~/.pi/agent/acp.json), project at
+ *  <cwd>/.pi/agent/acp.json. The legacy locations (~/.pi/acp.json and
+ *  <cwd>/.pi/acp.json) remain readable so existing setups keep working: when the
+ *  new location is absent the legacy file is used, and the new location wins when
+ *  both are present and valid. A fresh file that fails to parse warns loudly and
+ *  falls back to the legacy file for that scope, so a broken copy can never
+ *  shadow a working config. No files are written — to move an existing config,
+ *  copy it to the new location (see CONFIGURATION.md). */
+export async function loadUserConfig(cwd: string): Promise<UserAcpConfig> {
   const merged: UserAcpConfig = {};
-  for (const base of [join(home, CONFIG_DIR_NAME), join(cwd, CONFIG_DIR_NAME)]) {
-    const file = join(base, "acp.json");
-    let raw: string;
-    try {
-      raw = await fs.readFile(file, "utf8");
-    } catch {
-      continue;
-    }
-    const r = parseAcpJson(file, raw);
-    if (r.status === "failed") {
-      console.warn(`[bcp] ${r.reason}`);
-      continue;
-    }
-    if (r.status === "repaired") {
-      console.warn(`[bcp] ${r.reason}`);
-    }
-    if (r.value && typeof r.value === "object") {
-      Object.assign(merged, pickKnown(r.value));
-      debug.event("config-loaded", { file });
+  for (const scope of acpJsonScopes(cwd)) {
+    for (const file of [scope.fresh, scope.legacy]) {
+      let raw: string;
+      try {
+        raw = await fs.readFile(file, "utf8");
+      } catch (e) {
+        const code = (e as NodeJS.ErrnoException).code;
+        if (code !== "ENOENT") {
+          logWarn("config", { event: "load-failed", file, error: e instanceof Error ? e.message : String(e) });
+        }
+        continue;
+      }
+      const r = parseAcpJson(file, raw);
+      if (r.status === "failed") {
+        console.warn(`[bcp] ${r.reason}`);
+        continue;
+      }
+      if (r.status === "repaired") {
+        console.warn(`[bcp] ${r.reason}`);
+      }
+      if (r.value && typeof r.value === "object") {
+        Object.assign(merged, pickKnown(r.value));
+        debug.event("config-loaded", { file, scope: scope.name });
+      }
+      break;
     }
   }
   return merged;
@@ -130,10 +174,6 @@ function diagnoseJsonFailure(raw: string, err: unknown): string {
     return `invalid JSON syntax (${msg})`;
   }
   return msg;
-}
-
-function join(... parts: string[]): string {
-  return path.join(...parts);
 }
 
 const KNOWN = new Set([
