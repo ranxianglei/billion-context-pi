@@ -6,7 +6,6 @@ import {
   createDirPackSource,
   createPackResolver,
   defaultPack,
-  defaultPackSources as kernelPackSources,
   isValidPackName,
   leanPack,
   sanitizePackSurface,
@@ -14,18 +13,24 @@ import {
 import type { Pack, PackResolver, PackSource, PackSurface, PromptPackFile, Prompts } from "acp-kernel";
 import type { AdapterConfig } from "./config.js";
 import { resolveCompress } from "./config.js";
-import { CONFIG_DIR_NAME } from "./config-dir.js";
+import { CONFIG_DIR_NAME, LEGACY_CONFIG_DIR_NAME, userFileBases } from "./config-dir.js";
 import { sanitizePromptSections, type PiPromptSections } from "./system-prompt.js";
 import { sanitizeToolPrompts, type AcpToolName, type NudgeSectionsConfig, type ToolPromptsConfig } from "./surface.js";
 
 export { builtinSource, createDirPackSource, createPackResolver, defaultPack, isValidPackName, leanPack, sanitizePackSurface };
 export type { Pack, PackResolver, PackSource, PackSurface, PromptPackFile };
 
-export function defaultPackSources(cwd: string): PackSource[] {
-  return kernelPackSources({
-    projectDir: path.join(cwd, CONFIG_DIR_NAME, "acp", "packs"),
-    userDirs: [path.join(homedir(), CONFIG_DIR_NAME, "acp", "packs")],
-  });
+/** Pack sources in resolution order (#574): project, then user, then builtin;
+ *  on a host that resolves to its own config dir, each legacy ".pi" packs dir
+ *  trails its primary so hand-written packs keep resolving until moved. */
+export function defaultPackSources(cwd: string, dirName: string = CONFIG_DIR_NAME): PackSource[] {
+  const home = homedir();
+  const packsDir = (root: string, name: string) => path.join(root, name, "acp", "packs");
+  const names = dirName === LEGACY_CONFIG_DIR_NAME ? [dirName] : [dirName, LEGACY_CONFIG_DIR_NAME];
+  const sources: PackSource[] = names.map((name, i) => createDirPackSource(i === 0 ? "project" : "project-legacy", packsDir(cwd, name)));
+  for (const name of names) sources.push(createDirPackSource("user", packsDir(home, name)));
+  sources.push(builtinSource);
+  return sources;
 }
 
 export function packResolver(cwd: string): PackResolver {
@@ -211,23 +216,25 @@ export function mergeSurface(pack: Pack | null, inline: InlineSurface): MergedSu
   };
 }
 
-export function readToolSurfaceWithPacks(cwd: string): ToolPromptsConfig {
-  const home = homedir();
+export function readToolSurfaceWithPacks(cwd: string, dirName: string = CONFIG_DIR_NAME): ToolPromptsConfig {
   let inline: ToolPromptsConfig = {};
   let packName = "default";
-  for (const base of [path.join(home, CONFIG_DIR_NAME), path.join(cwd, CONFIG_DIR_NAME)]) {
-    try {
-      const parsed: unknown = JSON.parse(readFileSync(path.join(base, "acp.json"), "utf8"));
-      if (parsed && typeof parsed === "object") {
-        const rec = parsed as Record<string, unknown>;
-        if (rec.toolPrompts) inline = sanitizeToolPrompts(rec.toolPrompts);
-        const c = rec.compress;
-        if (c && typeof c === "object" && typeof (c as Record<string, unknown>).promptPack === "string") {
-          packName = (c as Record<string, unknown>).promptPack as string;
+  for (const scope of ["global", "project"] as const) {
+    for (const base of userFileBases(cwd, dirName)[scope]) {
+      try {
+        const parsed: unknown = JSON.parse(readFileSync(path.join(base, "acp.json"), "utf8"));
+        if (parsed && typeof parsed === "object") {
+          const rec = parsed as Record<string, unknown>;
+          if (rec.toolPrompts) inline = sanitizeToolPrompts(rec.toolPrompts);
+          const c = rec.compress;
+          if (c && typeof c === "object" && typeof (c as Record<string, unknown>).promptPack === "string") {
+            packName = (c as Record<string, unknown>).promptPack as string;
+          }
         }
+        break; // a parsed file stands for this scope (#574)
+      } catch {
+        // missing file or bad JSON — try next candidate
       }
-    } catch {
-      // missing file or bad JSON — keep prior
     }
   }
   const pack = packName === "default" || !isValidPackName(packName) ? null : packResolver(cwd).resolve(packName);

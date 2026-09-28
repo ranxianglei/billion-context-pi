@@ -196,22 +196,40 @@ Fixtures: `tests/host-detection.test.ts` (Prime-shaped host = `{ getBranch }` on
 
 ## 4. Config directory (CONFIG_DIR_NAME)
 
-The extension resolves its config directory from the host's export of `CONFIG_DIR_NAME`
-(Pi exports `.pi`). A host that aliases `@earendil-works/pi-coding-agent` to its own build
-must either:
+The extension resolves its config directory name from the host (`src/config-dir.ts`) in
+this order:
 
-1. **re-export `CONFIG_DIR_NAME`** (preferred — keeps paths exact if the fork renames its
-   directory), or
-2. accept the fallback: the adapter feature-detects a missing or invalid export and falls
-   back to Pi's canonical value `.pi` (`src/config-dir.ts`).
+1. **the host's `CONFIG_DIR_NAME` export** — used when it is a single-segment directory
+   name (Pi exports `.pi`). Multi-segment values are rejected: Prime's internal constant
+   is `.prime/agent` — the agent dir itself, not its parent — so re-exporting it verbatim
+   would make the adapter join paths to `<agentDir>/agent`;
+2. **the shape of the host's `getAgentDir()`** — when it returns exactly
+   `<home>/<name>/agent`, the adapter derives `<name>` (Prime → `.prime`). This covers
+   forks that export no `CONFIG_DIR_NAME` at all;
+3. **fallback `.pi`** — Pi's canonical value.
 
-Responsibility boundary: the *export* belongs to the host (only it knows its own directory
-name); the *fallback* belongs to the adapter (it must not crash at load time because of a
-missing named export). A missing export fails differently per resolver — plain Node
-ESM→CJS interop throws a link-time `SyntaxError: Named export 'CONFIG_DIR_NAME' not found`,
-while loader-based aliasing (Prime's loader) surfaces it as `undefined` at runtime, which
-previously broke `path.join()` outright. The adapter therefore imports the pi package as a
-**namespace** in `src/config-dir.ts` (safe under both resolvers) and feature-detects the
-property; it is the only value import from the pi package — every other import is type-only
-and erased at build time. All config/log/session paths flow through the single constant
-there.
+Responsibility boundary: the *exports* belong to the host (only it knows its own directory
+name); *resolution and fallback* belong to the adapter (it must not crash at load time
+because of a missing named export or a throwing `getAgentDir`). A missing export fails
+differently per resolver — plain Node ESM→CJS interop throws a link-time
+`SyntaxError: Named export 'CONFIG_DIR_NAME' not found`, while loader-based aliasing
+(Prime's loader) surfaces it as `undefined` at runtime, which previously broke `path.join()`
+outright. The adapter therefore imports the pi package as a **namespace** in
+`src/config-dir.ts` (safe under both resolvers) and feature-detects the properties; it is
+the only value import from the pi package — every other import is type-only and erased at
+build time.
+
+Two kinds of paths flow from the resolved name:
+
+- **Plugin-written paths** (log file, auto-update throttle/read-only markers, agent-dir
+  probes) use the resolved directory directly, with **no legacy fallback** — on a fork they
+  move to the fork's own directory.
+- **Hand-written user files** get a compatibility fallback: before fork-aware resolution
+  every host used `.pi`, so on a host that resolves to its own directory the adapter still
+  reads each user file from its legacy `.pi` location while the primary location is absent.
+  Per scope (global, then project), the first readable-and-parseable candidate stands for
+  that scope, and project still overrides global. This covers `acp.json` (global and
+  project) and `acp/packs` directories (each legacy packs dir trails its primary in
+  pack-source order, so a pack present in both resolves from the primary). Moving a file
+  into the host's own directory shadows its `.pi` counterpart automatically; nothing needs
+  migrating.

@@ -1,9 +1,8 @@
 import { readFileSync } from "node:fs";
 import * as path from "node:path";
-import { homedir } from "node:os";
 import type { TSchema } from "typebox";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { CONFIG_DIR_NAME } from "./config-dir.js";
+import { CONFIG_DIR_NAME, userFileBases } from "./config-dir.js";
 import type { AdapterConfig } from "./config.js";
 import { sanitizePromptSections, type PiPromptSections } from "./system-prompt.js";
 
@@ -86,18 +85,20 @@ export function applyToolPromptOverrides<TParams extends TSchema>(def: ToolDefin
   };
 }
 
-export function readToolSurfaceSync(cwd: string): ToolPromptsConfig {
-  const home = homedir();
+export function readToolSurfaceSync(cwd: string, dirName: string = CONFIG_DIR_NAME): ToolPromptsConfig {
   let out: ToolPromptsConfig = {};
-  for (const base of [path.join(home, CONFIG_DIR_NAME), path.join(cwd, CONFIG_DIR_NAME)]) {
-    try {
-      const parsed: unknown = JSON.parse(readFileSync(path.join(base, "acp.json"), "utf8"));
-      if (parsed && typeof parsed === "object") {
-        const tp = (parsed as Record<string, unknown>).toolPrompts;
-        if (tp) out = sanitizeToolPrompts(tp);
+  for (const scope of ["global", "project"] as const) {
+    for (const base of userFileBases(cwd, dirName)[scope]) {
+      try {
+        const parsed: unknown = JSON.parse(readFileSync(path.join(base, "acp.json"), "utf8"));
+        if (parsed && typeof parsed === "object") {
+          const tp = (parsed as Record<string, unknown>).toolPrompts;
+          if (tp) out = sanitizeToolPrompts(tp);
+        }
+        break; // a parsed file stands for this scope (#574)
+      } catch {
+        // missing file or bad JSON — try next candidate
       }
-    } catch {
-      // missing file or bad JSON — keep prior
     }
   }
   return out;

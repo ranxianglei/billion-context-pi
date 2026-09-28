@@ -1,7 +1,6 @@
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
-import { homedir } from "node:os";
-import { CONFIG_DIR_NAME } from "./config-dir.js";
+import { CONFIG_DIR_NAME, userFileBases } from "./config-dir.js";
 import type { Prompts } from "acp-kernel";
 import type { AdapterConfig, CompressConfig, DelegateConfig, HostSessionConfig, RepetitionGuardConfig } from "./config.js";
 import type { PiPromptSections } from "./system-prompt.js";
@@ -39,32 +38,36 @@ export interface UserAcpConfig {
   rules?: boolean;
 }
 
-/** Read global + project acp.json, project overrides global. Returns {} on any
+/** Read global + project acp.json, project overrides global. On a host that
+ *  resolves to its own config dir, each scope also falls back to its legacy
+ *  ".pi" location while the primary file is absent (#574). Returns {} on any
  *  error (missing file, bad JSON) — never throws. Malformed-but-repairable
  *  files are salvaged with a loud warning instead of silently meaning "not
  *  disabled" / "no config" (#467). */
-export async function loadUserConfig(cwd: string): Promise<UserAcpConfig> {
-  const home = homedir();
+export async function loadUserConfig(cwd: string, dirName: string = CONFIG_DIR_NAME): Promise<UserAcpConfig> {
   const merged: UserAcpConfig = {};
-  for (const base of [join(home, CONFIG_DIR_NAME), join(cwd, CONFIG_DIR_NAME)]) {
-    const file = join(base, "acp.json");
-    let raw: string;
-    try {
-      raw = await fs.readFile(file, "utf8");
-    } catch {
-      continue;
-    }
-    const r = parseAcpJson(file, raw);
-    if (r.status === "failed") {
-      console.warn(`[bcp] ${r.reason}`);
-      continue;
-    }
-    if (r.status === "repaired") {
-      console.warn(`[bcp] ${r.reason}`);
-    }
-    if (r.value && typeof r.value === "object") {
-      Object.assign(merged, pickKnown(r.value));
-      debug.event("config-loaded", { file });
+  for (const scope of ["global", "project"] as const) {
+    for (const base of userFileBases(cwd, dirName)[scope]) {
+      const file = join(base, "acp.json");
+      let raw: string;
+      try {
+        raw = await fs.readFile(file, "utf8");
+      } catch {
+        continue;
+      }
+      const r = parseAcpJson(file, raw);
+      if (r.status === "failed") {
+        console.warn(`[bcp] ${r.reason}`);
+        continue;
+      }
+      if (r.status === "repaired") {
+        console.warn(`[bcp] ${r.reason}`);
+      }
+      if (r.value && typeof r.value === "object") {
+        Object.assign(merged, pickKnown(r.value));
+        debug.event("config-loaded", { file, scope });
+      }
+      break;
     }
   }
   return merged;
