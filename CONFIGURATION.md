@@ -190,7 +190,7 @@ All keys below are currently **ACTIVE**.
 |-----|------|---------|--------|-------------|
 | `prompts` | object | *(kernel defaults)* | 🟢 ACTIVE | Override acp-kernel's 4 load-bearing compression prompt rules. Each set field replaces the default verbatim. |
 | `acknowledgePromptsRisk` | boolean | `false` | 🟢 ACTIVE | Must be `true` for `prompts` overrides to take effect; otherwise overrides are dropped and defaults are used. |
-| `promptPack` | string | `default` | 🟢 ACTIVE | Select a named [prompt pack](#prompt-packs) (e.g. the built-in `lean`) — one line instead of a block of inline `promptSections`/`toolPrompts` JSON; applied as the base layer under your inline overrides. |
+| `compress.promptPack` | string | `default` | 🟢 ACTIVE | Select a named [prompt pack](#prompt-packs) (e.g. the built-in `lean`) — one line instead of a block of inline `promptSections`/`toolPrompts` JSON; applied as the base layer under your inline overrides. |
 
 **Environment variables**
 
