@@ -41,11 +41,12 @@ export function makeDecompressTool(runtime: AcpRuntime, overrides?: ToolPromptOv
     description:
       "Restore a previously compressed block's content, or a single message by its ref. The block/message stays compressed — context and cache prefix are not disrupted. BLOCK decompress (blockId b5) defaults to writing a file (blocks can be large); use the read tool to access it, or inline:true to return inline. MESSAGE decompress (blockId = a message UUID from search_context) returns that ONE message's original text — defaults to inline since a single message is usually small; oversized messages go to a file. full:true recurses through nested block tiers (block mode only). You can pass a block id (b5) OR a message ref (UUID) from search_context results.",
     promptSnippet: 'decompress({ blockId: "b5" }) or decompress({ blockId: "d51b6f94" }) (message ref from search) — writes to file by default; add inline: true to return inline',
+    // Guidelines lead with the tool name — see compress-tool.ts (#586).
     promptGuidelines: [
-      "Decompress when you need exact details lost in compression (file contents, error messages, signatures).",
-      "Message ref (UUID) returns ONLY that one message's original text, default inline (small). Block id (b5) returns the whole block, default file.",
-      "Pass inline:true ONLY when content is small or you accept the context cost (block mode).",
-      "Use full:true to recurse through all nested tiers to original messages.",
+      "decompress: use when you need exact details lost in compression (file contents, error messages, signatures).",
+      "decompress: message ref (UUID) returns ONLY that one message's original text, default inline (small). Block id (b5) returns the whole block, default file.",
+      "decompress: pass inline:true ONLY when content is small or you accept the context cost (block mode).",
+      "decompress: use full:true to recurse through all nested tiers to original messages.",
     ],
     parameters: DecompressParams,
     async execute(_toolCallId, params, signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {

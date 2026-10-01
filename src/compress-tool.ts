@@ -52,11 +52,14 @@ export function makeCompressTool(runtime: AcpRuntime, overrides?: ToolPromptOver
     description:
       "Replace older conversation ranges with detailed summaries you write. Single range: compress({ content: [{ startId, endId, summary }] }). Batch: compress({ content: [{ topic, startId, endId, summary }, ...] }) — each entry gets its own summary.",
     promptSnippet: "compress({ content: [{ startId, endId, summary }] }) or batch multiple ranges",
+    // Every bullet must lead with the tool name: pi flattens all tools'
+    // guidelines into ONE global system-prompt list without per-tool headers,
+    // so unnamed bullets are indistinguishable across tools (#586).
     promptGuidelines: [
-      "Each message has an acp tag with its mNNNNN ref, token size, and type. Compress ranges by their refs.",
-      "Batch multiple unrelated ranges in one call — each gets its own topic and summary.",
-      "Write dense, self-contained summaries — preserve file paths, signatures, errors, and decisions verbatim.",
-      "Never compress content the current step is actively using.",
+      "compress: each message has an acp tag with its mNNNNN ref, token size, and type. Compress ranges by their refs.",
+      "compress: batch multiple unrelated ranges in one call — each gets its own topic and summary.",
+      "compress: write dense, self-contained summaries — preserve file paths, signatures, errors, and decisions verbatim.",
+      "compress: never compress content the current step is actively using.",
     ],
     parameters: CompressParams,
     async execute(toolCallId, params, signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {

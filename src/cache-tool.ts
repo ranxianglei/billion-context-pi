@@ -71,8 +71,8 @@ export function makeCacheTool(runtime: AcpRuntime, overrides?: ToolPromptOverrid
       "Prompt-cache reconciliation: grand ledger (total input/cached/output, session hit rate) with every request's miss split into new content / compression re-pay / TTL expiry, plus per-fold economics (one-time cost, breakeven turns vs measured cadence). Defaults to a compact summary (totals + verdicts + anomalies only); pass detail=\"full\" for every fold and line item. Read-only.",
     promptSnippet: "acp_cache({})",
     promptGuidelines: [
-      "Call when asked about cache hits, cache invalidation, or what compression costs.",
-      "Read-only: reports numbers, never mutates context.",
+      "acp_cache: call when asked about cache hits, cache invalidation, or what compression costs.",
+      "acp_cache: read-only — reports numbers, never mutates context.",
     ],
     parameters: CacheParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {
