@@ -73,8 +73,45 @@ test("piAdapterSurface(leanPack): aligned rules kept, every other section nulled
   for (const t of ["compress", "decompress", "search_context", "acp_status"] as const) {
     assert.deepEqual(s.toolExtras[t], { promptSnippet: "", promptGuidelines: [] });
   }
+  const leanPiRaw = leanPack.surface.adapters?.pi;
+  const leanExtrasRaw = leanPiRaw && typeof leanPiRaw === "object" ? (leanPiRaw as Record<string, unknown>).toolExtras : undefined;
+  if (leanExtrasRaw && typeof leanExtrasRaw === "object") {
+    for (const [t] of Object.entries(leanExtrasRaw as Record<string, unknown>)) {
+      assert.deepEqual(s.toolExtras[t], { promptSnippet: "", promptGuidelines: [] }, `every lean-shipped tool extra (${t}) passes through stripped`);
+    }
+  }
   assert.equal(s.delegatePrompt, undefined);
   assert.deepEqual(piAdapterSurface(defaultPack), { promptSections: {}, toolExtras: {} });
+});
+
+test("pack surface reaches acp_cache through both gates: toolPrompts + adapters.pi.toolExtras (#588)", () => {
+  const strip = { promptSnippet: "", promptGuidelines: [] };
+  const pack: Pack = {
+    name: "t",
+    source: "test",
+    surface: {
+      toolPrompts: { acp_cache: { description: "CACHE DESC" } },
+      adapters: {
+        pi: {
+          toolExtras: {
+            compress: { ...strip },
+            decompress: { ...strip },
+            search_context: { ...strip },
+            acp_status: { ...strip },
+            acp_cache: { ...strip },
+          },
+        },
+      },
+    },
+  };
+  const s = piAdapterSurface(pack);
+  for (const t of ["compress", "decompress", "search_context", "acp_status", "acp_cache"] as const) {
+    assert.deepEqual(s.toolExtras[t], { promptSnippet: "", promptGuidelines: [] }, `${t} survives pi-surface sanitization`);
+  }
+  const merged = mergeSurface(pack, {});
+  assert.equal(merged.toolPrompts.acp_cache?.description, "CACHE DESC");
+  assert.equal(merged.toolPrompts.acp_cache?.promptSnippet, "");
+  assert.deepEqual(merged.toolPrompts.acp_cache?.promptGuidelines, []);
 });
 
 test("lean pack system prompt collapses to header + lean bullets", () => {

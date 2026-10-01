@@ -18,7 +18,7 @@ export type ToolPromptsConfig = Partial<Record<AcpToolName, ToolPromptOverrides>
 
 export type NudgeSectionsConfig = Partial<Record<"efficiencyNote" | "emergencyHeader" | "t2Guidance" | "t3Guidance", string | null>>;
 
-const TOOL_NAMES: ReadonlySet<string> = new Set(["compress", "decompress", "search_context", "acp_status", "acp_cache"]);
+export const ACP_TOOL_NAMES: ReadonlySet<string> = new Set(["compress", "decompress", "search_context", "acp_status", "acp_cache"]);
 
 const NUDGE_KEYS: ReadonlySet<string> = new Set(["efficiencyNote", "emergencyHeader", "t2Guidance", "t3Guidance"]);
 
@@ -30,7 +30,7 @@ export function sanitizeToolPrompts(raw: unknown): ToolPromptsConfig {
   const out: ToolPromptsConfig = {};
   if (!raw || typeof raw !== "object") return out;
   for (const [tool, value] of Object.entries(raw as Record<string, unknown>)) {
-    if (!TOOL_NAMES.has(tool) || !value || typeof value !== "object") continue;
+    if (!ACP_TOOL_NAMES.has(tool) || !value || typeof value !== "object") continue;
     const src = value as Record<string, unknown>;
     const entry: ToolPromptOverrides = {};
     if (typeof src.description === "string") entry.description = src.description;
