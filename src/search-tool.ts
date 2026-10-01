@@ -22,9 +22,8 @@ export function makeSearchTool(runtime: AcpRuntime, overrides?: ToolPromptOverri
             "Search compressed blocks AND historical messages by keyword. Use to cheaply locate detail before decompressing. Returns ranked results with ref, size, preview, and the decompress command to retrieve full content.",
         promptSnippet: 'search_context({ query: "auth token" })',
         promptGuidelines: [
-            "Search locates detail folded into summaries or past messages — cheaper than decompressing blind.",
-            "Each result shows a ref (b3 block / m00350 message), size, and the exact decompress command for full content.",
-            "Message hits link to the owning block — decompress that block to recover surrounding detail.",
+            "search_context: each result shows a ref (b3 block / m00350 message), size, and the exact decompress command for full content.",
+            "search_context: message hits link to the owning block — decompress that block to recover surrounding detail.",
         ],
         parameters: SearchParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {
