@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFile, rm } from "node:fs/promises";
 import type { CompressionBlock, CompressionState } from "acp-kernel";
 import { createAcpExtension } from "../src/index.js";
-import { blockSpanLabel, compressPanelBlocks, isCompressNoopText, isCompressSuccessText, summaryFingerprintLine } from "../src/compress-tool.js";
+import { blockSpanLabel, compressPanelBlocks, FINGERPRINT_STEERING_LINE, isCompressNoopText, isCompressSuccessText, summaryFingerprintLine } from "../src/compress-tool.js";
 import { tmpPath } from "./tmp-path.js";
 
 // ─── helpers (mirror decompress-tool.test.ts) ──────────────────────────────
@@ -412,19 +412,19 @@ test("compress success result lists remaining compressible ranges, then goes qui
 test("summaryFingerprintLine: long summary keeps exact char length, head 30 and tail 100", () => {
   const s = "A".repeat(20) + "B".repeat(200);
   assert.equal(summaryFingerprintLine("b7", s),
-    ` · b7 summary 220ch · head "${"A".repeat(20)}${"B".repeat(10)}" … tail "${"B".repeat(100)}"`);
+    ` · b7 full summary 220ch · head "${"A".repeat(20)}${"B".repeat(10)}" … tail "${"B".repeat(100)}"`);
 });
 
 test("summaryFingerprintLine: summary below thresholds renders whole, unpadded and unclipped", () => {
   const s = "tiny note ok";
   assert.equal(summaryFingerprintLine("b2", s),
-    ` · b2 summary 12ch · head "${s}" … tail "${s}"`);
+    ` · b2 full summary 12ch · head "${s}" … tail "${s}"`);
 });
 
 test("summaryFingerprintLine: CJK counts as single characters (no byte drift)", () => {
   const s = "中文摘要 mixed en tail";
   const line = summaryFingerprintLine("b3", s);
-  assert.ok(line.startsWith(` · b3 summary ${s.length}ch`), `charLen must be character-based: ${line}`);
+  assert.ok(line.startsWith(` · b3 full summary ${s.length}ch`), `charLen must be character-based: ${line}`);
   assert.ok(line.includes(`head "${s}"`), `short summary appears whole as head: ${line}`);
   assert.equal(s.length, 18, "precondition: char count includes CJK as one each");
 });
@@ -436,7 +436,45 @@ test("summaryFingerprintLine: newlines flatten to spaces and the result stays on
   const head = s.slice(0, 30).replace(/\r?\n/g, " ");
   const tail = s.slice(-100).replace(/\r?\n/g, " ");
   assert.ok(head.includes("first line second"), `newline became a space in head: ${head}`);
-  assert.equal(line, ` · b9 summary ${s.length}ch · head "${head}" … tail "${tail}"`);
+  assert.equal(line, ` · b9 full summary ${s.length}ch · head "${head}" … tail "${tail}"`);
+});
+
+// ─── #572: compress result must not invite an immediate re-decompress ──────
+
+test("#572: compress success panel carries the steering line right after the last fingerprint", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000, preserveRecentMessages: 1 })(api as any);
+  const BIG = "中".repeat(6000);
+  const stateFile = tmpPath("pai-acp-compress-steering.session.json");
+  await rm(`${stateFile}.acp.json`, { force: true });
+  const entries = [userMsg("e1", BIG), userMsg("e2", BIG), userMsg("e3", BIG), userMsg("e4", BIG)];
+  const ctx = fakeCtx(entries, stateFile);
+  ctx.__setUsage(100_000);
+  await runContextRound(handlers, ctx);
+
+  const compressTool = api.tools.find((t: any) => t.name === "compress")!;
+  const s1 = "First block steering probe: kept the flat nudge cadence per the frozen design doc.";
+  const s2 = "Second block steering probe: fixed the lock ordering bug at src/runtime.ts:88.";
+  const out = await compressTool.execute(
+    "tc1",
+    { content: [
+      { startId: "m00001", endId: "m00001", summary: s1 },
+      { startId: "m00003", endId: "m00003", summary: s2 },
+    ] },
+    undefined, undefined, ctx,
+  );
+  const text = typeof out === "string" ? out : out.content?.[0]?.text ?? String(out);
+  assert.ok(text.includes("▣ ACP"), `compress failed: ${text}`);
+  assert.ok(!text.includes("Errors:"), `compress rejected: ${text}`);
+
+  const lines = text.split("\n");
+  const steerIdx = lines.findIndex((l) => l === FINGERPRINT_STEERING_LINE);
+  assert.ok(steerIdx >= 3, `steering line present after both fingerprints: ${text}`);
+  assert.equal(lines[steerIdx - 1], summaryFingerprintLine("b2", s2), "steering line must follow the LAST fingerprint");
+  assert.ok(
+    !lines.slice(0, steerIdx).some((l) => l.startsWith("⚠️") || l.startsWith("Errors:") || l.startsWith("Current compressible")),
+    `nothing interleaves between fingerprints and steering line: ${text}`,
+  );
 });
 
 test("compress success panel appends one fingerprint line per created block matching the stored summary (#535 P1)", async () => {

@@ -321,12 +321,19 @@ export function blockSpanLabel(block: CompressionBlock, state: CompressionState)
 
 // #535 P1: one-line integrity fingerprint per new/updated block — cheap
 // head/tail excerpt + char length so the model can verify its summary was
-// stored intact without decompressing.
+// stored intact without decompressing. #572: "full summary" wording — the
+// bare "head … tail" form was read as a truncated stored value, driving an
+// immediate re-decompress of a just-created block.
 export function summaryFingerprintLine(blockId: string, summary: string): string {
   const head = summary.slice(0, 30).replace(/\r?\n/g, " ");
   const tail = summary.slice(-100).replace(/\r?\n/g, " ");
-  return ` · ${blockId} summary ${summary.length}ch · head "${head}" … tail "${tail}"`;
+  return ` · ${blockId} full summary ${summary.length}ch · head "${head}" … tail "${tail}"`;
 }
+
+// #572: post-compress steering — state storage is complete and point at the
+// cheap retrieval path before the model reflexively decompresses a fresh block.
+export const FINGERPRINT_STEERING_LINE =
+  "Fingerprints show head/tail only — every summary is stored in full. To retrieve a specific detail from a new block, call search_context({ query }) first; decompress only if the excerpt doesn't answer it.";
 
 function blockHasVisibleAnchor(block: CompressionBlock, visibleIds: Set<string>): boolean {
   if (visibleIds.has(`acp_summary_${block.blockId}`)) return true;
@@ -649,6 +656,7 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
   const lines = [`▣ ACP | ${formatK(beforeTokens)} → ${formatK(afterTokens)} tokens (~${formatK(reclaimed)} reclaimed, ${spanClause})`];
   if (blocksCreated > 0) {
     for (const b of newBlocks) lines.push(summaryFingerprintLine(b.blockId, b.summary));
+    lines.push(FINGERPRINT_STEERING_LINE);
   }
   if (warnings.length > 0) lines.push("⚠️ " + warnings.join("; "));
   if (errors.length > 0) lines.push("Errors: " + errors.join("; "));
