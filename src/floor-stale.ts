@@ -26,10 +26,17 @@ type AnchorEntry = {
   };
 };
 
+function usageTotal(u: UsageLike): number {
+  if (!u) return 0;
+  return (u.totalTokens ?? 0) || (u.input ?? 0) + (u.output ?? 0) + (u.cacheRead ?? 0) + (u.cacheWrite ?? 0);
+}
+
 function validAnchorUsage(u: UsageLike): boolean {
-  if (!u) return false;
-  const total = (u.totalTokens ?? 0) || (u.input ?? 0) + (u.output ?? 0) + (u.cacheRead ?? 0) + (u.cacheWrite ?? 0);
-  return total > 0;
+  return usageTotal(u) > 0;
+}
+
+function anchorUsageTotal(entry: AnchorEntry): number {
+  return usageTotal(entry.message?.usage);
 }
 
 interface AnchorScan {
@@ -76,6 +83,12 @@ export interface AnchorStaleness {
   // Σ max(0, compressedTokens − summary) over active blocks whose compress
   // landed after the anchor; unattributable/pre-anchor blocks are excluded
   netReclaimed: number;
+  // totalTokens of the last valid provider-usage anchor (0 when none exists)
+  anchorTotal: number;
+  // Upper bound on the true current request size derivable WITHOUT trusting
+  // getContextUsage(): the measured anchor plus everything appended after it.
+  // 0 when there is no anchor to bound from (caller keeps prior behavior).
+  trustedCeiling: number;
 }
 
 // issue #325: flooring at a stale anchor's raw value re-fires a false EMERGENCY,
@@ -96,5 +109,22 @@ export function compressionAnchorStaleness(
     const saved = (block.compressedTokens ?? 0) - countTokens(block.summary ?? "");
     netReclaimed += saved > 0 ? saved : 0;
   }
-  return { predates: scan.lastCompressIdx > scan.lastUsageIdx, netReclaimed };
+  // issue #595: when the host abandons its provider-usage anchor (a retry's
+  // context_edit invalidates it), getContextUsage() falls back to a full-history
+  // per-message estimate that re-includes ACP-folded content — irreducibly larger
+  // than the compressed send view. The measured anchor plus everything appended
+  // after it is an upper bound on the true request size; expose it so callers can
+  // cap the floor there instead of trusting the fallback estimate.
+  const anchorTotal = scan.lastUsageIdx >= 0 ? anchorUsageTotal(entries[scan.lastUsageIdx]!) : 0;
+  let trailingEstimate = 0;
+  for (let i = scan.lastUsageIdx + 1; i < entries.length; i++) {
+    const m = entries[i]!.message;
+    if (m && m.content != null) trailingEstimate += countTokens(extractText(m.content));
+  }
+  return {
+    predates: scan.lastCompressIdx > scan.lastUsageIdx,
+    netReclaimed,
+    anchorTotal,
+    trustedCeiling: anchorTotal > 0 ? anchorTotal + trailingEstimate : 0,
+  };
 }

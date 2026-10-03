@@ -477,9 +477,23 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
       // it (issue #325, floor-stale.ts) instead of skipping the floor entirely —
       // the skip dropped the meter onto the undercounting estimate (~70-80K low)
       // and the next fresh reading snapped it back into the emergency band.
-      const { predates, netReclaimed } = compressionAnchorStaleness(entries, state.blocks, defaultCountTokens);
+      const { predates, netReclaimed, anchorTotal, trustedCeiling } = compressionAnchorStaleness(entries, state.blocks, defaultCountTokens);
       const realPromptTokens = realUsage?.tokens ?? 0;
-      const hostFloor = realPromptTokens > 0 ? Math.max(0, realPromptTokens - (predates ? netReclaimed : 0)) : 0;
+      const rawHostFloor = realPromptTokens > 0 ? Math.max(0, realPromptTokens - (predates ? netReclaimed : 0)) : 0;
+      // issue #595: after a retry's context_edit the host abandons its provider
+      // usage anchor and reports a full-history fallback estimate (re-including
+      // ACP-folded content) — irreducibly larger than the compressed send view,
+      // which floored the meter into a false EMERGENCY (78k → 326k). Cap the floor
+      // at the measured anchor + trailing (+ images): an upper bound on the true
+      // request size, so the fallback estimate may raise the floor only as far as
+      // a real provider reading could. Genuine growth moves both sides together;
+      // with no anchor the prior behavior is untouched.
+      const imageTokenSum = [...imageTokens.values()].reduce((a, b) => a + b, 0);
+      const hostCeiling = trustedCeiling > 0 ? trustedCeiling + imageTokenSum : 0;
+      const hostFloor = hostCeiling > 0 ? Math.min(rawHostFloor, hostCeiling) : rawHostFloor;
+      if (hostFloor < rawHostFloor) {
+        logWarn("turn", { sid, event: "host-floor-capped", reason: "host-fallback-estimate", raw: rawHostFloor, capped: hostFloor, anchor: anchorTotal, ceiling: hostCeiling, view: sentTokens });
+      }
       // Calibration anchor (issue #455): the estimate carries systematic phantom
       // mass (content counted locally that never goes on the wire) which the
       // raise-only floors below can never pull down — in #452 the meter ran
