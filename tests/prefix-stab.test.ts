@@ -50,7 +50,9 @@ test("outbound provider view stays byte-stable across context rounds; compressio
     const views: any[][] = [];
     const ctxOf = () => fakeCtx(entries, stateFile);
     const runRound = async () => {
-        const res = await handlers.get("context")![0]!({ type: "context", messages: entries.map((e) => ({ role: e.message.role, content: [{ type: "text", text: e.message.content }], timestamp: 0 })) }, ctxOf());
+        // Raw AgentMessages, as fork hosts send (#459 contract) — the degraded
+        // text-wrap mapping broke identity alignment for tool-shaped entries.
+        const res = await handlers.get("context")![0]!({ type: "context", messages: entries.map((e) => ({ ...e.message })) }, ctxOf());
         views.push(res.messages);
         return res;
     };
@@ -85,6 +87,10 @@ test("outbound provider view stays byte-stable across context rounds; compressio
     const outText = typeof out === "string" ? out : out?.content?.[0]?.text ?? String(out);
     console.log("compress result:", outText.slice(0, 100));
     assert.ok(!outText.includes("FAILED"), `compression should succeed: ${outText}`);
+    // #603: real hosts log the compress toolCall + toolResult immediately; the
+    // branch-evidence gate keeps blocks whose creating call succeeded on this branch.
+    entries.push({ type: "message", id: "call-tc1", parentId: null, timestamp: "", message: { role: "assistant", content: [{ type: "toolCall", id: "tc1", name: "compress", arguments: {} }], timestamp: Date.now() } });
+    entries.push({ type: "message", id: "result-tc1", parentId: null, timestamp: "", message: { role: "toolResult", toolCallId: "tc1", toolName: "compress", isError: false, content: outText, timestamp: Date.now() } });
 
     const pre = views.length;
     for (let t = 1; t <= 6; t++) {

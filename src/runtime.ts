@@ -15,6 +15,7 @@ import { applyStrictReasoningGate, resolveReasoningDrop, type CompressReasoningC
 import { entriesToCoreMessages, EntryProjectionCache, extractText, matchesStoredText, messageIdentity, messageRef } from "./messages.js";
 import { SessionStateStore, deriveChildState, type LiveRefOrigin } from "./state.js";
 import { hasCompressHistory, rebuildStateFromLog } from "./state-rebuild.js";
+import { reconcileBlocksAgainstBranch } from "./state-reconcile.js";
 import { loadUserConfig, applyUserConfig } from "./user-config.js";
 import { sanitizeSurfaceConfig } from "./surface.js";
 import { ThrottleEpisode } from "./throttle-retry.js";
@@ -696,6 +697,23 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     const live = piHost ? undefined : (liveMessages ?? lastLiveBySession.get(sessionId));
     let state = await store.load(sessionFile, sessionId);
     const entries = readContextEntries(sm);
+    // issue #603: drop blocks whose creating compress call never happened on
+    // THIS branch (inherited through the parentSession chain past the fork
+    // point, or persisted by a pre-fix version). Runs before the #299 rebuild
+    // so a fully-filtered state can fall through to it. Explicitly derived
+    // children (#364 deriveChildState) share the parent's blocks by design and
+    // are exempt. Only on pi hosts, whose persisted branch is complete: on
+    // omp/fork hosts getBranch() lags the unpersisted tail, so the same check
+    // runs further down against the live-merged view instead — filtering
+    // against the lagging persisted entries alone would wrongly drop a
+    // just-created block whose call+result are still in the tail.
+    if (piHost && !store.getDerivedFrom(sessionFile, sessionId)) {
+      const rec = reconcileBlocksAgainstBranch(state, entries, sessionId);
+      if (rec.removed > 0) {
+        state = rec.state;
+        if (sessionFile) await store.save(state, sessionFile, sessionId);
+      }
+    }
     // Issue #299 (ranxianglei/billion-context-pi#299): pi's importFromJsonl
     // copies only the .jsonl, so the `${sessionFile}.acp.json` sidecar never
     // travels with an imported session and compression state silently resets
@@ -729,6 +747,13 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
       const origins = store.getLiveRefOrigins(sessionFile, sessionId);
       const merged = mergeLiveEntries(entries, live, state, origins);
       store.setLiveRefOrigins(sessionFile, sessionId, origins);
+      if (!store.getDerivedFrom(sessionFile, sessionId)) {
+        const rec = reconcileBlocksAgainstBranch(state, merged, sessionId);
+        if (rec.removed > 0) {
+          state = rec.state;
+          if (sessionFile) await store.save(state, sessionFile, sessionId);
+        }
+      }
       const coreMessages = entriesToCoreMessages(merged);
       // #459: enforce byRaw ⊆ view-ids ∪ block-ids on the merged view too —
       // without it, stale live-* refs from a shrunken/rewound host view linger

@@ -230,6 +230,10 @@ test("acp_rule call+result survive a compress covering them (hard protection)", 
     );
     const text = typeof out === "string" ? out : out.content?.[0]?.text ?? String(out);
     assert.ok(isCompressSuccessText(text), `compress failed: ${text}`);
+    // #603: record the host-logged compress pair before the next stateFor so the
+    // branch-evidence gate keeps b1 (real hosts log the call+result immediately).
+    entries.push({ type: "message", id: "ac1", parentId: null, timestamp: "", message: { role: "assistant", content: [{ type: "toolCall", id: "tc-c", name: "compress", arguments: {} }], timestamp: Date.now() } });
+    entries.push({ type: "message", id: "tr1", parentId: null, timestamp: "", message: { role: "toolResult", toolCallId: "tc-c", toolName: "compress", isError: false, content: text, timestamp: Date.now() } });
     const turned = await runContext(handlers, ctx);
     const sent = JSON.stringify(turned ?? {});
     assert.ok(sent.includes("call1"), "protected tool-result survives compression");

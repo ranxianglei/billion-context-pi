@@ -66,9 +66,17 @@ async function setup(stateFile: string, adapter: Record<string, unknown> = {}) {
   const ctx = fakeCtx(entries, stateFile);
   await handlers.get("context")![0]!({ type: "context", messages: [] }, ctx);
   const tool = api.tools.find((t) => t.name === "compress")!;
+  let seq = 0;
   const run = async (content: unknown) => {
     const out = await tool.execute("c", { content }, undefined, undefined, ctx);
-    return typeof out === "string" ? out : (out as { content: Array<{ text: string }> }).content[0]!.text;
+    const text = typeof out === "string" ? out : (out as { content: Array<{ text: string }> }).content[0]!.text;
+    // #603: record the host-logged compress toolCall + result so the
+    // branch-evidence gate sees the successful call (rejected runs throw first).
+    entries.push(
+      { type: "message", id: `ec-${++seq}`, parentId: null, timestamp: "", message: { role: "assistant", content: [{ type: "toolCall", id: "c", name: "compress", arguments: {} }], timestamp: Date.now() } },
+      { type: "message", id: `er-${seq}`, parentId: null, timestamp: "", message: { role: "toolResult", toolCallId: "c", toolName: "compress", isError: false, content: text, timestamp: Date.now() } },
+    );
+    return text;
   };
   return { run, stateFile };
 }
