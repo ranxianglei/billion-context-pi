@@ -8,6 +8,7 @@ import { entriesToCoreMessages } from "./messages.js";
 import { assertNotAborted } from "./abort.js";
 import { loadAncestorEntries, loadLiveRefEntries } from "./session-log.js";
 import { UNSUPPORTED_HOST_MESSAGE } from "./omp.js";
+import { collectImages, deliverImages, type ImageBlock } from "./decompress-images.js";
 import { writeFile, mkdir } from "node:fs/promises";
 import { existsSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
 import { resolve, relative, isAbsolute, join, basename, dirname } from "node:path";
@@ -50,17 +51,28 @@ export function makeDecompressTool(runtime: AcpRuntime, overrides?: ToolPromptOv
     parameters: DecompressParams,
     async execute(_toolCallId, params, signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {
       if (runtime.refused) return { details: undefined, content: [{ type: "text", text: runtime.refusalMessage ?? UNSUPPORTED_HOST_MESSAGE }] };
-      let result: string;
+      let result: DecompressOutput;
       try {
         result = await handleDecompress(params as DecompressArgs, runtime, ctx, signal);
       } catch (e) {
         logThrow("decompress", e, { sid: ctx.sessionManager.getSessionId(), blockId: (params as DecompressArgs).blockId });
         throw e;
       }
-      return { details: undefined, content: [{ type: "text", text: result }] };
+      return { details: undefined, content: [{ type: "text", text: result.text }, ...result.images] };
     },
   }, overrides);
 }
+
+/** Decompress result: text plus any image blocks restored from the session log.
+ *  Folding projects only text, so images in folded messages are otherwise lost
+ *  to the model; returning them as tool-result image blocks (appended at the
+ *  tail) restores the pixels without touching the cached prefix. */
+interface DecompressOutput {
+  text: string;
+  images: ImageBlock[];
+}
+
+const textOnly = (text: string): DecompressOutput => ({ text, images: [] });
 
 // #535 P2: close the loop on an inline restore — kernel K2 updates the
 // inline-restored block IN PLACE when re-compressed (same id, replaced
@@ -261,7 +273,8 @@ async function handleMessageRef(
   ownerBlockId: string,
   args: DecompressArgs,
   ctx: ExtensionContext,
-): Promise<string> {
+  refLabel: (rawId: string) => string,
+): Promise<DecompressOutput> {
   let found = findMessageContent(ref, ctx);
   if (!found) {
     const baseId = ref.split("#")[0]!;
@@ -269,41 +282,62 @@ async function handleMessageRef(
     // can only miss them; bridge through sidecar identities instead.
     found = baseId.startsWith("live-") ? await findLiveRefMessage(ref, ctx) : await findAncestorMessage(ref, ctx);
   }
-  if (!found || !found.text) {
-    return `Message ${ref} (in block ${ownerBlockId}) has no restorable text content in the session log.`;
+  const images = await collectImages([ref], ctx, refLabel);
+  if ((!found || !found.text) && images.length === 0) {
+    return textOnly(`Message ${ref} (in block ${ownerBlockId}) has no restorable text content in the session log.`);
   }
-  const { text, role } = found;
+  const text = found?.text ?? "";
+  const role = found?.role ?? "user";
 
   // Decide inline vs file. Default inline (messages are small); file when the
-  // message is large, or toFile/inline:false is set explicitly.
-  const wantFile = args.toFile !== undefined || args.inline === false || text.length >= MESSAGE_INLINE_THRESHOLD;
+  // message is large, or toFile/inline:false is set explicitly. Images stay
+  // inline unless file delivery was explicitly requested: restoring the pixels
+  // is the point of decompressing an image message, and a long caption must
+  // not push them into files the model would have to open one by one.
+  const explicitFile = args.toFile !== undefined || args.inline === false;
+  const wantFile = explicitFile || text.length >= MESSAGE_INLINE_THRESHOLD;
+  const imageMode = explicitFile ? "file" : "inline";
 
   if (!wantFile) {
-    debug.event("decompress-message", { ref, ownerBlockId, mode: "inline", chars: text.length });
-    logInfo("decompress", { sid: ctx.sessionManager.getSessionId(), event: "message", mode: "inline", ref, ownerBlockId, chars: text.length });
-    return `Message ${ref} (${role}, block ${ownerBlockId}, ${text.length} chars) restored inline:\n\n${text}`;
+    const delivered = await deliverImages(images, "inline", AUTO_DIR, `msg-${ref}`);
+    debug.event("decompress-message", { ref, ownerBlockId, mode: "inline", chars: text.length, images: images.length });
+    logInfo("decompress", { sid: ctx.sessionManager.getSessionId(), event: "message", mode: "inline", ref, ownerBlockId, chars: text.length, images: images.length });
+    return { text: `Message ${refLabel(ref)} (${role}, block ${ownerBlockId}, ${text.length} chars) restored inline:\n\n${text}${delivered.note}`, images: delivered.blocks };
   }
 
   const targetPath = args.toFile ? resolveToFilePath(args.toFile) : autoFilePath(`msg-${ref}`);
   if (typeof targetPath === "object" && "error" in targetPath) {
     logError("decompress", { sid: ctx.sessionManager.getSessionId(), event: "message-path-rejected", ref, toFile: args.toFile });
-    return targetPath.error;
+    return textOnly(targetPath.error);
   }
 
   await mkdir(AUTO_DIR, { recursive: true }).catch(() => {});
   await writeFile(targetPath, text, "utf8");
+  const delivered = await deliverImages(images, imageMode, AUTO_DIR, `msg-${ref}`);
 
-  debug.event("decompress-message", { ref, ownerBlockId, mode: "file", path: targetPath, chars: text.length });
-  logInfo("decompress", { sid: ctx.sessionManager.getSessionId(), event: "message", mode: "file", ref, ownerBlockId, path: targetPath, chars: text.length });
+  debug.event("decompress-message", { ref, ownerBlockId, mode: "file", path: targetPath, chars: text.length, images: images.length });
+  logInfo("decompress", { sid: ctx.sessionManager.getSessionId(), event: "message", mode: "file", ref, ownerBlockId, path: targetPath, chars: text.length, images: images.length });
 
-  return [
-    `Message ${ref} (${role}, block ${ownerBlockId}, ${text.length} chars) written to ${targetPath}.`,
-    "Block stays compressed — context unchanged. Use the read tool to access the content.",
-    "", "Preview:", headPreview(text),
-  ].join("\n");
+  return {
+    text: [
+      `Message ${refLabel(ref)} (${role}, block ${ownerBlockId}, ${text.length} chars) written to ${targetPath}.`,
+      "Block stays compressed — context unchanged. Use the read tool to access the content.",
+      "", "Preview:", headPreview(text),
+    ].join("\n") + delivered.note,
+    images: delivered.blocks,
+  };
 }
 
-async function handleDecompress(args: DecompressArgs, runtime: AcpRuntime, ctx: ExtensionContext, signal?: AbortSignal): Promise<string> {
+/** Resolve an mNNNNN message ref (as shown in acp tags / compress image
+ *  notes) to its raw id. Refs are never recycled and the kernel widens the
+ *  ref space rather than capping it, so any digit count is accepted. */
+export function resolveMRef(arg: string, byRef?: Record<string, string>): string | undefined {
+  const m = /^m(\d+)$/i.exec(arg);
+  if (!m) return undefined;
+  return byRef?.[arg] ?? byRef?.[`m${m[1]!.padStart(5, "0")}`];
+}
+
+async function handleDecompress(args: DecompressArgs, runtime: AcpRuntime, ctx: ExtensionContext, signal?: AbortSignal): Promise<DecompressOutput> {
   assertNotAborted(signal);
   const { state, coreMessages } = await runtime.stateFor(ctx);
   assertNotAborted(signal);
@@ -313,18 +347,21 @@ async function handleDecompress(args: DecompressArgs, runtime: AcpRuntime, ctx: 
   // exists in some block's effectiveMessageIds). This must precede block-id
   // parsing because pure-digit hex refs (e.g. 51102431) would otherwise be
   // misread as a block number by parseBlockIdArg.
-  const owner = state.blocks.find((b) => b.effectiveMessageIds.includes(arg));
+  const refLabel = (rawId: string): string => state.messageRefs?.byRaw?.[rawId] ?? rawId;
+  // mNNNNN refs (as shown in acp tags / compress image notes) map to raw ids.
+  const msgArg = resolveMRef(arg, state.messageRefs?.byRef) ?? arg;
+  const owner = state.blocks.find((b) => b.effectiveMessageIds.includes(msgArg));
   if (owner) {
-    return handleMessageRef(arg, owner.blockId, args, ctx);
+    return handleMessageRef(msgArg, owner.blockId, args, ctx, refLabel);
   }
 
   // Otherwise treat as a block id.
   const blockId = parseBlockIdArg(arg);
-  if (!blockId) return `Invalid blockId: ${args.blockId}. Expected format like "b5", "5", or a message ref (UUID) from search_context results.`;
+  if (!blockId) return textOnly(`Invalid blockId: ${args.blockId}. Expected format like "b5", "5", or a message ref (UUID) from search_context results.`);
   const block = state.blocks.find((b) => b.blockId === blockId);
   if (!block) {
     const active = state.blocks.filter((b) => b.active).map((b) => b.blockId).join(", ");
-    return `Block ${blockId} not found. Active blocks: ${active || "(none)"}.`;
+    return textOnly(`Block ${blockId} not found. Active blocks: ${active || "(none)"}.`);
   }
 
   const full = args.full ?? false;
@@ -336,7 +373,10 @@ async function handleDecompress(args: DecompressArgs, runtime: AcpRuntime, ctx: 
   const resolved = await resolveBlockMessages(block, coreMessages, ctx);
   const { text, count } = collectBlockContent(state, block, resolved, { full });
 
-  if (count === 0) return `Block ${blockId} has no restorable message content.`;
+  if (count === 0) return textOnly(`Block ${blockId} has no restorable message content.`);
+  // Images follow the text's tier semantics: one tier up restores the block's
+  // own direct messages (nested folded children stay folded), full recurses.
+  const images = await collectImages(full ? block.effectiveMessageIds : block.directMessageIds, ctx, refLabel);
 
   // inline mode: return content directly. Model explicitly accepts the context
   // cost (e.g. small restorations or when it must reason over exact text).
@@ -347,7 +387,11 @@ async function handleDecompress(args: DecompressArgs, runtime: AcpRuntime, ctx: 
     await runtime.save(marked.state, ctx);
     debug.event("decompress", { blockId, full, count, mode: "inline", restoredStartRef: marked.result?.restoredStartRef ?? null, restoredEndRef: marked.result?.restoredEndRef ?? null });
     logInfo("decompress", { sid: ctx.sessionManager.getSessionId(), event: "block", mode: "inline", blockId, full, count, refold: marked.result !== null });
-    return `Restored block ${blockId} (${count} item${count === 1 ? "" : "s"}) inline:\n\n${text}\n\n${refoldHint(blockId, marked.result)}`;
+    const delivered = await deliverImages(images, "inline", AUTO_DIR, blockId);
+    return {
+      text: `Restored block ${blockId} (${count} item${count === 1 ? "" : "s"}) inline:\n\n${text}${delivered.note}\n\n${refoldHint(blockId, marked.result)}`,
+      images: delivered.blocks,
+    };
   }
 
   const targetPath = args.toFile
@@ -355,7 +399,7 @@ async function handleDecompress(args: DecompressArgs, runtime: AcpRuntime, ctx: 
     : autoFilePath(blockId);
   if (typeof targetPath === "object" && "error" in targetPath) {
     logError("decompress", { sid: ctx.sessionManager.getSessionId(), event: "block-path-rejected", blockId, toFile: args.toFile });
-    return targetPath.error;
+    return textOnly(targetPath.error);
   }
 
   assertNotAborted(signal);
@@ -373,5 +417,6 @@ async function handleDecompress(args: DecompressArgs, runtime: AcpRuntime, ctx: 
   // A short head preview lets the model decide whether the content is worth
   // reading without forcing a second round-trip for small restorations.
   lines.push("", "Preview:", headPreview(text));
-  return lines.join("\n");
+  const delivered = await deliverImages(images, "file", AUTO_DIR, blockId);
+  return textOnly(lines.join("\n") + delivered.note);
 }
