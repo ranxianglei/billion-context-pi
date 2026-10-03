@@ -477,8 +477,24 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
       // it (issue #325, floor-stale.ts) instead of skipping the floor entirely —
       // the skip dropped the meter onto the undercounting estimate (~70-80K low)
       // and the next fresh reading snapped it back into the emergency band.
-      const { predates, netReclaimed } = compressionAnchorStaleness(entries, state.blocks, defaultCountTokens);
-      const realPromptTokens = realUsage?.tokens ?? 0;
+      const { predates, netReclaimed, fresh, lastRealTokens } = compressionAnchorStaleness(entries, state.blocks, defaultCountTokens);
+      // issue #600: when the previous model turn yielded no fresh provider usage
+      // (errored / aborted / zero-usage — e.g. a network "fetch failed"), the host's
+      // getContextUsage() has no anchor and reports the raw session-tree total
+      // (uncompressed, only grows). Flooring at that transient inflation drags the
+      // raise-only meter into the emergency band and drives redundant compresses
+      // (each "recovers" once a fresh reading lands). Reject it: floor at the last
+       // REAL provider reading instead, and suspend the downward calibration below —
+       // a stale reading must not cap the current estimate down, or growth since
+       // that reading would be hidden. Fresh turns take this path unchanged. With NO
+       // prior anchor at all nothing has ever been compressed, so the tree-sum carries
+       // no ACP inflation and IS the true size — keep trusting it (rejecting it would
+       // drop the floor to 0, blinding the meter and its terminal-escape backstop).
+       const reportedHost = realUsage?.tokens ?? 0;
+       const realPromptTokens = fresh || lastRealTokens <= 0 ? reportedHost : lastRealTokens;
+       if (!fresh && lastRealTokens > 0 && reportedHost > 0) {
+        logInfo("turn", { sid, event: "host-tree-sum-rejected", reported: reportedHost, flooredAt: lastRealTokens });
+      }
       const hostFloor = realPromptTokens > 0 ? Math.max(0, realPromptTokens - (predates ? netReclaimed : 0)) : 0;
       // Calibration anchor (issue #455): the estimate carries systematic phantom
       // mass (content counted locally that never goes on the wire) which the
@@ -490,7 +506,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
       // pre-send prediction for growth beyond the lagged-by-one-response
       // measurement. Stale or jittering measurements fall back to the raw
       // estimate; the divergence watch below keeps that fallback visible.
-      const hostUsageStable = !predates && realPromptTokens > 0 ? runtime.noteHostUsage(sid, realPromptTokens) : false;
+      const hostUsageStable = fresh && !predates && realPromptTokens > 0 ? runtime.noteHostUsage(sid, realPromptTokens) : false;
       // k̂ calibration (#598 root fix, borrowed from billion-context#1940 F1):
       // the usage report that just arrived settles the PREVIOUS request — pair
       // it with the estimate recorded for that request to learn the
@@ -500,7 +516,11 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
       // max-arbitrated, so equality-line jitter stops pretending to be a scale
       // change. scaleChanged (model switch, publish, disagreement clear) is
       // the genuine transition the growth guard re-anchors on below.
-      const khatReport = realPromptTokens > 0
+      // (#601 union) the learner is gated on fresh: on errored turns this value
+      // is the replayed lastRealTokens (#600), not a new settlement — feeding
+      // it would duplicate samples and pair stale usage with the current
+      // request's estimate, corrupting the learned ratio.
+      const khatReport = fresh && realPromptTokens > 0
         ? runtime.noteKhatUsage(sid, modelId, realPromptTokens)
         : { khat: runtime.khatFor(sid, modelId), scaleChanged: false };
       const calibrate = (base: number): number =>
@@ -551,7 +571,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
       // episode instead of silently driving every threshold off the wrong ruler.
       // With calibration engaged the capped tokenCount stays within 20% of the
       // measurement, so this only fires in the fallback states it diagnoses.
-      const sizeDivergent = !predates && realPromptTokens > 0 && Math.abs(tokenCount - realPromptTokens) / realPromptTokens > 0.5;
+      const sizeDivergent = fresh && !predates && realPromptTokens > 0 && Math.abs(tokenCount - realPromptTokens) / realPromptTokens > 0.5;
       if (runtime.noteSizeDivergence(sid, sizeDivergent)) {
         logWarn("turn", { sid, event: "size-divergence", est: tokenCount, host: realPromptTokens, ratio: Number((tokenCount / realPromptTokens).toFixed(2)), stable: hostUsageStable });
       }

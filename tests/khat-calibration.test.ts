@@ -142,9 +142,15 @@ function captureApi() {
   return { api, handlers };
 }
 
-function msg(id: string, role: string, text: string) {
-  return { type: "message", id, parentId: null, timestamp: "", message: { role, content: text, timestamp: Date.now() } };
+function msg(id: string, role: string, text: string, usage?: any) {
+  return { type: "message", id, parentId: null, timestamp: "", message: { role, content: text, timestamp: Date.now(), ...(usage ? { usage } : {}) } };
 }
+
+// Post-#601 a provider reading must ride the assistant message to count as a
+// settlement: a context-only number is the raw session-tree sum, which the
+// freshness guard (and the k̂ learner behind it) must not trust (#600). The
+// integration scenarios below anchor every usage report on the message it
+// belongs to, exactly as the pi host does.
 
 const MID = "lorem ".repeat(3000);
 let branchEntries: any[] = [];
@@ -196,11 +202,11 @@ test("#598 regression: equality-line jitter never re-anchors once k̂ is publish
     // T2 + T3 — the provider consistently reports ~95% of the estimate: two
     // settled agreeing samples publish k̂ ≈ 0.95. The 1 → 0.95 factor shift is
     // inside the material band, so the baselines must NOT reset.
-    const t2 = [...t1, msg("e19", "assistant", "ack-2")];
+    const t2 = [...t1, msg("e19", "assistant", "ack-2", { input: Math.round(E * 0.95), cacheRead: 0, cacheWrite: 0 })];
     branchEntries = t2;
     await fire(handlers, t2, fakeCtx("khat-jitter", Math.round(E * 0.95)));
     assert.equal(await readBaseline(), E, "first settled sample does not re-anchor");
-    const t3 = [...t2, msg("e20", "assistant", "ack-3")];
+    const t3 = [...t2, msg("e20", "assistant", "ack-3", { input: Math.round(E * 0.96), cacheRead: 0, cacheWrite: 0 })];
     branchEntries = t3;
     await fire(handlers, t3, fakeCtx("khat-jitter", Math.round(E * 0.96)));
     assert.equal(await readBaseline(), E, "k̂ ≈ 0.95 publishing is not material — no re-anchor");
@@ -208,15 +214,15 @@ test("#598 regression: equality-line jitter never re-anchors once k̂ is publish
     // T4/T5/T6 — the exact #598 jitter: provider report crosses the estimate
     // line turn-to-turn (±3%). On the calibrated single ruler these are
     // sub-band wobbles; the baseline must keep accumulating real growth.
-    const t4 = [...t3, msg("e21", "assistant", "ack-4")];
+    const t4 = [...t3, msg("e21", "assistant", "ack-4", { input: Math.round(E * 1.03), cacheRead: 0, cacheWrite: 0 })];
     branchEntries = t4;
     await fire(handlers, t4, fakeCtx("khat-jitter", Math.round(E * 1.03)));
     assert.equal(await readBaseline(), E, "over-estimate micro-crossing does not re-anchor");
-    const t5 = [...t4, msg("e22", "assistant", "ack-5")];
+    const t5 = [...t4, msg("e22", "assistant", "ack-5", { input: Math.round(E * 0.97), cacheRead: 0, cacheWrite: 0 })];
     branchEntries = t5;
     await fire(handlers, t5, fakeCtx("khat-jitter", Math.round(E * 0.97)));
     assert.equal(await readBaseline(), E, "under-estimate micro-crossing does not re-anchor");
-    const t6 = [...t5, msg("e23", "assistant", "ack-6")];
+    const t6 = [...t5, msg("e23", "assistant", "ack-6", { input: Math.round(E * 1.02), cacheRead: 0, cacheWrite: 0 })];
     branchEntries = t6;
     await fire(handlers, t6, fakeCtx("khat-jitter", Math.round(E * 1.02)));
     assert.equal(await readBaseline(), E, "repeated jitter keeps the baseline accumulating");
@@ -247,7 +253,7 @@ test("a materially deflating k̂ re-anchors the baseline onto the calibrated sca
 
     // T2 — provider reports ~60% of the estimate (the #267/#452 disease: the
     // local estimate carries ~1.6x phantom mass). First sample: no publish.
-    const t2 = [...t1, msg("e19", "assistant", "ack-2")];
+    const t2 = [...t1, msg("e19", "assistant", "ack-2", { input: Math.round(E * 0.6), cacheRead: 0, cacheWrite: 0 })];
     branchEntries = t2;
     await fire(handlers, t2, fakeCtx("khat-deflate", Math.round(E * 0.6)));
     assert.equal(await readBaseline(), E, "first deflating sample does not publish or re-anchor");
@@ -255,7 +261,7 @@ test("a materially deflating k̂ re-anchors the baseline onto the calibrated sca
     // T3 — second agreeing sample publishes k̂ ≈ 0.6: a material transition.
     // The baseline must re-anchor onto the calibrated scale so the following
     // growth is not read as a huge fake drop.
-    const t3 = [...t2, msg("e20", "assistant", "ack-3")];
+    const t3 = [...t2, msg("e20", "assistant", "ack-3", { input: Math.round(E * 0.62), cacheRead: 0, cacheWrite: 0 })];
     branchEntries = t3;
     await fire(handlers, t3, fakeCtx("khat-deflate", Math.round(E * 0.62)));
     const B3 = await readBaseline();
