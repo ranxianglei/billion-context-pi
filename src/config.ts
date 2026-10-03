@@ -1,4 +1,4 @@
-import { defaultConfig, type Config, type Prompts } from "acp-kernel";
+import { defaultConfig, type Config, type PriceProfile, type Prompts } from "acp-kernel";
 import type { CompressReasoningConfig } from "./reasoning-drop.js";
 import type { DegenerationGuardConfig } from "./degeneration.js";
 import type { ThrottleRetryConfig } from "./throttle-retry.js";
@@ -338,6 +338,18 @@ export interface AdapterConfig {
    *  multi-session hosts (Prime RLM & co.) whose injected agent messages must
    *  delimit real turns. See docs/host-adapter.md. */
   hostSession?: boolean | HostSessionConfig;
+  /** [#529] Price profile for the standalone `acp_cache` report's fold
+   *  economics (same hardcoding class as bili #1279). Normalized multipliers
+   *  over the input-token unit (p_in = 1): w = cacheWrite/input, r = cacheRead/input,
+   *  q = output/input — e.g. Anthropic ≈ {w:1, r:0.1, q:4} (the kernel default),
+   *  DeepSeek-V3 ≈ {w:1, r:0.1, q:1.5}. Drives ONLY the per-fold oneTimeCostUnits /
+   *  breakevenTurns / paidBack verdicts — never compression triggers, cadence, or
+   *  wire behavior. Each unset field falls back to the kernel default (w=1, r=0.1,
+   *  q=4); a fully absent key yields byte-identical reports. Set via acp.json
+   *  (project-local overrides global); validated in applyUserConfig — finite
+   *  numbers >= 0, unknown subkeys ignored, malformed value rejects the whole
+   *  block with a loud warning. */
+  priceProfile?: PriceProfile;
   /** Persistent-rules feature gate (#526): opt-in `rules: true` in acp.json.
    *  Gates the human `/acp-rule` command (list + record + remove + clear — kernel
    *  `listRules`/`addRule`/`removeRule`/`clearRules` against the session `.acp.json` sidecar state) and
