@@ -31,6 +31,7 @@ const {
   setInstalledSpecForTest,
   autoInstallLatest,
   isVersionNewer,
+  versionSatisfiesSpec,
   specUpdateTag,
   isAutoUpdatableSpec,
   runNpm,
@@ -502,4 +503,300 @@ test("checkForUpdate: read-only marker present → skips npm view entirely + not
   assert.equal(npmCalls, 0, "no npm view when the install location is read-only");
   assert.equal(notes.length, 1, "notify emitted once per process, not once per check");
   assert.match(notes[0], /npm i -g billion-context-pi/);
+});
+
+// --- lockfile sync + spec-range gate (issue #584) ---
+
+const FAKE_TARBALL = (v: string) =>
+  `https://registry.npmjs.org/billion-context-pi/-/billion-context-pi-${v}.tgz`;
+const FAKE_INTEGRITY = (v: string) => `sha512-fake-${v}`;
+
+// Host project files as pi's managed npm dir has them: package.json declares
+// the spec, package-lock.json pins the CURRENTLY INSTALLED version.
+function writeHostLock(fx: Fixture, spec: string, lockedVersion: string): void {
+  writeFileSync(
+    join(fx.root, "package.json"),
+    JSON.stringify(
+      { name: "host", private: true, dependencies: { "billion-context-pi": spec } },
+      null,
+      2,
+    ),
+  );
+  writeFileSync(
+    join(fx.root, "package-lock.json"),
+    JSON.stringify(
+      {
+        name: "host",
+        lockfileVersion: 3,
+        packages: {
+          "": { name: "host", dependencies: { "billion-context-pi": spec } },
+          [`node_modules/billion-context-pi`]: {
+            version: lockedVersion,
+            resolved: FAKE_TARBALL(lockedVersion),
+            integrity: FAKE_INTEGRITY(lockedVersion),
+          },
+        },
+      },
+      null,
+      2,
+    ),
+  );
+  writeFileSync(
+    join(fx.root, "node_modules", ".package-lock.json"),
+    JSON.stringify({ name: "", lockfileVersion: 3, packages: {} }, null, 2),
+  );
+}
+
+// Mirrors what real `npm install pkg@V --no-save` does to the tree: updates
+// node_modules/<pkg> AND node_modules/.package-lock.json — but NOT the root
+// package-lock.json (that staleness is exactly what issue #584 is about).
+function simulateNpmInstall(fx: Fixture, version: string, opts?: { brokenEntry?: boolean }): void {
+  fx.writeInstalled(version, opts);
+  const hiddenPath = join(fx.root, "node_modules", ".package-lock.json");
+  if (!existsSync(hiddenPath)) return;
+  const hidden = JSON.parse(readFileSync(hiddenPath, "utf-8")) as {
+    packages: Record<string, Record<string, unknown>>;
+  };
+  hidden.packages[`node_modules/billion-context-pi`] = {
+    name: "billion-context-pi",
+    version,
+    resolved: FAKE_TARBALL(version),
+    integrity: FAKE_INTEGRITY(version),
+  };
+  writeFileSync(hiddenPath, JSON.stringify(hidden, null, 2));
+}
+
+test("versionSatisfiesSpec judges range specs precisely (issue #584 range gate)", () => {
+  // caret: floor + upper bound
+  assert.equal(versionSatisfiesSpec("0.1.83", "^0.1.46"), true);
+  assert.equal(versionSatisfiesSpec("0.1.45", "^0.1.46"), false);
+  assert.equal(versionSatisfiesSpec("1.5.0", "^1.2.3"), true);
+  assert.equal(versionSatisfiesSpec("2.0.0", "^1.2.3"), false);
+  // npm 0.x caret rules: ^0.x caps minor, ^0.0.x caps patch (floor still applies)
+  assert.equal(versionSatisfiesSpec("0.2.9", "^0.2.3"), true);
+  assert.equal(versionSatisfiesSpec("0.3.0", "^0.2.3"), false);
+  assert.equal(versionSatisfiesSpec("0.0.3", "^0.0.3"), true);
+  assert.equal(versionSatisfiesSpec("0.0.4", "^0.0.3"), false);
+  // ^0.0.x caps at patch level: same-patch releases in higher minors/majors are out
+  assert.equal(versionSatisfiesSpec("0.1.3", "^0.0.3"), false);
+  assert.equal(versionSatisfiesSpec("1.0.3", "^0.0.3"), false);
+  // tilde: floor + minor cap
+  assert.equal(versionSatisfiesSpec("1.2.9", "~1.2.3"), true);
+  assert.equal(versionSatisfiesSpec("1.3.0", "~1.2.3"), false);
+  assert.equal(versionSatisfiesSpec("1.2.2", "~1.2.3"), false);
+  // comparators
+  assert.equal(versionSatisfiesSpec("2.0.0", ">=1.0.0"), true);
+  assert.equal(versionSatisfiesSpec("0.9.0", ">=1.0.0"), false);
+  assert.equal(versionSatisfiesSpec("1.0.1", ">1.0.0"), true);
+  assert.equal(versionSatisfiesSpec("1.0.0", ">1.0.0"), false);
+  assert.equal(versionSatisfiesSpec("1.0.0", "<=1.0.0"), true);
+  assert.equal(versionSatisfiesSpec("1.0.1", "<=1.0.0"), false);
+  assert.equal(versionSatisfiesSpec("0.9.0", "<1.0.0"), true);
+  assert.equal(versionSatisfiesSpec("1.0.0", "<1.0.0"), false);
+  // exact pin: only the pinned version itself survives a host reconcile
+  assert.equal(versionSatisfiesSpec("1.2.3", "1.2.3"), true);
+  assert.equal(versionSatisfiesSpec("1.2.4", "1.2.3"), false);
+  // tags are sticky in the lockfile → any version passes
+  assert.equal(versionSatisfiesSpec("2.0.0", "stable"), true);
+  assert.equal(versionSatisfiesSpec("2.0.0", "dev"), true);
+  assert.equal(versionSatisfiesSpec("2.0.0", "pr-327"), true);
+  assert.equal(versionSatisfiesSpec("2.0.0", "*"), true);
+  // prereleases never stick under non-prerelease specs (npm excludes them)
+  assert.equal(versionSatisfiesSpec("0.1.99-rc.1", "^0.1.0"), false);
+  assert.equal(versionSatisfiesSpec("0.2.0-beta.1", ">=0.1.0"), false);
+  // undecidable forms keep the legacy permissive behavior
+  assert.equal(versionSatisfiesSpec("9.9.9", "1.2.x"), true);
+  assert.equal(versionSatisfiesSpec("9.9.9", ">=1.0.0 <2.0.0"), true);
+  assert.equal(versionSatisfiesSpec("9.9.9", "1.0.0 - 2.0.0"), true);
+  assert.equal(versionSatisfiesSpec("9.9.9", "git+https://github.com/x/y.git"), true);
+});
+
+test("autoInstallLatest: ok → host package-lock.json entry synced to installed version (issue #584)", { timeout: 60_000 }, async () => {
+  const fx = makeFixture();
+  fx.writeInstalled("1.2.3");
+  writeHostLock(fx, "^1.0.0", "1.2.3");
+  const { impl, calls } = makeFakeNpm(
+    { code: 0, stdout: "", stderr: "" },
+    { code: 0, stdout: "", stderr: "" },
+  );
+  const impl2: NpmRunner = async (args, opts) => {
+    const res = await impl(args, opts);
+    if (args[0] === "install") simulateNpmInstall(fx, "9.9.9");
+    return res;
+  };
+  setRunNpmForTest(impl2);
+  setRunNodeForTest(runNode);
+  const outcome = await autoInstallLatest("9.9.9", fx.extDir);
+  assert.equal(outcome, "ok");
+  assert.ok(
+    calls.some((c) => c.args.includes("billion-context-pi@9.9.9") && c.args.includes("--no-save")),
+    "--no-save discipline preserved",
+  );
+  const lock = JSON.parse(readFileSync(join(fx.root, "package-lock.json"), "utf-8")) as {
+    packages: Record<string, { version: string; resolved?: string; integrity?: string }>;
+  };
+  const entry = lock.packages["node_modules/billion-context-pi"];
+  assert.equal(entry.version, "9.9.9");
+  assert.equal(entry.resolved, FAKE_TARBALL("9.9.9"));
+  assert.equal(entry.integrity, FAKE_INTEGRITY("9.9.9"));
+  // host-declared spec untouched
+  const hostPkg = JSON.parse(readFileSync(join(fx.root, "package.json"), "utf-8")) as {
+    dependencies: Record<string, string>;
+  };
+  assert.equal(hostPkg.dependencies["billion-context-pi"], "^1.0.0");
+  assert.match(readLog(), /event=lock-synced version=9\.9\.9/);
+  rmSync(fx.root, { recursive: true, force: true });
+});
+
+test("autoInstallLatest: rollback → host lockfile re-synced to the rolled-back version (issue #584)", { timeout: 60_000 }, async () => {
+  const fx = makeFixture();
+  fx.writeInstalled("1.2.3");
+  writeHostLock(fx, "^1.0.0", "1.2.3");
+  const { impl } = makeFakeNpm(
+    { code: 0, stdout: "", stderr: "" },
+    { code: 0, stdout: "", stderr: "" },
+  );
+  const impl2: NpmRunner = async (args, opts) => {
+    const res = await impl(args, opts);
+    if (args[0] === "install" && args[1]) {
+      if (args[1].includes("@9.9.9")) simulateNpmInstall(fx, "9.9.9", { brokenEntry: true });
+      else if (args[1].includes("@1.2.3")) simulateNpmInstall(fx, "1.2.3");
+    }
+    return res;
+  };
+  setRunNpmForTest(impl2);
+  setRunNodeForTest(runNode);
+  const outcome = await autoInstallLatest("9.9.9", fx.extDir);
+  assert.equal(outcome, "rolled-back");
+  const lock = JSON.parse(readFileSync(join(fx.root, "package-lock.json"), "utf-8")) as {
+    packages: Record<string, { version: string }>;
+  };
+  assert.equal(lock.packages["node_modules/billion-context-pi"].version, "1.2.3");
+  rmSync(fx.root, { recursive: true, force: true });
+});
+
+test("autoInstallLatest: missing host lockfile → ok, nothing created, no crash", { timeout: 60_000 }, async () => {
+  const fx = makeFixture();
+  fx.writeInstalled("1.2.3");
+  // no package-lock.json and no node_modules/.package-lock.json → the registry
+  // fallback below answers with empty stdout → meta unresolved → sync skipped
+  const { impl } = makeFakeNpm(
+    { code: 0, stdout: "", stderr: "" },
+    { code: 0, stdout: "", stderr: "" },
+  );
+  const impl2: NpmRunner = async (args, opts) => {
+    const res = await impl(args, opts);
+    if (args[0] === "install") fx.writeInstalled("9.9.9");
+    return res;
+  };
+  setRunNpmForTest(impl2);
+  setRunNodeForTest(runNode);
+  const outcome = await autoInstallLatest("9.9.9", fx.extDir);
+  assert.equal(outcome, "ok");
+  assert.ok(!existsSync(join(fx.root, "package-lock.json")));
+  assert.match(readLog(), /event=lock-sync-failed|event=lock-synced/); // either path is fine; crash is not
+  rmSync(fx.root, { recursive: true, force: true });
+});
+
+test("autoInstallLatest: hidden lock absent → registry dist query used for the lock entry", { timeout: 60_000 }, async () => {
+  const fx = makeFixture();
+  fx.writeInstalled("1.2.3");
+  writeHostLock(fx, "^1.0.0", "1.2.3");
+  rmSync(join(fx.root, "node_modules", ".package-lock.json"));
+  const impl2: NpmRunner = async (args) => {
+    if (args[0] === "install") {
+      fx.writeInstalled("9.9.9");
+      return { code: 0, stdout: "", stderr: "" };
+    }
+    if (args[0] === "view" && args.includes("--json")) {
+      return {
+        code: 0,
+        stdout: JSON.stringify({ tarball: FAKE_TARBALL("9.9.9"), integrity: FAKE_INTEGRITY("9.9.9") }),
+        stderr: "",
+      };
+    }
+    return { code: 0, stdout: "", stderr: "" };
+  };
+  setRunNpmForTest(impl2);
+  setRunNodeForTest(runNode);
+  const outcome = await autoInstallLatest("9.9.9", fx.extDir);
+  assert.equal(outcome, "ok");
+  const lock = JSON.parse(readFileSync(join(fx.root, "package-lock.json"), "utf-8")) as {
+    packages: Record<string, { version: string; resolved?: string; integrity?: string }>;
+  };
+  const entry = lock.packages["node_modules/billion-context-pi"];
+  assert.equal(entry.version, "9.9.9");
+  assert.equal(entry.resolved, FAKE_TARBALL("9.9.9"));
+  assert.equal(entry.integrity, FAKE_INTEGRITY("9.9.9"));
+  rmSync(fx.root, { recursive: true, force: true });
+});
+
+test("checkForUpdate: latest outside installed range → no auto-install, hint once per process (issue #584)", async () => {
+  resetThrottle();
+  resetUpdateStateForTest();
+  setInstalledSpecForTest("^1.0.0");
+  const { impl, calls } = makeFakeNpm(
+    { code: 0, stdout: "99.0.0\n", stderr: "" },
+    { code: 0, stdout: "", stderr: "" },
+  );
+  setRunNpmForTest(impl);
+  try {
+    const notes: string[] = [];
+    await checkForUpdate(true, (m) => notes.push(m));
+    assert.equal(calls.filter((c) => c.args[0] === "install").length, 0, "out-of-range version must never be auto-installed");
+    assert.equal(notes.length, 1);
+    assert.match(notes[0], /outside your installed spec \(\^1\.0\.0\)/);
+    assert.match(notes[0], /pi update --extension npm:billion-context-pi/);
+    assert.match(readLog(), /event=update-out-of-range latest=99\.0\.0/);
+    resetThrottle();
+    await checkForUpdate(true, (m) => notes.push(m));
+    assert.equal(notes.length, 1, "hint emitted once per process, not per throttled check");
+  } finally {
+    setInstalledSpecForTest(null);
+    resetUpdateStateForTest();
+  }
+});
+
+test("checkForUpdate: 0.x caret caps minor — 0.2.0 is out of range for ^0.1.0 (issue #584)", async () => {
+  resetThrottle();
+  resetUpdateStateForTest();
+  setInstalledSpecForTest("^0.1.0");
+  const { impl, calls } = makeFakeNpm(
+    { code: 0, stdout: "0.2.0\n", stderr: "" },
+    { code: 0, stdout: "", stderr: "" },
+  );
+  setRunNpmForTest(impl);
+  try {
+    const notes: string[] = [];
+    await checkForUpdate(true, (m) => notes.push(m));
+    assert.equal(calls.filter((c) => c.args[0] === "install").length, 0);
+    assert.equal(notes.length, 1);
+    assert.match(notes[0], /outside your installed spec \(\^0\.1\.0\)/);
+  } finally {
+    setInstalledSpecForTest(null);
+    resetUpdateStateForTest();
+  }
+});
+
+test("checkForUpdate: in-range latest still takes the normal update path (range gate does not over-block)", async () => {
+  resetThrottle();
+  resetUpdateStateForTest();
+  setInstalledSpecForTest("^0.1.0");
+  // 0.1.99 > REPO_VERSION (0.1.x) and inside ^0.1.0 → must NOT be gated out
+  const { impl } = makeFakeNpm(
+    { code: 0, stdout: "0.1.99\n", stderr: "" },
+    { code: 0, stdout: "", stderr: "" },
+  );
+  setRunNpmForTest(impl);
+  try {
+    const notes: string[] = [];
+    await checkForUpdate(true, (m) => notes.push(m));
+    assert.equal(notes.length, 1);
+    assert.ok(!notes[0].includes("outside your installed spec"), `unexpected out-of-range hint: ${notes[0]}`);
+    assert.match(notes[0], new RegExp(`billion-context-pi 0\\.1\\.99 available \\(you have ${REPO_VERSION}\\)`));
+    assert.match(readLog(), new RegExp(`event=check current=${REPO_VERSION} latest=0\\.1\\.99 hasUpdate=true`));
+  } finally {
+    setInstalledSpecForTest(null);
+    resetUpdateStateForTest();
+  }
 });

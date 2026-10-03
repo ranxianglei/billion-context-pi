@@ -1,0 +1,44 @@
+name: e2e-local-registry
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: e2e-registry-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e-registry:
+    name: hermetic registry e2e (local verdaccio; loopback only, zero secrets)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Run hermetic registry E2E
+        run: ACP_TEST_REGISTRY=1 node --import tsx --test tests/e2e/e2e-update.test.ts
+
+      - name: Collect E2E artifacts
+        if: failure()
+        run: |
+          mkdir -p tmp/e2e-artifacts
+          for d in tmp/e2e-update-*; do [ -d "$d" ] && cp -r "$d" tmp/e2e-artifacts/ || true; done
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: e2e-registry-artifacts
+          path: tmp/e2e-artifacts
+          if-no-files-found: ignore

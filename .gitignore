@@ -5,3 +5,4 @@ dist/
 *.acp.json
 .pi-subagents/
 tmp-debug.ts
+tmp/
