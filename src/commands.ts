@@ -6,7 +6,7 @@ import { exportSession, parseExportArgs } from "./export.js";
 import { defaultCountTokens, parseBlockIdArg, collectBlockContent, listRules, addRule, removeRule, clearRules, formatRulesList, resolveRuleLimits } from "acp-kernel";
 import { getSystemPromptText } from "./compat.js";
 import { collectCoveredMessageIds, estimateTokens, collectImageTokens, modelSupportsImages, adjustedTokenCount } from "./tokens.js";
-import { usageAnchorPredatesCompression } from "./floor-stale.js";
+import { compressionAnchorStaleness } from "./floor-stale.js";
 import { applyOutputHeadroom, resolveOutputHeadroomCap } from "./overflow-selfheal.js";
 import { buildStatusPanel } from "acp-kernel/panel";
 import { resolveSurfaceMeta } from "./prompt-pack.js";
@@ -312,7 +312,9 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
   // Use pi's real context usage (anchored on provider usage) only for the
   // panel's footer-scale display line; see sentTokens below for arbitration.
   const realUsage = ctx.getContextUsage?.();
-  const anchorStale = usageAnchorPredatesCompression(entries ?? []);
+  // #608: same host-reading selection as the live context hook (#601) — a failed latest assistant makes the host report the raw session-tree total.
+  const { predates, fresh, lastRealTokens } = compressionAnchorStaleness(entries ?? [], state.blocks, defaultCountTokens);
+  const trustedHost = fresh || lastRealTokens <= 0 ? (realUsage?.tokens ?? 0) : lastRealTokens;
 
   // Nudge arbitration on the SENT-VIEW scale — must match the context
   // transform and acp_status: sent-view estimate floored at the host's real
@@ -322,7 +324,7 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
   const imageTokens = collectImageTokens(entries, modelSupportsImages(ctx.model));
   const imageTokensTotal = [...imageTokens.values()].reduce((a, b) => a + b, 0);
   const thinkingTokensTotal = coreMessages.reduce((sum, m) => sum + (m.thinkingTokens ?? 0), 0);
-  const sessionTokens = !anchorStale && realUsage?.tokens && realUsage.tokens > 0 ? realUsage.tokens : defaultCountTokens(coreMessages.map((m) => m.text ?? "").join("\n")) + imageTokensTotal + thinkingTokensTotal;
+  const sessionTokens = !predates && trustedHost > 0 ? trustedHost : defaultCountTokens(coreMessages.map((m) => m.text ?? "").join("\n")) + imageTokensTotal + thinkingTokensTotal;
   const coveredIds = collectCoveredMessageIds(state);
   const sentTokens = estimateTokens(coreMessages, coveredIds, imageTokens) + systemPromptTokens;
   // View-based recount (issue #289): with active blocks the raw-view estimate
@@ -331,7 +333,7 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
   const viewSentTokens = adjustedTokenCount(runtime.core, coreMessages, state, config, sentTokens, imageTokens, systemPromptTokens);
   // issue #257: floor the meter at the host's real context usage so the
   // panel's nudge matches the real decision (same as src/index.ts).
-  const turn = runtime.core.processTurn({ messages: coreMessages, state, config, tokenCount: anchorStale ? viewSentTokens : Math.max(viewSentTokens, realUsage?.tokens ?? 0) });
+  const turn = runtime.core.processTurn({ messages: coreMessages, state, config, tokenCount: predates ? viewSentTokens : Math.max(viewSentTokens, trustedHost) });
 
   // Shared kit surface renders the panel (dual accounting, viability
   // filtering, bars, block list with topic fallback). Host-specific inputs:

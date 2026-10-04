@@ -5,7 +5,7 @@ import { applyToolPromptOverrides, type ToolPromptOverrides } from "./surface.js
 import { resolveSurfaceMeta } from "./prompt-pack.js";
 import { buildStatusReport, defaultCountTokens, formatRanges, viableRanges } from "acp-kernel";
 import { estimateTokens, collectCoveredMessageIds, collectImageTokens, modelSupportsImages, adjustedTokenCount } from "./tokens.js";
-import { usageAnchorPredatesCompression } from "./floor-stale.js";
+import { compressionAnchorStaleness } from "./floor-stale.js";
 import { applyOutputHeadroom, resolveOutputHeadroomCap } from "./overflow-selfheal.js";
 import { getSystemPromptText } from "./compat.js";
 import { logThrow } from "./log.js";
@@ -73,12 +73,14 @@ async function handleStatus(args: StatusArgs, runtime: AcpRuntime, ctx: Extensio
   // winning base.
   const viewSentTokens = adjustedTokenCount(runtime.core, coreMessages, state, config, sentTokens, imageTokens, systemPromptTokens);
   const providerReal = ctx.getContextUsage?.()?.tokens ?? 0;
-  const anchorStale = usageAnchorPredatesCompression(entries);
+  // #608: same host-reading selection as the live context hook (#601) — a failed latest assistant makes the host report the raw session-tree total.
+  const { predates, fresh, lastRealTokens } = compressionAnchorStaleness(entries, state.blocks, defaultCountTokens);
+  const trustedHost = fresh || lastRealTokens <= 0 ? providerReal : lastRealTokens;
   const turn = runtime.core.processTurn({
     messages: coreMessages,
     state,
     config,
-    tokenCount: anchorStale ? viewSentTokens : Math.max(viewSentTokens, providerReal),
+    tokenCount: predates ? viewSentTokens : Math.max(viewSentTokens, trustedHost),
   });
   const processed = turn.messages;
 
@@ -106,13 +108,15 @@ async function handleStatus(args: StatusArgs, runtime: AcpRuntime, ctx: Extensio
   const extra: string[] = [];
   // issue #257: side-by-side estimate vs provider-real so estimator drift is
   // visible at a glance (Estimate is the pre-floor sent-view meter).
-  if (providerReal > 0 && config.modelContextLimit > 0) {
+  if (trustedHost > 0 && config.modelContextLimit > 0) {
     const fmtK = (n: number): string => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
     const estPct = Math.round((viewSentTokens / config.modelContextLimit) * 100);
-    const realPct = Math.round((providerReal / config.modelContextLimit) * 100);
+    const realPct = Math.round((trustedHost / config.modelContextLimit) * 100);
+    // #608: with a failed latest assistant the shown number is the replayed last real reading, not a live provider report.
+    const realLabel = !fresh && lastRealTokens > 0 ? "Last valid usage" : "Provider-reported";
     extra.push("");
     extra.push(
-      `Estimate: ${fmtK(viewSentTokens)} (${estPct}%)   |   Provider-reported: ${fmtK(providerReal)} (${realPct}%)`,
+      `Estimate: ${fmtK(viewSentTokens)} (${estPct}%)   |   ${realLabel}: ${fmtK(trustedHost)} (${realPct}%)`,
     );
   }
   if (nudge) {
