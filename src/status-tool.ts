@@ -5,7 +5,7 @@ import { applyToolPromptOverrides, type ToolPromptOverrides } from "./surface.js
 import { resolveSurfaceMeta } from "./prompt-pack.js";
 import { buildStatusReport, defaultCountTokens, formatRanges, viableRanges } from "acp-kernel";
 import { estimateTokens, collectCoveredMessageIds, collectImageTokens, modelSupportsImages, adjustedTokenCount } from "./tokens.js";
-import { usageAnchorPredatesCompression } from "./floor-stale.js";
+import { compressionAnchorStaleness } from "./floor-stale.js";
 import { applyOutputHeadroom, resolveOutputHeadroomCap } from "./overflow-selfheal.js";
 import { getSystemPromptText } from "./compat.js";
 import { logThrow } from "./log.js";
@@ -72,8 +72,9 @@ async function handleStatus(args: StatusArgs, runtime: AcpRuntime, ctx: Extensio
   // arbitration as src/index.ts. The host floor (#257) applies on top of the
   // winning base.
   const viewSentTokens = adjustedTokenCount(runtime.core, coreMessages, state, config, sentTokens, imageTokens, systemPromptTokens);
-  const providerReal = ctx.getContextUsage?.()?.tokens ?? 0;
-  const anchorStale = usageAnchorPredatesCompression(entries);
+  const { predates: anchorStale, fresh, lastRealTokens } = compressionAnchorStaleness(entries, state.blocks, defaultCountTokens);
+  const reportedHost = ctx.getContextUsage?.()?.tokens ?? 0;
+  const providerReal = fresh || lastRealTokens <= 0 ? reportedHost : lastRealTokens;
   const turn = runtime.core.processTurn({
     messages: coreMessages,
     state,

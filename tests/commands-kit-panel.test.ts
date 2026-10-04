@@ -2,6 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { AcpRuntime } from "../src/runtime.js";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { createCore, createInitialState, defaultConfig } from "acp-kernel";
+import { makeStatusTool } from "../src/status-tool.js";
 
 // tsup defines CURRENT_VERSION at build time; under the node test runner it
 // is bare, so stub it before the module graph reads it.
@@ -158,6 +160,90 @@ test("/acp and /acp-status emit a persistent custom message via pi.sendMessage (
     assert.match(m.content, /Context \(session accounting, host footer scale\): 43%/, "panel text is the custom message content");
   }
 });
+
+// #608: status surfaces must reject the host's full-tree retry estimate, too.
+async function retryStatus(
+  surface: string,
+  messages: Array<Record<string, unknown>>,
+  reported = 174_000,
+  bulk = "request",
+) {
+  const observed: number[] = [];
+  const core = createCore();
+  const processTurn = core.processTurn;
+  core.processTurn = (input) => {
+    observed.push(input.tokenCount ?? 0);
+    return processTurn(input);
+  };
+  const state = createInitialState();
+  const runtime = {
+    adapter: {},
+    core,
+    configFor: () => defaultConfig(180_000),
+    stateFor: async () => ({
+      state,
+      coreMessages: [{ id: "u1", role: "user", contentType: "text", text: bulk }],
+      entries: messages.map((message, i) => ({ type: "message", id: `e${i}`, message })),
+    }),
+  } as unknown as AcpRuntime;
+  const notified: string[] = [];
+  const ctx = {
+    ui: { notify: (text: string) => notified.push(text) },
+    getContextUsage: () => ({ tokens: reported }),
+    model: { contextWindow: 180_000 },
+    sessionManager: { getSessionId: () => "status-retry", getSessionFile: () => undefined },
+  } as unknown as ExtensionCommandContext;
+  if (surface === "acp_status") {
+    const result = await makeStatusTool(runtime).execute("status", {}, undefined, undefined, ctx);
+    notified.push(result.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("\n"));
+  } else {
+    const cmd = makeCommands(runtime).find((command) => command.name === surface)!;
+    await cmd.options.handler!("", ctx);
+  }
+  return { text: notified.join("\n"), tokens: observed.at(-1)! };
+}
+
+const validUsage = { role: "assistant", content: "ok", usage: { input: 60_000, output: 0 } };
+
+for (const surface of ["acp_status", "acp", "acp-status"]) {
+  for (const failed of [
+    { stopReason: "error", usage: { input: 0 } },
+    { stopReason: "aborted", usage: { input: 174_000 } },
+    { usage: { input: 0 } },
+    {},
+  ]) {
+    test(`#608 ${surface} rejects retry inflation ${JSON.stringify(failed)}`, async () => {
+      const result = await retryStatus(surface, [validUsage, { role: "assistant", content: "failed", ...failed }]);
+      assert.equal(result.tokens, 60_000);
+      assert.doesNotMatch(result.text, /174k/);
+      assert.match(result.text, surface === "acp_status" ? /Provider-reported: 60\.0k/ : /60k \/ 180k/);
+    });
+  }
+
+  test(`#608 ${surface} preserves fresh host usage including trailing growth`, async () => {
+    const result = await retryStatus(surface, [validUsage], 63_000);
+    assert.equal(result.tokens, 63_000);
+  });
+
+  test(`#608 ${surface} preserves the no-anchor host fallback`, async () => {
+    const result = await retryStatus(surface, [{ role: "assistant", stopReason: "error" }]);
+    assert.equal(result.tokens, 174_000);
+  });
+
+  test(`#608 ${surface} keeps estimate growth above the old provider anchor`, async () => {
+    const result = await retryStatus(surface, [validUsage, { role: "assistant", stopReason: "error" }], 174_000, "x".repeat(280_000));
+    assert.ok(result.tokens > 60_000 && result.tokens < 174_000, String(result.tokens));
+  });
+
+  test(`#608 ${surface} keeps existing post-compression estimate behavior`, async () => {
+    const result = await retryStatus(surface, [validUsage, {
+      role: "toolResult", toolName: "compress", toolCallId: "c1",
+      content: [{ type: "text", text: "\u25a3 ACP | 42.3K → 18.9K tokens (~23.4K reclaimed, 3 blocks)" }],
+    }, { role: "assistant", stopReason: "error" }]);
+    assert.ok(result.tokens < 60_000, String(result.tokens));
+    if (surface !== "acp_status") assert.doesNotMatch(result.text, /60k \/ 180k/);
+  });
+}
 
 test("/acp falls back to notify when pi lacks sendMessage", async () => {
   const pi = {} as unknown as ExtensionAPI;
