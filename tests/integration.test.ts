@@ -670,6 +670,16 @@ test("omp keeps compression blocks active when provider context has an extra pre
     ctx,
   );
   assert.match(compressed.content[0].text, /blocks: b\d+=/);
+  // Real hosts always log the compress toolCall + toolResult; the #603
+  // branch-evidence gate keeps blocks whose creating call succeeded on this branch.
+  const compressTraffic = [
+    { role: "assistant", content: [{ type: "toolCall", id: "tc-omp-provider-prefix", name: "compress", arguments: {} }], timestamp: Date.now() },
+    { role: "toolResult", toolCallId: "tc-omp-provider-prefix", toolName: "compress", isError: false, content: compressed.content[0].text, timestamp: Date.now() },
+  ];
+  persisted.push(
+    { type: "message", id: "e-compress-call", parentId: null, timestamp: "", message: compressTraffic[0]! },
+    { type: "message", id: "e-compress-result", parentId: null, timestamp: "", message: compressTraffic[1]! },
+  );
 
   const next = await handlers.get("context")![0]!(
     {
@@ -677,13 +687,16 @@ test("omp keeps compression blocks active when provider context has an extra pre
       messages: [
         { role: "user", content: [{ type: "text", text: "provider-only context prefix" }], timestamp: Date.now() },
         ...texts.map((text) => ({ role: "user", content: [{ type: "text", text }], timestamp: Date.now() })),
+        ...compressTraffic,
       ],
     },
     ctx,
   );
   const saved = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
   assert.equal(saved.blocks[0].active, true, "the compressed block must remain active after the prefix");
-  assert.ok(next.messages.length < texts.length + 1, "covered messages must be replaced in provider context");
+  // 1 prefix + 5 uncovered texts + 2 compress-traffic messages at most; an
+  // unpruned view carries all 7 texts instead of 5.
+  assert.ok(next.messages.length < texts.length + 3, "covered messages must be replaced in provider context");
 });
 
 test("omp keeps compression active when persisted and provider tails diverge", async (t) => {
@@ -719,15 +732,27 @@ test("omp keeps compression active when persisted and provider tails diverge", a
     ctx,
   );
   assert.match(compressed.content[0].text, /blocks: b\d+=/);
+  // Real hosts always log the compress toolCall + toolResult; the #603
+  // branch-evidence gate keeps blocks whose creating call succeeded on this branch.
+  const compressTraffic = [
+    { role: "assistant", content: [{ type: "toolCall", id: "tc-omp-branch-divergence", name: "compress", arguments: {} }], timestamp: Date.now() },
+    { role: "toolResult", toolCallId: "tc-omp-branch-divergence", toolName: "compress", isError: false, content: compressed.content[0].text, timestamp: Date.now() },
+  ];
 
   const activeUserText = "current user on the active branch";
-  persisted = [...persisted, userMsg("e-active-user", activeUserText)];
+  persisted = [
+    ...persisted,
+    { type: "message", id: "e-compress-call", parentId: null, timestamp: "", message: compressTraffic[0]! },
+    { type: "message", id: "e-compress-result", parentId: null, timestamp: "", message: compressTraffic[1]! },
+    userMsg("e-active-user", activeUserText),
+  ];
   const divergent = await handlers.get("context")![0]!(
     {
       type: "context",
       messages: [
         { role: "user", content: [{ type: "text", text: "projected provider-only prefix" }], timestamp: Date.now() },
         ...liveCommon,
+        ...compressTraffic,
         { role: "assistant", content: [{ type: "text", text: "abandoned branch assistant tail" }], timestamp: Date.now() },
         { role: "user", content: [{ type: "text", text: activeUserText }], timestamp: Date.now() },
       ],
@@ -736,7 +761,9 @@ test("omp keeps compression active when persisted and provider tails diverge", a
   );
   const saved = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
   assert.equal(saved.blocks[0].active, true, "the compressed block must remain active across divergent branch tails");
-  assert.ok(divergent.messages.length < commonTexts.length + 3, "covered common messages must stay pruned");
+  // 1 prefix + 5 uncovered + 2 traffic + abandoned tail + active user at most;
+  // an unpruned view carries all 7 common texts instead of 5.
+  assert.ok(divergent.messages.length < commonTexts.length + 5, "covered common messages must stay pruned");
 });
 
 

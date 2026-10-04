@@ -129,6 +129,15 @@ async function setupLiveRefChild(dir: string) {
     const res = await compressTool.execute("tc1", { content: [{ startId: "m00008", endId: "m00010", summary: "Unpersisted fork-host live tail: three live-turn messages carrying LIVE-TAIL SECRET L1/L2/L3." }] }, undefined, undefined, parentCtx);
     const compressText = inlineText(res);
     assert.ok(!compressText.includes("does not exist") && !compressText.includes("REJECTED") && !compressText.includes("Errors:"), `compress over the live tail must succeed: ${compressText.slice(0, 300)}`);
+    // #603: real hosts log the compress toolCall + toolResult right after the
+    // call (still unpersisted while the tail is live) and flush them with the
+    // tail; the branch-evidence gate keeps blocks whose creating call
+    // succeeded on this branch.
+    const trafficRaw = [
+      { role: "assistant", content: [{ type: "toolCall", id: "tc1", name: "compress", arguments: {} }], timestamp: Date.now() },
+      { role: "toolResult", toolCallId: "tc1", toolName: "compress", isError: false, content: [{ type: "text", text: compressText }], timestamp: Date.now() },
+    ];
+    sendView.push(...trafficRaw);
 
     const sidecar = JSON.parse(await readFile(`${parentJsonl}.acp.json`, "utf8")) as any;
     const b1 = sidecar.blocks.find((b: any) => b.blockId === "b1");
@@ -150,7 +159,7 @@ async function setupLiveRefChild(dir: string) {
       "child sidecar must NOT inherit the working liveRefOrigins array (it feeds the child's own live-tail alignment)");
 
     return {
-      api, handlers, parentCtx, sendView, persisted, liveTail,
+      api, handlers, parentCtx, sendView, persisted, liveTail, trafficRaw,
       decompressTool: api.tools.find((t: any) => t.name === "decompress")!,
       childJsonl, childEntries, parentJsonl, b1,
     };
@@ -164,8 +173,12 @@ async function setupLiveRefChild(dir: string) {
  *  still unpersisted (hence live-* aliases in the block), then the host
  *  flushes the same content into the parent jsonl under real entry ids — the
  *  state at which the child's decompress must succeed. */
-async function flushParentTail(parentJsonl: string, persisted: any[], liveTail: any[]): Promise<any[]> {
-  const flushed = [...persisted, ...liveTail.map((e: any, i: number) => ({ ...e, id: `l${i + 1}` }))];
+async function flushParentTail(parentJsonl: string, persisted: any[], liveTail: any[], trafficRaws: any[] = []): Promise<any[]> {
+  const flushed = [
+    ...persisted,
+    ...liveTail.map((e: any, i: number) => ({ ...e, id: `l${i + 1}` })),
+    ...trafficRaws.map((m: any, i: number) => ({ type: "message", id: `l${liveTail.length + 1 + i}`, parentId: null, timestamp: "", message: m })),
+  ];
   await writeJsonl(parentJsonl, "parent-sid", flushed);
   return flushed;
 }
@@ -234,8 +247,8 @@ test("issue #579: self-level (depth-0) recovery — declaring session restores i
   const dir = tmpPath(`acp-liveref-self-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   await mkdir(dir, { recursive: true });
   try {
-    const { parentJsonl, persisted, liveTail } = await setupLiveRefChild(dir);
-    const flushed = await flushParentTail(parentJsonl, persisted, liveTail);
+    const { parentJsonl, persisted, liveTail, trafficRaw } = await setupLiveRefChild(dir);
+    const flushed = await flushParentTail(parentJsonl, persisted, liveTail, trafficRaw);
 
     const prevForkHost = process.env.PI_ACP_FORK_HOST;
     try {
@@ -261,8 +274,8 @@ test("issue #579 boundary: the first post-flush context fire consumes the bridge
   const dir = tmpPath(`acp-liveref-boundary-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   await mkdir(dir, { recursive: true });
   try {
-    const { parentJsonl, persisted, liveTail } = await setupLiveRefChild(dir);
-    const flushed = await flushParentTail(parentJsonl, persisted, liveTail);
+    const { parentJsonl, persisted, liveTail, trafficRaw } = await setupLiveRefChild(dir);
+    const flushed = await flushParentTail(parentJsonl, persisted, liveTail, trafficRaw);
 
     const prevForkHost = process.env.PI_ACP_FORK_HOST;
     try {

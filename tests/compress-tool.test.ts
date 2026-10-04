@@ -28,6 +28,16 @@ function userMsg(id: string, text: string) {
   return { type: "message", id, parentId: null, timestamp: "", message: { role: "user", content: text, timestamp: Date.now() } };
 }
 
+// Real hosts log each compress toolCall + result into the branch right after
+// execution; the #603 evidence gate drops stored blocks whose creating call is
+// absent, so multi-round fixtures record that traffic here.
+function compressTraffic(callId: string, resultText: string): any[] {
+  return [
+    { type: "message", id: `e-call-${callId}`, parentId: null, timestamp: "", message: { role: "assistant", content: [{ type: "toolCall", id: callId, name: "compress", arguments: {} }], timestamp: Date.now() } },
+    { type: "message", id: `e-result-${callId}`, parentId: null, timestamp: "", message: { role: "toolResult", toolCallId: callId, toolName: "compress", isError: false, content: resultText, timestamp: Date.now() } },
+  ];
+}
+
 function fakeCtx(entries: any[], stateFile: string) {
   let usage: { tokens: number; percent: number } | null = null;
   return {
@@ -110,6 +120,7 @@ test("compress afterTokens is measured on the same sent-view scale as beforeToke
   }
 
   const first = await doCompress("tc1", { startId: "m00001", endId: "m00001", summary: "中".repeat(300) });
+  entries.push(...compressTraffic("tc1", first)); // #603 evidence for b1 before tc2's stateFor
   const text = await doCompress("tc2", { startId: "m00003", endId: "m00003", summary: "文".repeat(300) });
 
   assert.ok(first.includes("▣ ACP") && !first.includes("Errors:"), `tc1 not compressed — guard would be vacuous: ${first}`);
@@ -208,6 +219,7 @@ test("compress in an in-memory session (no session file) survives to the next co
   assert.ok(first.includes("▣ ACP"), `first compress failed: ${first}`);
   assert.ok(!first.includes("Errors:"), `first compress rejected: ${first}`);
 
+  entries.push(...compressTraffic("tc1", first)); // #603 evidence for b1 before the next round's stateFor
   await runContextRound(handlers, ctx); // next turn — the bug lost state here
 
   let report = await statusText();
@@ -217,6 +229,7 @@ test("compress in an in-memory session (no session file) survives to the next co
   assert.ok(second.includes("▣ ACP"), `second compress failed: ${second}`);
   assert.ok(!second.includes("Errors:"), `second compress rejected: ${second}`);
 
+  entries.push(...compressTraffic("tc2", second)); // #603 evidence for b2 before status reads state
   report = await statusText();
   assert.match(report, /b1 \(T1\)/, `b1 must survive after the second compress: ${report}`);
   assert.match(report, /b2 \(T1\)/, `second block must be numbered b2 (nextBlockId retained), not reset to b1: ${report}`);
@@ -279,6 +292,8 @@ test("partial compress panel lists only the created blocks accurately (#376)", a
 
   const first = await doCompress("tc1", [{ startId: "m00001", endId: "m00001", summary: "first range for the partial span reporting regression test" }]);
   assert.ok(first.includes("blocks: b1="), `first compress missing span clause: ${first}`);
+
+  entries.push(...compressTraffic("tc1", first)); // #603 keeps b1 active so tc2's duplicate range is rejected
 
   const partial = await doCompress("tc2", [
     { startId: "m00001", endId: "m00001", summary: "duplicate range that must be rejected because already compressed" },
@@ -397,6 +412,7 @@ test("compress success result lists remaining compressible ranges, then goes qui
   );
   assert.ok(first.includes("m00002"), `snapshot must list the untouched range m00002: ${first}`);
 
+  entries.push(...compressTraffic("tc1", first)); // #603 keeps e1 covered so tc2's snapshot goes quiet
   await runContextRound(handlers, ctx);
   const second = await doCompress("tc2", { startId: "m00002", endId: "m00003", summary: "second block: everything remaining folded in this range so the snapshot must go quiet" });
   assert.ok(second.includes("▣ ACP"), `second compress failed: ${second}`);
@@ -504,6 +520,8 @@ test("in-place refold of a non-tail block: span clause and fingerprint reference
   );
   const t1 = typeof out1 === "string" ? out1 : out1.content?.[0]?.text ?? String(out1);
   assert.ok(t1.includes("▣ ACP") && !t1.includes("Errors:"), `setup compress failed: ${t1}`);
+
+  entries.push(...compressTraffic("tc1", t1)); // #603 keeps b1/b2 so tc3 refolds b1 in place
 
   await decompressTool.execute("tc2", { blockId: "b1", inline: true }, undefined, undefined, ctx);
 
