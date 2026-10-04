@@ -1,4 +1,4 @@
-import { readFile, writeFile, mkdir, access } from "node:fs/promises";
+import { readFile, writeFile, mkdir, access, rename } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
@@ -155,36 +155,103 @@ function isDistTag(value: string): boolean {
   return true;
 }
 
+// -1 / 0 / 1 comparison of two parsed versions: numeric segments first, then
+// semver prerelease rules (no-pre > pre; numeric identifiers < alphanumeric).
+function compareSemVer(
+  a: { parts: number[]; pre: string[] },
+  b: { parts: number[]; pre: string[] },
+): number {
+  for (let i = 0; i < 3; i++) {
+    const x = a.parts[i] ?? 0;
+    const y = b.parts[i] ?? 0;
+    if (x !== y) return x > y ? 1 : -1;
+  }
+  if (!a.pre.length && !b.pre.length) return 0;
+  if (!a.pre.length) return 1;
+  if (!b.pre.length) return -1;
+  for (let i = 0; i < Math.max(a.pre.length, b.pre.length); i++) {
+    const x = a.pre[i];
+    const y = b.pre[i];
+    if (x === undefined) return -1;
+    if (y === undefined) return 1;
+    if (x === y) continue;
+
+    const xNumber = /^\d+$/.test(x) ? Number(x) : undefined;
+    const yNumber = /^\d+$/.test(y) ? Number(y) : undefined;
+    if (xNumber !== undefined && yNumber !== undefined) return xNumber > yNumber ? 1 : -1;
+    if (xNumber !== undefined) return -1;
+    if (yNumber !== undefined) return 1;
+    return x > y ? 1 : -1;
+  }
+  return 0;
+}
+
 export function isVersionNewer(latest: string, current: string): boolean {
   const next = parseSemVer(latest);
   const prev = parseSemVer(current);
   if (!next || !prev) return false;
+  return compareSemVer(next, prev) > 0;
+}
 
-  for (let i = 0; i < 3; i++) {
-    const a = next.parts[i] ?? 0;
-    const b = prev.parts[i] ?? 0;
-    if (a !== b) return a > b;
+// Can `version` STICK after an auto-install under the host-declared `spec`?
+// The host (pi) reconciles node_modules against package.json + package-lock.json
+// on every start; any version outside the declared range gets reverted by that
+// reconcile, so auto-installing it can never be stable — it just loops the
+// "auto-updated X → Y" toast forever (issue #584). Conservative on purpose:
+// only forms we can judge precisely gate the install; anything undecidable
+// returns true and keeps the legacy behavior.
+export function versionSatisfiesSpec(version: string, spec: string): boolean {
+  const value = spec.trim();
+  if (!value || value === "*") return true;
+  // Tag installs are sticky in the lockfile (npm does not re-resolve them),
+  // so the channel-following design holds across any version jump.
+  if (isDistTag(value)) return true;
+  const v = parseSemVer(version);
+  if (!v) return true;
+  // npm excludes prerelease versions from ranges whose comparators carry no
+  // prerelease; refusing them here is always safe (worst case: the user stays
+  // put and gets the manual-update hint).
+  if (v.pre.length > 0) return false;
+  const vmaj = v.parts[0] ?? 0;
+  const vmin = v.parts[1] ?? 0;
+  const vpat = v.parts[2] ?? 0;
+  let base: { parts: number[]; pre: string[] } | undefined;
+  let bound: "major" | "minor" | "patch";
+  if (value.startsWith("^")) {
+    base = parseSemVer(value.slice(1));
+    if (!base) return true; // partial caret (^1.2): undecidable
+    // npm caret upper bound: ^1.x caps major, ^0.x caps minor, ^0.0.x caps patch
+    bound = (base.parts[0] ?? 0) > 0 ? "major" : (base.parts[1] ?? 0) > 0 ? "minor" : "patch";
+  } else if (value.startsWith("~")) {
+    base = parseSemVer(value.slice(1));
+    if (!base) return true; // partial tilde (~1.2): undecidable
+    bound = "minor";
+  } else if (value.startsWith(">=")) {
+    base = parseSemVer(value.slice(2));
+    return base ? compareSemVer(v, base) >= 0 : true;
+  } else if (value.startsWith("<=")) {
+    base = parseSemVer(value.slice(2));
+    return base ? compareSemVer(v, base) <= 0 : true;
+  } else if (value.startsWith(">")) {
+    base = parseSemVer(value.slice(1));
+    return base ? compareSemVer(v, base) > 0 : true;
+  } else if (value.startsWith("<")) {
+    base = parseSemVer(value.slice(1));
+    return base ? compareSemVer(v, base) < 0 : true;
+  } else if (SEMVER_RE.test(value)) {
+    base = parseSemVer(value);
+    // Exact pin: only the pinned version itself survives a host reconcile.
+    return base ? compareSemVer(v, base) === 0 : true;
+  } else {
+    return true; // compound/hyphen/x-range/git/url/file: undecidable
   }
-
-  if (!next.pre.length && prev.pre.length) return true;
-  if (next.pre.length && !prev.pre.length) return false;
-
-  for (let i = 0; i < Math.max(next.pre.length, prev.pre.length); i++) {
-    const a = next.pre[i];
-    const b = prev.pre[i];
-    if (a === undefined) return false;
-    if (b === undefined) return true;
-    if (a === b) continue;
-
-    const aNumber = /^\d+$/.test(a) ? Number(a) : undefined;
-    const bNumber = /^\d+$/.test(b) ? Number(b) : undefined;
-    if (aNumber !== undefined && bNumber !== undefined) return aNumber > bNumber;
-    if (aNumber !== undefined) return false;
-    if (bNumber !== undefined) return true;
-    return a > b;
-  }
-
-  return false;
+  if (compareSemVer(v, base) < 0) return false;
+  const bmaj = base.parts[0] ?? 0;
+  const bmin = base.parts[1] ?? 0;
+  const bpat = base.parts[2] ?? 0;
+  if (bound === "major") return vmaj === bmaj;
+  if (bound === "minor") return vmaj === bmaj && vmin === bmin;
+  return vmaj === bmaj && vmin === bmin && vpat === bpat;
 }
 
 function parseSemVer(version: string): { parts: number[]; pre: string[] } | undefined {
@@ -325,6 +392,85 @@ export async function verifyInstall(
   return { ok: true };
 }
 
+// Meta (resolved/integrity) of the freshly installed tree entry as npm itself
+// recorded it. --no-save leaves the host's package-lock.json stale, but
+// node_modules/.package-lock.json always mirrors the real tree; that is the
+// authoritative source for patching the root lock. The registry query is only
+// a fallback for exotic layouts where the hidden lock is absent.
+async function installedTreeMeta(
+  npmDir: string,
+  version: string,
+): Promise<{ resolved?: string; integrity?: string } | undefined> {
+  try {
+    const hiddenRaw = await readFile(join(npmDir, "node_modules", ".package-lock.json"), "utf-8");
+    const hidden = JSON.parse(hiddenRaw) as {
+      packages?: Record<string, { version?: string; resolved?: string; integrity?: string }>;
+    };
+    const entry = hidden.packages?.[`node_modules/${PACKAGE_NAME}`];
+    if (entry?.version === version) {
+      return {
+        resolved: typeof entry.resolved === "string" ? entry.resolved : undefined,
+        integrity: typeof entry.integrity === "string" ? entry.integrity : undefined,
+      };
+    }
+  } catch {
+    // fall through to the registry query
+  }
+  try {
+    const { code, stdout } = await runNpmImpl(
+      ["view", `${PACKAGE_NAME}@${version}`, "dist", "--json"],
+      { timeout: 20_000 },
+    );
+    if (code === 0) {
+      const dist = JSON.parse(stdout.trim()) as { tarball?: unknown; integrity?: unknown };
+      if (typeof dist.tarball === "string") {
+        return {
+          resolved: dist.tarball,
+          integrity: typeof dist.integrity === "string" ? dist.integrity : undefined,
+        };
+      }
+    }
+  } catch {
+    // best-effort
+  }
+  return undefined;
+}
+
+// Re-point the host lockfile's billion-context-pi entry at the installed
+// version. Without this, the host's start-time `npm install --prefix <root>`
+// treats the stale entry as truth and reverts node_modules to the old version,
+// which makes the next check see the old version again and re-update: an
+// infinite "ACP auto-updated X → Y" loop (issue #584). Best-effort by design:
+// a failure degrades to the legacy oscillation, never bricks the update.
+async function syncLockEntry(npmDir: string, version: string): Promise<void> {
+  try {
+    const meta = await installedTreeMeta(npmDir, version);
+    if (!meta) return;
+    const lockPath = join(npmDir, "package-lock.json");
+    const lock = JSON.parse(await readFile(lockPath, "utf-8")) as {
+      packages?: Record<string, Record<string, unknown>>;
+      dependencies?: Record<string, Record<string, unknown>>;
+    };
+    const entry =
+      lock.packages?.[`node_modules/${PACKAGE_NAME}`] ??
+      lock.dependencies?.[PACKAGE_NAME]; // lockfileVersion 1 fallback
+    if (!entry) return;
+    entry.version = version;
+    if (meta.resolved) entry.resolved = meta.resolved;
+    if (meta.integrity) entry.integrity = meta.integrity;
+    const tmp = `${lockPath}.${process.pid}.tmp`;
+    await writeFile(tmp, JSON.stringify(lock, null, 2) + "\n", "utf-8");
+    await rename(tmp, lockPath);
+    logInfo("update", { event: "lock-synced", version });
+  } catch (e) {
+    logWarn("update", {
+      event: "lock-sync-failed",
+      version,
+      error: e instanceof Error ? e.message : String(e),
+    });
+  }
+}
+
 // extDirOverride exists so tests can point the installer at a fixture layout
 // (the test runner itself is never under node_modules, so the real discovery
 // always bails at "not-under-node-modules" and the install path would be
@@ -382,8 +528,10 @@ export async function autoInstallLatest(latest: string, extDirOverride?: string)
       logWarn("update", { event: "auto-install-verify-failed", latest, reason: verify.reason, rollbackTo });
       const rb = await runNpmImpl(installArgs(rollbackTo), { cwd: npmDir, timeout: 60_000 });
       logInfo("update", { event: "rollback", from: latest, to: rollbackTo, ok: rb.code === 0 });
+      if (rb.code === 0) await syncLockEntry(npmDir, rollbackTo);
       return "rolled-back";
     }
+    await syncLockEntry(npmDir, latest);
     return "ok";
   } catch (e) {
     logWarn("update", {
@@ -487,16 +635,24 @@ export async function checkForUpdate(
     if (!latest) return;
 
     const current = runtimeVersion ?? CURRENT_VERSION;
-    const hasUpdate = isVersionNewer(latest, current);
+    // A newer version outside the installed spec's range can never stick: the
+    // host reconciles node_modules against package.json + lock on every start
+    // and would revert it, looping the auto-update forever (issue #584). Skip
+    // the install and tell the user once per process instead.
+    const inRange = !spec || versionSatisfiesSpec(latest, spec);
+    const hasUpdate = isVersionNewer(latest, current) && inRange;
     debug.event("update-check", {
       current,
       latest,
       tag,
       hasUpdate,
+      inRange,
     });
     logInfo("update", { event: "check", current, latest, hasUpdate });
 
-    if (hasUpdate) {
+    if (!inRange && isVersionNewer(latest, current)) {
+      notifyOutOfRange(notify, latest, current, spec);
+    } else if (hasUpdate) {
       const outcome = await autoInstallLatest(latest, extDir);
       if (outcome === "read-only" && notify) {
         notifyReadOnly(notify);
@@ -536,8 +692,28 @@ function notifyReadOnly(notify?: (msg: string) => void): void {
       `To update run \`npm i -g ${PACKAGE_NAME}\`, or remove the global copy if you rely on pi's bundled install.\x1b[0m`,
   );
 }
+
+// Out-of-range latest is a standing condition (the user's declared range lags
+// the published line), so like the read-only hint it is emitted once per
+// process, not on every throttled check.
+let outOfRangeNotified = false;
+function notifyOutOfRange(
+  notify: ((msg: string) => void) | undefined,
+  latest: string,
+  current: string,
+  spec?: string,
+): void {
+  if (!notify || outOfRangeNotified) return;
+  outOfRangeNotified = true;
+  logInfo("update", { event: "update-out-of-range", latest, current, spec });
+  notify(
+    `\x1b[33m\u26a0 ACP ${latest} is outside your installed spec (${spec}) - auto-update skipped. ` +
+      `You have ${current}. To upgrade run \`pi update --extension npm:${PACKAGE_NAME}\`\x1b[0m`,
+  );
+}
 export function resetUpdateStateForTest(): void {
   readOnlyNotified = false;
+  outOfRangeNotified = false;
 }
 
 async function getRuntimeVersion(): Promise<string | undefined> {
