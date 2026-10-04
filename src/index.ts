@@ -477,25 +477,40 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
       // it (issue #325, floor-stale.ts) instead of skipping the floor entirely —
       // the skip dropped the meter onto the undercounting estimate (~70-80K low)
       // and the next fresh reading snapped it back into the emergency band.
-      const { predates, netReclaimed, fresh, lastRealTokens } = compressionAnchorStaleness(entries, state.blocks, defaultCountTokens);
+      const { predates, netReclaimed, fresh, lastRealTokens, trustedCeiling } = compressionAnchorStaleness(entries, state.blocks, defaultCountTokens);
       // issue #600: when the previous model turn yielded no fresh provider usage
       // (errored / aborted / zero-usage — e.g. a network "fetch failed"), the host's
       // getContextUsage() has no anchor and reports the raw session-tree total
       // (uncompressed, only grows). Flooring at that transient inflation drags the
       // raise-only meter into the emergency band and drives redundant compresses
       // (each "recovers" once a fresh reading lands). Reject it: floor at the last
-       // REAL provider reading instead, and suspend the downward calibration below —
-       // a stale reading must not cap the current estimate down, or growth since
-       // that reading would be hidden. Fresh turns take this path unchanged. With NO
-       // prior anchor at all nothing has ever been compressed, so the tree-sum carries
-       // no ACP inflation and IS the true size — keep trusting it (rejecting it would
-       // drop the floor to 0, blinding the meter and its terminal-escape backstop).
-       const reportedHost = realUsage?.tokens ?? 0;
-       const realPromptTokens = fresh || lastRealTokens <= 0 ? reportedHost : lastRealTokens;
-       if (!fresh && lastRealTokens > 0 && reportedHost > 0) {
+      // REAL provider reading instead, and suspend the downward calibration below —
+      // a stale reading must not cap the current estimate down, or growth since
+      // that reading would be hidden. Fresh turns take this path unchanged. With NO
+      // prior anchor at all nothing has ever been compressed, so the tree-sum carries
+      // no ACP inflation and IS the true size — keep trusting it (rejecting it would
+      // drop the floor to 0, blinding the meter and its terminal-escape backstop).
+      const reportedHost = realUsage?.tokens ?? 0;
+      const realPromptTokens = fresh || lastRealTokens <= 0 ? reportedHost : lastRealTokens;
+      if (!fresh && lastRealTokens > 0 && reportedHost > 0) {
         logInfo("turn", { sid, event: "host-tree-sum-rejected", reported: reportedHost, flooredAt: lastRealTokens });
       }
-      const hostFloor = realPromptTokens > 0 ? Math.max(0, realPromptTokens - (predates ? netReclaimed : 0)) : 0;
+      const rawHostFloor = realPromptTokens > 0 ? Math.max(0, realPromptTokens - (predates ? netReclaimed : 0)) : 0;
+      // issue #595: after a retry's context_edit the host abandons its provider
+      // usage anchor and reports a full-history fallback estimate (re-including
+      // ACP-folded content) — irreducibly larger than the compressed send view,
+      // which floored the meter into a false EMERGENCY (78k → 326k). Cap the floor
+      // at the measured anchor + trailing (+ images): an upper bound on the true
+      // request size, so the fallback estimate may raise the floor only as far as
+      // a real provider reading could. Genuine growth moves both sides together;
+      // with no anchor the prior behavior is untouched. On non-fresh turns (#600)
+      // the cap is a no-op: the meter already floors at lastRealTokens ≤ ceiling.
+      const imageTokenSum = [...imageTokens.values()].reduce((a, b) => a + b, 0);
+      const hostCeiling = trustedCeiling > 0 ? trustedCeiling + imageTokenSum : 0;
+      const hostFloor = hostCeiling > 0 ? Math.min(rawHostFloor, hostCeiling) : rawHostFloor;
+      if (hostFloor < rawHostFloor) {
+        logWarn("turn", { sid, event: "host-floor-capped", reason: "host-fallback-estimate", raw: rawHostFloor, capped: hostFloor, anchor: lastRealTokens, ceiling: hostCeiling, view: sentTokens });
+      }
       // Calibration anchor (issue #455): the estimate carries systematic phantom
       // mass (content counted locally that never goes on the wire) which the
       // raise-only floors below can never pull down — in #452 the meter ran

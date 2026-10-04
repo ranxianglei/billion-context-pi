@@ -181,6 +181,43 @@ test("staleness: sums multiple post-anchor blocks", () => {
   assert.equal(r.netReclaimed, 2990);
 });
 
+// issue #595: expose the provider-usage anchor total and an upper bound
+// (trustedCeiling) on the true request size, so the caller can cap the host
+// floor when getContextUsage() falls back to a full-history estimate.
+test("staleness: lastRealTokens = last valid usage; trustedCeiling = anchor + trailing", () => {
+  const entries = [
+    msg("e0", { role: "user", content: "go" }),
+    assistantUsage("e1"), // anchor: 175_000
+    msg("e2", { role: "toolResult", toolName: "read", toolCallId: "r", content: [{ type: "text", text: "abcd" }] }), // trailing 4
+    msg("e3", { role: "assistant", content: "", stopReason: "error" }), // failed → not an anchor
+  ];
+  const r = compressionAnchorStaleness(entries, [], ct);
+  assert.equal(r.lastRealTokens, 175_000);
+  assert.equal(r.trustedCeiling, 175_004); // 175_000 + len("abcd"); failed assistant adds 0
+  assert.equal(r.predates, false);
+});
+
+test("staleness: a failed assistant carrying a huge usage is not the anchor (#595)", () => {
+  const entries = [
+    msg("e0", { role: "user", content: "go" }),
+    assistantUsage("e1"), // 175_000 valid anchor
+    msg("e2", { role: "assistant", content: "", stopReason: "error", usage: { totalTokens: 326_774 } }),
+  ];
+  const r = compressionAnchorStaleness(entries, [], ct);
+  assert.equal(r.lastRealTokens, 175_000); // not the bogus 326_774
+  assert.equal(r.trustedCeiling, 175_000);
+});
+
+test("staleness: no valid anchor → lastRealTokens 0 and trustedCeiling 0 (caller keeps prior behavior)", () => {
+  const entries = [
+    msg("e0", { role: "user", content: "go" }),
+    msg("e1", { role: "assistant", content: "hi", stopReason: "error" }),
+  ];
+  const r = compressionAnchorStaleness(entries, [], ct);
+  assert.equal(r.lastRealTokens, 0);
+  assert.equal(r.trustedCeiling, 0);
+});
+
 test("freshness: latest assistant with usage → fresh, lastRealTokens = that usage", () => {
   const entries = [msg("e0", { role: "user", content: "go" }), assistantUsage("e1")];
   const r = compressionAnchorStaleness(entries, [], ct);

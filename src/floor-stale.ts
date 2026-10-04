@@ -98,6 +98,10 @@ export interface AnchorStaleness {
   fresh: boolean;
   // total tokens of the last valid usage anchor (0 if none); the real floor base
   lastRealTokens: number;
+  // issue #595: upper bound on the true current request size derivable WITHOUT
+  // trusting getContextUsage(): the measured anchor plus everything appended
+  // after it. 0 when there is no anchor to bound from (caller keeps prior behavior).
+  trustedCeiling: number;
 }
 
 // issue #325: flooring at a stale anchor's raw value re-fires a false EMERGENCY,
@@ -118,7 +122,24 @@ export function compressionAnchorStaleness(
     const saved = (block.compressedTokens ?? 0) - countTokens(block.summary ?? "");
     netReclaimed += saved > 0 ? saved : 0;
   }
+  // issue #595: when the host abandons its provider-usage anchor (a retry's
+  // context_edit invalidates it), getContextUsage() falls back to a full-history
+  // per-message estimate that re-includes ACP-folded content — irreducibly larger
+  // than the compressed send view. The measured anchor plus everything appended
+  // after it is an upper bound on the true request size; expose it so callers can
+  // cap the floor there instead of trusting the fallback estimate.
+  let trailingEstimate = 0;
+  for (let i = scan.lastUsageIdx + 1; i < entries.length; i++) {
+    const m = entries[i]!.message;
+    if (m && m.content != null) trailingEstimate += countTokens(extractText(m.content));
+  }
   const lastAssistant = scan.lastAssistantIdx >= 0 ? entries[scan.lastAssistantIdx] : undefined;
   const fresh = !!lastAssistant?.message && isFreshAnchor(lastAssistant.message);
-  return { predates: scan.lastCompressIdx > scan.lastUsageIdx, netReclaimed, fresh, lastRealTokens: scan.lastUsageTotal };
+  return {
+    predates: scan.lastCompressIdx > scan.lastUsageIdx,
+    netReclaimed,
+    fresh,
+    lastRealTokens: scan.lastUsageTotal,
+    trustedCeiling: scan.lastUsageTotal > 0 ? scan.lastUsageTotal + trailingEstimate : 0,
+  };
 }
