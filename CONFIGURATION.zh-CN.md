@@ -184,6 +184,7 @@
 | `compress.reasoning` | object | `{ "drop": true, "threshold": 2048 }` | 🟢 ACTIVE | 请求时丢弃历史 `compress` 调用上的超大思考（不修改持久化历史）。 |
 | `compress.stripImages` | boolean | `false` | 🟢 ACTIVE | **可选开启**：wire 层剥离历史图像载荷（issue #321）。为 `true` 时，除最近 `stripImagesKeepRecent` 条消息外，历史消息的图像部分在上游请求体中被剥离；纯图像消息折叠为 `"[image]"` 文本占位符。支持协议：anthropic-messages、openai-completions、openai-responses（含 azure/codex 变体）。 |
 | `compress.stripImagesKeepRecent` | number | `5` | 🟢 ACTIVE | `stripImages` 开启时保留图像载荷的最近消息条数。 |
+| `compress.nudgeLowEffort` | boolean | `false` | 🟡 实验 | **可选开启**：在压缩 nudge 回合的**第一个**响应上一次性降低模型思考/effort（#617/#1640）——携带新注入 nudge 的那个请求，其*已存在的* effort 字段被钳向 wire 下限，下一请求即恢复。针对写压缩摘要那一轮（思考型模型在此烧掉大量 reasoning 预算）。只降不升（绝不注入/抬高），且不破 prompt cache。支持协议：anthropic `thinking.budget_tokens`→1024、openai/responses `reasoning_effort`/`reasoning.effort`→low、gemini `thinkingBudget`→128。 |
 
 **prompts 键**
 

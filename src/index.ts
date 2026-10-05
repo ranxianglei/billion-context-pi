@@ -31,7 +31,8 @@ import { collapseAssistantDegeneration, degenerationNotice, lastAssistantRuns, r
 import { buildAcpSystemPrompt, ACP_DELEGATE_PROMPT } from "./system-prompt.js";
 import { delegateStatusWidget } from "./fleet-widget.js";
 import { openFleetInspector } from "./fleet-inspector.js";
-import { applyStripImages } from "./strip-images.js";
+import { apiToStripProtocol, applyStripImages } from "./strip-images.js";
+import { applyNudgeEffortClamp, nudgeLowEffortDecision } from "./nudge-low-effort.js";
 import { wireToolGuardrails } from "./tool-guardrails.js";
 import { debug, logError, logInfo, logWarn, logThrow, closeLogStream } from "./log.js";
 import { collectCoveredMessageIds, estimateTokens, collectImageTokens, modelSupportsImages, sentViewTokenCount, sentViewMeterMatches } from "./tokens.js";
@@ -377,29 +378,43 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
 // other one-shot warn flags (ompWarned, proxyStandDownWarned).
 let lastDegNoticeKey: string | null = null;
 
-// Opt-in wire-level strip of historical image payloads (issue #321, kernel
-// #215). pi serializes the provider request body from the (already transformed)
-// messages and fires before_provider_request with the RAW payload right before
-// the HTTP call — the same wire point the billion-context proxy strips at. We
-// only touch the body when the policy is enabled AND something was actually
-// removed; returning undefined keeps pi's payload reference untouched.
+// Wire-level request-body levers (issue #321, #617). pi serializes the provider
+// request body from the (already transformed) messages and fires
+// before_provider_request with the RAW payload right before the HTTP call — the
+// same wire point the billion-context proxy acts at. Two independent opt-in
+// levers run here: (1) strip historical image payloads (#321); (2) clamp the
+// thinking/effort field on the first compression-nudge turn (#617/#1640). Each
+// only mutates its own fields when enabled AND something actually changed; we
+// return undefined (pi's untouched payload reference) unless one of them did.
 function wireBeforeProviderRequest(pi: ExtensionAPI, runtime: AcpRuntime, standDownIfProxied: (ctx: ExtensionContext) => boolean): void {
   pi.on("before_provider_request", async (event, ctx) => {
     if (runtime.refused) return;
     if (standDownIfProxied(ctx)) return;
-    const settings = runtime.stripImagesFor(ctx);
-    if (!settings.enabled) return;
-    const outcome = applyStripImages(event.payload, (ctx.model as { api?: string } | undefined)?.api, settings);
-    if (outcome.removed > 0) {
-      logInfo("strip-images", {
-        sid: ctx.sessionManager.getSessionId(),
-        event: "stripped",
-        removed: outcome.removed,
-        keepRecent: settings.keepRecent,
-      });
-      return outcome.body;
+    const sid = ctx.sessionManager.getSessionId();
+    const api = (ctx.model as { api?: string } | undefined)?.api;
+    let body: unknown = event.payload;
+
+    const stripSettings = runtime.stripImagesFor(ctx);
+    if (stripSettings.enabled) {
+      const outcome = applyStripImages(body, api, stripSettings);
+      if (outcome.removed > 0 && outcome.body !== undefined) {
+        body = outcome.body;
+        logInfo("strip-images", { sid, event: "stripped", removed: outcome.removed, keepRecent: stripSettings.keepRecent });
+      }
     }
-    return;
+
+    const dec = nudgeLowEffortDecision(runtime.consumeNudgeInjected(sid), runtime.nudgeLowEffortPrevFor(sid), runtime.nudgeLowEffortFor(ctx));
+    runtime.setNudgeLowEffortPrev(sid, dec.nextPrev);
+    if (dec.clamp) {
+      const clamped = applyNudgeEffortClamp(body, apiToStripProtocol(api));
+      if (clamped.changed && clamped.body !== undefined) {
+        body = clamped.body;
+        logInfo("nudge-low-effort", { sid, event: "clamped" });
+      }
+    }
+
+    if (body === event.payload) return;
+    return body;
   });
 }
 
@@ -851,6 +866,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
       const alreadyShown = retryCapped || (!emergency && runtime.nudgeShownFor(sid, turnKey) && !reInjectReady);
       if (!alreadyShown) {
         rebuilt.push(nudgeMessage(turn.nudge, turn.state.blocks.filter((b) => b.active), runtime.prompts, activeNudgeSections(runtime, ctx)));
+        runtime.armNudgeInjected(sid);
         const rendered = renderNudgeText(turn.nudge, runtime.prompts, activeNudgeSections(runtime, ctx));
         const top = [...turn.nudge.compressibleRanges].sort((a, b) => b.tokens - a.tokens)[0];
         const example = top ? `\n\nExample: compress({ content: [{ startId: "${top.startRef}", endId: "${top.endRef}", summary: "..." }] })` : "";

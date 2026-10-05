@@ -185,6 +185,7 @@ All keys below are currently **ACTIVE**.
 | `compress.reasoning` | object | `{ "drop": true, "threshold": 2048 }` | 🟢 ACTIVE | Drop oversized thinking from historical `compress` calls (request-time; persisted history untouched). |
 | `compress.stripImages` | boolean | `false` | 🟢 ACTIVE | **Opt-in** wire-level strip of historical image payloads (issue #321). When `true`, every message older than the most recent `stripImagesKeepRecent` has its image parts dropped from the outbound provider body; image-only messages collapse to a `"[image]"` text placeholder. Supported wire dialects: anthropic-messages, openai-completions, openai-responses (incl. azure/codex variants). |
 | `compress.stripImagesKeepRecent` | number | `5` | 🟢 ACTIVE | How many of the most recent messages keep their image payloads when `stripImages` is on. |
+| `compress.nudgeLowEffort` | boolean | `false` | 🟡 EXPERIMENTAL | **Opt-in** one-shot lowering of the model's thinking/effort on the **first** turn of a compression-nudge episode (#617/#1640): the request carrying a freshly-injected nudge gets its *already-present* effort field clamped toward the wire floor, restored on the next request. Targets the summary-writing turn where thinking models burn a large reasoning budget. Clamp-only (never injects or raises a value) and prompt-cache-safe (effort sits outside the message prefix). Dialects: anthropic `thinking.budget_tokens`→1024, openai/responses `reasoning_effort`/`reasoning.effort`→low, gemini `thinkingBudget`→128. |
 
 **Prompts keys**
 
