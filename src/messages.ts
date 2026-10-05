@@ -350,10 +350,24 @@ export function coreOutToAgentMessages(
   const out: AgentMessage[] = [];
   const emittedSplit = new Set<string>();
   const kernelTextByCallId = new Map<string, string>();
+  // #602: precompute each split group's surviving tool-call ids in this same
+  // pass, so reconstruction below is an O(1) lookup instead of re-scanning
+  // coreOut per group (G groups × N cores = O(N²) on long multi-tool history).
+  const survivingCallsByBaseId = new Map<string, Set<string>>();
   for (const core of coreOut) {
     if (core.contentType === "tool-call" && core.toolCallId && core.text) {
       kernelTextByCallId.set(core.toolCallId, core.text);
     }
+    if (core.id.startsWith("acp_summary_")) continue;
+    const baseHashIdx = core.id.indexOf("#");
+    if (baseHashIdx < 0) continue;
+    const groupBaseId = core.id.substring(0, baseHashIdx);
+    let groupCalls = survivingCallsByBaseId.get(groupBaseId);
+    if (!groupCalls) {
+      groupCalls = new Set();
+      survivingCallsByBaseId.set(groupBaseId, groupCalls);
+    }
+    if (core.toolCallId) groupCalls.add(core.toolCallId);
   }
 
   for (const core of coreOut) {
@@ -373,12 +387,7 @@ export function coreOutToAgentMessages(
     const original = originalById.get(baseId);
     if (!original) continue;
 
-    const survivingCallIds = new Set(
-      coreOut
-        .filter((c) => c.id.startsWith(`${baseId}#`) && !c.id.startsWith("acp_summary_"))
-        .map((c) => c.toolCallId)
-        .filter((id): id is string => !!id),
-    );
+    const survivingCallIds = survivingCallsByBaseId.get(baseId) ?? new Set<string>();
 
     out.push(reconstructToolCallMessage(original, core, survivingCallIds, kernelTextByCallId));
   }
