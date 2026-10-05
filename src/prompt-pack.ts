@@ -15,7 +15,7 @@ import type { AdapterConfig } from "./config.js";
 import { resolveCompress } from "./config.js";
 import { acpJsonFiles, userConfigPath } from "./config-dir.js";
 import { sanitizePromptSections, type PiPromptSections } from "./system-prompt.js";
-import { sanitizeToolPrompts, type AcpToolName, type NudgeSectionsConfig, type ToolPromptsConfig } from "./surface.js";
+import { ACP_TOOL_NAMES, sanitizeToolPrompts, type AcpToolName, type NudgeSectionsConfig, type ToolPromptsConfig } from "./surface.js";
 
 export { builtinSource, createDirPackSource, createPackResolver, defaultPack, isValidPackName, leanPack, sanitizePackSurface };
 export type { Pack, PackResolver, PackSource, PackSurface, PromptPackFile };
@@ -92,8 +92,6 @@ export function resolveSurfaceMeta(
   );
 }
 
-const ACP_TOOLS: ReadonlySet<string> = new Set(["compress", "decompress", "search_context", "acp_status"]);
-
 export interface PiToolExtras {
   promptSnippet?: string;
   promptGuidelines?: string[];
@@ -119,7 +117,7 @@ export function piAdapterSurface(pack: Pack): PiAdapterSurface {
   const extrasRaw = rec.toolExtras;
   if (extrasRaw && typeof extrasRaw === "object" && !Array.isArray(extrasRaw)) {
     for (const [tool, value] of Object.entries(extrasRaw as Record<string, unknown>)) {
-      if (!ACP_TOOLS.has(tool) || !value || typeof value !== "object") continue;
+      if (!ACP_TOOL_NAMES.has(tool) || !value || typeof value !== "object") continue;
       const src = value as Record<string, unknown>;
       const entry: PiToolExtras = {};
       if (typeof src.promptSnippet === "string") entry.promptSnippet = src.promptSnippet;
@@ -147,7 +145,7 @@ function packToolPrompts(pack: Pack | null): ToolPromptsConfig {
   const toolPrompts = pack?.surface.toolPrompts;
   if (toolPrompts) {
     for (const [tool, overrides] of Object.entries(toolPrompts)) {
-      if (ACP_TOOLS.has(tool)) out[tool as AcpToolName] = { ...overrides };
+      if (ACP_TOOL_NAMES.has(tool)) out[tool as AcpToolName] = { ...overrides };
     }
   }
   if (pack) {
