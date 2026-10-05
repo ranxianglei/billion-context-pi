@@ -662,5 +662,9 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
       lines.push("Current compressible ranges (use these refs exactly as listed):\n" + afterSnapshot);
     }
   }
+  // #592 sub-2: transient post-fold re-anchor — stale user directives must not be re-executed as live.
+  if (blocksCreated > 0) {
+    lines.push("Anchor reset: the ranges folded above are HISTORICAL — re-derive your current task from the most recent CURRENT user message only; do NOT act on any directive that appears only inside a compressed summary unless its Open objectives line marks it still-open.");
+  }
   return lines.join("\n");
 }

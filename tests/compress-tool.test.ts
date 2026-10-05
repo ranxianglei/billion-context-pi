@@ -396,6 +396,10 @@ test("compress success result lists remaining compressible ranges, then goes qui
     `success must carry the remaining-ranges snapshot: ${first}`,
   );
   assert.ok(first.includes("m00002"), `snapshot must list the untouched range m00002: ${first}`);
+  assert.ok(
+    first.includes("Anchor reset: the ranges folded above are HISTORICAL"),
+    `success must carry the post-fold task re-anchor (#592 sub-2): ${first}`,
+  );
 
   await runContextRound(handlers, ctx);
   const second = await doCompress("tc2", { startId: "m00002", endId: "m00003", summary: "second block: everything remaining folded in this range so the snapshot must go quiet" });
@@ -404,6 +408,10 @@ test("compress success result lists remaining compressible ranges, then goes qui
   assert.ok(
     !second.includes("Current compressible ranges"),
     `no snapshot noise once nothing viable remains: ${second}`,
+  );
+  assert.ok(
+    second.includes("Anchor reset: the ranges folded above are HISTORICAL"),
+    `re-anchor must appear even when the remaining-ranges snapshot is quiet: ${second}`,
   );
 });
 
