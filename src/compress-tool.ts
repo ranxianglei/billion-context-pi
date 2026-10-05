@@ -82,11 +82,23 @@ type RangeEntry = Static<typeof RangeSpec>;
 // the failure cap (a returned string would land as isError:false and count
 // as neutral). An empty array passes through (the call site returns "No
 // ranges provided.").
+// Issue #621: the schema accepts the JSON-encoded form, so "[]" is the same
+// empty call as [] — including the occasionally double-encoded form. Decode at
+// most two levels; malformed JSON and non-empty invalid ranges keep the
+// existing error path below.
+function isEmptyContent(content: unknown): boolean {
+  let v = content;
+  for (let i = 0; i < 2 && typeof v === "string"; i++) {
+    try { v = JSON.parse(v); } catch { return false; }
+  }
+  return Array.isArray(v) && v.length === 0;
+}
+
 export function normalizeRanges(args: CompressArgs): RangeEntry[] | string {
   const effective = repairContentTail(repairBareRangeObjects(args));
   const { ranges, diagnostics } = parseCompressArgs(effective);
   if (ranges.length === 0) {
-    if (Array.isArray(effective.content) && effective.content.length === 0) return [];
+    if (isEmptyContent(effective.content)) return [];
     return describeDiagnostics(diagnostics, effective.content);
   }
   return ranges.map((r) => ({ startId: r.startRef, endId: r.endRef, summary: r.summary, topic: r.topic }));
