@@ -152,6 +152,15 @@ export interface CompressSettings {
   /** Token growth threshold for soft compression nudges. Default: 50000.
    *  Maps to kernel nudge.growthFloor + nudge.growthCap. */
   nudgeGrowthTokens?: number;
+  /** [#617/#1640] Opt-in one-shot lowering of the model's thinking/effort on
+   *  the FIRST turn of a compression-nudge episode — clamp the already-present
+   *  effort field toward the wire floor for that one request, restore next.
+   *  Targets the summary-writing turn where thinking models burn a large
+   *  reasoning budget. Host-side lever only (NOT part of the kernel Config).
+   *  Default: false (byte-for-byte unchanged unless enabled). Clamp-only and
+   *  prompt-cache-safe (effort sits outside the message prefix). See
+   *  src/nudge-low-effort.ts. */
+  nudgeLowEffort?: boolean;
   /** Minimum reclaimable tokens for a pressure-band nudge (kernel #198).
    *  Default: max(5000, round(limit×0.01)). Explicit 0 restores the legacy
    *  any-pending behavior — useful for tiny windows (e.g. e2e scenarios with
@@ -562,6 +571,7 @@ export function mergeCompress(
     maxContextLimit: model?.maxContextLimit ?? provider?.maxContextLimit ?? global?.maxContextLimit,
     emergencyThresholdPercent: model?.emergencyThresholdPercent ?? provider?.emergencyThresholdPercent ?? global?.emergencyThresholdPercent,
     nudgeGrowthTokens: model?.nudgeGrowthTokens ?? provider?.nudgeGrowthTokens ?? global?.nudgeGrowthTokens,
+    nudgeLowEffort: model?.nudgeLowEffort ?? provider?.nudgeLowEffort ?? global?.nudgeLowEffort,
     minPressureBenefitTokens: model?.minPressureBenefitTokens ?? provider?.minPressureBenefitTokens ?? global?.minPressureBenefitTokens,
     reasoning: {
       drop: model?.reasoning?.drop ?? provider?.reasoning?.drop ?? global?.reasoning?.drop,

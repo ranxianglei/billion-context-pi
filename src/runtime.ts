@@ -149,6 +149,18 @@ export interface AcpRuntime {
   /** Effective historical-image strip policy for the active model (issue #321).
    *  Host-side policy — deliberately NOT part of the kernel Config object. */
   stripImagesFor(ctx: ExtensionContext): { enabled: boolean; keepRecent: number };
+  /** Effective opt-in one-shot nudge low-effort flag for the active model
+   *  (#617/#1640). Host-side lever — deliberately NOT part of the kernel Config. */
+  nudgeLowEffortFor(ctx: ExtensionContext): boolean;
+  /** Arm the per-session "a fresh nudge was just injected" signal. Set by the
+   *  context transform at the nudge-push site; consumed once by
+   *  before_provider_request. */
+  armNudgeInjected(sid: string): void;
+  /** Consume (read + clear) the pending fresh-nudge signal for this request. */
+  consumeNudgeInjected(sid: string): boolean;
+  /** Prior request's injected flag for the one-shot decision (per-session). */
+  nudgeLowEffortPrevFor(sid: string): boolean;
+  setNudgeLowEffortPrev(sid: string, v: boolean): void;
   /** Re-read ~/.<dir>/acp.json + <cwd>/<dir>/acp.json and re-derive the adapter
    *  config when the contents change. Cheap no-op when unchanged. Called at
    *  session_start and on every context event so config edits apply live. */
@@ -391,6 +403,12 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   let promptsRef: Prompts = defaultPrompts;
   const nudgeShownTurns = new Map<string, Set<string>>();
   const nudgeShownTokens = new Map<string, Map<string, number>>();
+  // #617/#1640 one-shot nudge low-effort tracking: `pendingInject` is armed by
+  // the context transform when a fresh nudge is pushed and consumed once by
+  // before_provider_request; `prevMap` holds the last request's injected flag so
+  // a deferred nudge re-sent on consecutive turns doesn't re-clamp.
+  const nudgePendingInject = new Map<string, boolean>();
+  const nudgeLowEffortPrevMap = new Map<string, boolean>();
   function markNudgeShown(sid: string, turnKey: string, tokenCount?: number): void {
     let turns = nudgeShownTurns.get(sid);
     if (!turns) { turns = new Set(); nudgeShownTurns.set(sid, turns); }
@@ -411,6 +429,8 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     nudgeShownTurns.delete(sid);
     nudgeShownTokens.delete(sid);
     nudgeRecordedTurns.delete(sid);
+    nudgePendingInject.delete(sid);
+    nudgeLowEffortPrevMap.delete(sid);
   }
   function clearNudgeTokenStamps(sid: string): void {
     nudgeShownTokens.delete(sid);
@@ -423,6 +443,21 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   }
   function nudgeRecordedFor(sid: string, turnKey: string): boolean {
     return nudgeRecordedTurns.get(sid)?.has(turnKey) ?? false;
+  }
+  function armNudgeInjected(sid: string): void {
+    nudgePendingInject.set(sid, true);
+  }
+  function consumeNudgeInjected(sid: string): boolean {
+    const hit = nudgePendingInject.get(sid) === true;
+    nudgePendingInject.set(sid, false);
+    return hit;
+  }
+  function nudgeLowEffortPrevFor(sid: string): boolean {
+    return nudgeLowEffortPrevMap.get(sid) === true;
+  }
+  function setNudgeLowEffortPrev(sid: string, v: boolean): void {
+    if (v) nudgeLowEffortPrevMap.set(sid, true);
+    else nudgeLowEffortPrevMap.delete(sid);
   }
   // Per-session overflow self-heal state (learned window + armed emergency).
   const overflowEpisodes = new Map<string, OverflowEpisode>();
@@ -784,6 +819,12 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     return { enabled: c.stripImages === true, keepRecent };
   }
 
+  function nudgeLowEffortFor(ctx: ExtensionContext): boolean {
+    const m = ctx.model as { provider?: string; id?: string } | undefined;
+    const c = resolveCompress(adapterRef.compress, m?.provider, m?.id);
+    return c.nudgeLowEffort === true;
+  }
+
   async function reloadConfig(cwd: string): Promise<void> {
     let user;
     try {
@@ -918,4 +959,4 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   let refused = false;
   let refusalMessage: string | null = null;
   let delegateStoodDown = false;
-  return { core, store, get refused() { return refused; }, set refused(v: boolean) { refused = v; }, get refusalMessage() { return refusalMessage; }, set refusalMessage(v: string | null) { refusalMessage = v; }, get delegateStoodDown() { return delegateStoodDown; }, set delegateStoodDown(v: boolean) { delegateStoodDown = v; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown, nudgeShownFor, nudgeShownTokensFor, clearNudgeTracking, clearNudgeTokenStamps, markNudgeRecorded, nudgeRecordedFor, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reasoningDropFor, reloadConfig, stateFor, save, deriveChildState: deriveChild, acquireLock, overflowFor, overflowDrop, noteSentViewCount, peekSentViewCount, dropSentViewCount, dropProjectionCache, noteDeadCompress, clearDeadCompress, throttleFor, throttleDrop , noteTokenScale, dropTokenScale, noteKhatUsage, khatFor, setKhatPending, dropKhat, noteHostUsage, dropHostUsageSamples, noteSizeDivergence, dropSizeDivergence, noteTerminalEscape, dropTerminalEscape, noteTruncationSkipped, dropTruncationSkipped, stripImagesFor };}
+  return { core, store, get refused() { return refused; }, set refused(v: boolean) { refused = v; }, get refusalMessage() { return refusalMessage; }, set refusalMessage(v: string | null) { refusalMessage = v; }, get delegateStoodDown() { return delegateStoodDown; }, set delegateStoodDown(v: boolean) { delegateStoodDown = v; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown, nudgeShownFor, nudgeShownTokensFor, clearNudgeTracking, clearNudgeTokenStamps, markNudgeRecorded, nudgeRecordedFor, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reasoningDropFor, reloadConfig, stateFor, save, deriveChildState: deriveChild, acquireLock, overflowFor, overflowDrop, noteSentViewCount, peekSentViewCount, dropSentViewCount, dropProjectionCache, noteDeadCompress, clearDeadCompress, throttleFor, throttleDrop , noteTokenScale, dropTokenScale, noteKhatUsage, khatFor, setKhatPending, dropKhat, noteHostUsage, dropHostUsageSamples, noteSizeDivergence, dropSizeDivergence, noteTerminalEscape, dropTerminalEscape, noteTruncationSkipped, dropTruncationSkipped, stripImagesFor, nudgeLowEffortFor, armNudgeInjected, consumeNudgeInjected, nudgeLowEffortPrevFor, setNudgeLowEffortPrev };}
