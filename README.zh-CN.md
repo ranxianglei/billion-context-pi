@@ -77,11 +77,7 @@ pi install npm:billion-context-pi
 
 完成。扩展在下次 Pi 启动时自动加载。无需配置 —— 它会自动读取模型的上下文窗口。
 
-> **你另有子代理扩展?** billion-context-pi 自带 `acp_delegate` 子代理工具(见下文),上下文成本极低(~600 tok vs ~7K tok/轮)。同一会话里两套委派工具只会让模型的选择更混乱,二选一:
-> - **用 ACP 的 delegate** —— 卸载另一个扩展:`pi remove npm:pi-subagents`
-> - **保留你自己的子代理** —— 在 `acp.json` 里关掉 ACP 的 delegate:`{ "delegate": false }`(见下文*改用你自己的子代理*)
->
-> 若保留已安装的 `pi-subagents`,billion-context-pi 会在会话启动时检测:**项目级**安装(`<cwd>/.pi/npm` 或项目内 extensions 目录)会自动停用该项目的 `acp_delegate`,并提醒你运行 `/acp-subagents` 让 pi-subagents 的子代理获得 ACP 压缩;仅**用户级**(全局)安装时只记一条警告日志,`acp_delegate` 保持启用。在 `acp.json` 中设置 `"delegate": { "forceEnable": true }` 可在检测到第三方子代理时仍强制保留 `acp_delegate`。
+> **想使用子代理?** `acp_delegate` 工具已拆分至独立的 [**billion-context-pi-subagents**](https://github.com/ranxianglei/billion-context-pi-subagents)([#612](https://github.com/ranxianglei/billion-context-pi/issues/612))——需要委派时一并安装:`pi install npm:billion-context-pi-subagents`。它读取同样的 `acp.json` 文件(所有 `delegate.*` 键已迁往该包)。若你同时保留 `pi-subagents`,该包会在会话启动时检测,并对**项目级**安装自动停用其 delegate;pi-subagents 的子代理可通过本包下方的 `/acp-subagents` 命令获得 ACP 压缩。
 
 ## 工作原理
 
@@ -134,48 +130,18 @@ billion-context-pi 面向 **Pi** 编码代理(`@earendil-works/pi-coding-agent`)
 | `search_context` | 按关键词搜索已压缩块摘要(及可见消息) |
 | `acp_status` | 显示上下文用量、已压缩块、可压缩范围 |
 | `acp_rule` | 记录一条简短、原则性的提醒,穿越压缩保留(可选:`"rules": true`) |
-| `acp_delegate` | 为某个任务派生一个干净上下文的子代理(审查 / 调研 / 实现 / 规划 / 建议) |
-| `acp_delegate_wait` | 阻塞等待委派任务完成(返回结果,否则超时) |
-| `acp_delegate_cancel` | 按 runId 取消正在运行的委派任务 |
 
-`acp_delegate*` 四个工具是可选的:如果你自带子代理扩展,一个 `acp.json` 键即可关闭 —— 见下文*改用你自己的子代理*。`acp_rule` 同样是可选项 —— 默认关闭,在 `acp.json` 中设置 `"rules": true` 启用。
+`acp_rule` 是可选的——默认关闭,在 `acp.json` 中设置 `"rules": true` 启用。
 
-### acp_delegate — 干净上下文委派
+### 子代理(独立包)
 
-把一个自包含的任务交给一个运行在干净上下文中的新 pi 进程。五个内置角色,各自有系统提示和**软工具护栏**:
+干净上下文委派(`acp_delegate` / `acp_delegate_wait` / `acp_delegate_cancel`、fleet inspector、TUI 状态 widget)已从本包拆分至 [**billion-context-pi-subagents**](https://github.com/ranxianglei/billion-context-pi-subagents)([#612](https://github.com/ranxianglei/billion-context-pi/issues/612))。需要委派时一并安装:
 
-| 角色 | 工具 | 适用场景 |
-|------|------|----------|
-| `reviewer` | read, bash, grep, find, ls + ACP | 只读代码审查(bug、风险、file:line) |
-| `researcher` | read, bash, grep, find, ls + ACP | 只读代码库调研 |
-| `worker` | read, edit, write, bash | 修改代码 |
-| `planner` | read, bash, grep, find, ls + ACP | 分析 + 提出分步计划 |
-| `oracle` | read, bash, grep, find, ls + ACP | 回答问题 / 建议 |
-
-只读角色(reviewer、researcher、planner、oracle)获得受限工具白名单(`read, bash, grep, find, ls`)+ ACP 上下文工具(`compress, decompress, search_context, acp_status`),以便管理自己的上下文。这能防止意外修改文件,但 `bash` 可绕过 - **这是护栏,不是安全边界**。
-
-Worker 运行在 Pi 的完整默认工具集上 - 不应用 `--tools` 白名单,因此任何已加载的扩展或自定义工具(如 ACP、LSP、MCP)保持可用。这确保主任务委派能力完整。上表中的 `read, edit, write, bash` 仅反映核心工具。
-
-委派的完整结果保存到文件(`$TMPDIR/acp-delegate/<runId>.out`,默认 `/tmp/acp-delegate/<runId>.out`);工具结果和注入通知只携带**任务标题 + 文件路径**(无预览)- 需要细节时用 `read` 读取。这让父上下文保持精简。
-
-- **交互(TUI)与 RPC 模式**:`async:true`(默认)在后台运行子进程;完成时一条简短通知注入到聊天框。
-- **Print / JSON 模式**(`pi -p`、SDK):`async:true` 自动降级为**同步** — 结果在同一轮作为工具结果返回(父进程一轮后即退出,后台注入会丢失)。
-
-在**交互 TUI** 中,异步运行还会在编辑器下方显示一个实时状态 widget(角色、已运行秒数、任务预览),让你随时知道什么在跑、跑了多久。RPC/print/JSON 模式自动禁用。
-
-#### 改用你自己的子代理
-
-如果你已经在用别的子代理扩展(pi-subagents、pi-lens 等),关掉 ACP 的 delegate,让模型只有一条委派路径。在 `~/.pi/acp.json`(全局)或 `<项目>/.pi/acp.json`(项目级):
-
-```json
-{ "delegate": false }
+```bash
+pi install npm:billion-context-pi-subagents
 ```
 
-- 等价对象写法:`{ "delegate": { "enabled": false } }`。
-- **关掉的是什么:**`acp_delegate`、`acp_delegate_wait`、`acp_delegate_cancel` 三个工具,`ACP_DELEGATE NOTIFICATIONS` 系统提示段,以及 `ctrl+alt+f` 快捷键(此时 `/acp-fleet` 会提示 delegate 未启用)。压缩本身不受影响 —— `compress`、`decompress`、`search_context`、`acp_status` 全部保留。
-- **生效时机:**三个工具在会话启动时注册,因此需要**新会话**(或重启 Pi)。系统提示段每回合实时解析,可能在工具之前先消失。
-- 只想去掉提示段、保留工具?设 `{ "delegatePrompt": null }`。
-- Pi 原生的 `--exclude-tools acp_delegate,acp_delegate_wait,acp_delegate_cancel` **不能**替代:它藏起工具,但模型仍会收到描述这些工具的 `ACP_DELEGATE NOTIFICATIONS` 段。请用 `delegate: false`。
+它读取同样的 `acp.json` 文件——所有 `delegate.*`、`displayUsage`、`delegatePrompt` 键已迁往该包,因此现有键会被新包原样读取、被本包忽略。角色、执行模型(async/sync、通知、看门狗)、配置键与环境变量覆盖均在其 README 中记录。
 
 ## `/acp` 命令
 
@@ -207,7 +173,7 @@ Blocks: 3 active (3.7K summary, 15.2K original compressed)
 
 **可选、一次性设置——仅当你同时使用 [pi-subagents](https://github.com/nicobailon/pi-subagents) 时需要。**
 
-billion-context-pi 自带的 `acp_delegate` 工具可独立工作。如果你另外保留了 pi-subagents,并希望它的内置子代理在长任务中也能使用 ACP 上下文工具(`compress`/`decompress`/`search_context`/`acp_status`),运行:
+如果你保留了 pi-subagents(无论是否同时安装 [billion-context-pi-subagents](https://github.com/ranxianglei/billion-context-pi-subagents)),并希望它的内置子代理在长任务中也能使用 ACP 上下文工具(`compress`/`decompress`/`search_context`/`acp_status`),运行:
 
 ```
 /acp-subagents
@@ -225,10 +191,9 @@ billion-context-pi 开箱即用,无需任何配置——它会自动读取模型
 
 billion-context-pi 会向 `~/.pi/acp.log`(可用 `ACP_LOG_FILE` 覆盖)写入结构化的**始终开启**日志,覆盖模型工作的整个会话,便于排查问题:
 
-- `error` — 详细记录所有报错(含 `message` 与 `stack`):上下文变换、压缩/解压/搜索执行失败、delegate 子进程错误、状态读写失败、子代理工具注册失败等。原本被静默吞掉的异常现在一律落盘。
-- `warn` — 值得注意的非致命情况:紧急 nudge 注入、配置加载失败、自动更新网络错误、工具输出被截断、委派结果注入被跳过。
-- `info` — 生命周期事件:会话启动、每轮上下文变换摘要(消息数/token/压缩比/活跃块数)、压缩/解压、delegate 派发与完成、自动更新检查。
-- `debug` —— 仅在 `debug: true` 时额外写入(细粒度的字段级事件)。
+- **始终写入**(即使 `debug: false`):`error`、`warn`、`info` 级别——会话启动、每个上下文轮次(token 用量/nudge 决策)、压缩/解压,以及**所有错误与警告**(配置/状态/工具失败、护栏上限、更新失败)。错误行包含 message 与 stack trace。(安装 [billion-context-pi-subagents](https://github.com/ranxianglei/billion-context-pi-subagents) 后它也写入同一文件。)
+- **仅当 `debug: true` 时写入**:详细的 `debug` 级别诊断(完整字段转储、逐轮内部数据)。
+
 - **Nudge 审计轨迹** — 无论何时注入上下文限制 nudge,一条紧凑的单行记录(如 `[ACP nudge] EMERGENCY 95% · T1 · top range m00120–m00168`)会作为*仅供显示*的会话条目写入——它跨进程重启存活,在 TUI 回滚历史和会话文件中可见,且永远不会发给模型。
 
 每行格式:`<ISO 时间戳> [<级别>] [<范围>] key=value key=value`。多行字段值(如 `nudge-injected` 中的完整 nudge 正文)会被转义(`\n` → 字面量 `\\n`),保证每条日志恰好占**一行物理行**,便于 `grep`。文件达到 10 MB 时轮转为 `~/.pi/acp.log.old`。

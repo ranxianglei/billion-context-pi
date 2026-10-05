@@ -9,7 +9,7 @@ import { usageAnchorPredatesCompression } from "./floor-stale.js";
 import { applyOutputHeadroom, resolveOutputHeadroomCap } from "./overflow-selfheal.js";
 import { getSystemPromptText } from "./compat.js";
 import { logThrow } from "./log.js";
-import { getDelegateUsage } from "./delegate-tool.js";
+import { getDelegateUsage } from "billion-context-pi-subagents";
 import { resolveDelegate } from "./config.js";
 import { UNSUPPORTED_HOST_MESSAGE } from "./omp.js";
 

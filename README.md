@@ -78,11 +78,7 @@ pi install npm:billion-context-pi
 
 That's it. The extension auto-loads on next Pi startup. No configuration needed — it reads your model's context window automatically.
 
-> **Using another sub-agent extension?** billion-context-pi ships its own `acp_delegate` sub-agent tool (see below) at a fraction of the context cost (~600 tok vs ~7K tok/turn). Two delegation tools in one session only make the model's choice noisier, so pick one:
-> - **Use ACP's delegate** — remove the other extension: `pi remove npm:pi-subagents`
-> - **Keep your own sub-agent** — turn ACP's delegate off in `acp.json`: `{ "delegate": false }` (see *Using your own sub-agent instead* below)
->
-> If you keep `pi-subagents` installed, billion-context-pi detects it at session start: a **project-level** install (`<cwd>/.pi/npm` or the project extensions dir) automatically stands `acp_delegate` down for that project — a reminder then tells you how to give pi-subagents' agents ACP compression via `/acp-subagents`. A **user-level-only** install (`~/.pi/npm`, user extensions dir) leaves `acp_delegate` active and logs a warning instead. Set `"delegate": { "forceEnable": true }` in `acp.json` to keep `acp_delegate` active regardless of detection.
+> **Want sub-agents?** The `acp_delegate` tools were split out into **[billion-context-pi-subagents](https://github.com/ranxianglei/billion-context-pi-subagents)** ([#612](https://github.com/ranxianglei/billion-context-pi/issues/612)) — install it alongside when you want delegation: `pi install npm:billion-context-pi-subagents`. It reads the same `acp.json` files (all `delegate.*` keys moved there). If you also keep `pi-subagents` installed, that package detects it at session start and stands its delegate down for **project-scope** installs; give pi-subagents' agents ACP compression via this package's `/acp-subagents` command below.
 
 ## How it works
 
@@ -146,49 +142,18 @@ billion-context-pi is built for the **Pi** coding agent (`@earendil-works/pi-cod
 | `acp_status` | Show context usage, compressed blocks, compressible ranges |
 | `acp_cache` | Prompt-cache reconciliation: grand ledger (input/cached/hit rate), per-request miss attribution, per-fold economics |
 | `acp_rule` | Record a short, principle-level reminder that survives compression (opt-in: `"rules": true`) |
-| `acp_delegate` | Spawn a clean-context sub-agent for a task (review / research / implement / plan / advise) |
-| `acp_delegate_wait` | Block until a delegate run finishes (returns its result; times out otherwise) |
-| `acp_delegate_cancel` | Cancel a running delegate by runId |
 
-The four `acp_delegate*` tools are optional: if you bring your own sub-agent extension, disable them with one `acp.json` key — see *Using your own sub-agent instead* below. `acp_rule` is likewise opt-in — off by default, enable it with `"rules": true`.
+`acp_rule` is opt-in — off by default, enable it with `"rules": true`.
 
-### acp_delegate — clean-context delegation
+### Sub-agents (separate package)
 
-Hand a self-contained task to a fresh pi process running in a clean context. Five built-in roles, each with a system prompt and a **soft tool guardrail**:
+Clean-context delegation (`acp_delegate` / `acp_delegate_wait` / `acp_delegate_cancel`, the fleet inspector, and the TUI status widget) was split out of this package into **[billion-context-pi-subagents](https://github.com/ranxianglei/billion-context-pi-subagents)** ([#612](https://github.com/ranxianglei/billion-context-pi/issues/612)). Install it alongside when you want delegation:
 
-| Role | Tools | Best for |
-|------|-------|----------|
-| `reviewer` | read, bash, grep, find, ls + ACP | Read-only code review (bugs, risks, file:line) |
-| `researcher` | read, bash, grep, find, ls + ACP | Read-only codebase investigation |
-| `worker` | read, edit, write, bash | Make code changes |
-| `planner` | read, bash, grep, find, ls + ACP | Analyze + propose a step-by-step plan |
-| `oracle` | read, bash, grep, find, ls + ACP | Answer questions / advise |
-
-Read-only roles (reviewer, researcher, planner, oracle) receive a restricted tool allowlist (`read, bash, grep, find, ls`) plus ACP context tools (`compress, decompress, search_context, acp_status`) so they can manage their own context. This prevents accidental file modifications, but `bash` can bypass it - **it is a guardrail, not a security boundary**.
-
-Worker runs on Pi's full default toolset - no `--tools` allowlist is applied, so any loaded extension or custom tools (e.g. ACP, LSP, MCP) remain available. This keeps primary-task delegation fully capable. The `read, edit, write, bash` listing above reflects core tools only.
-
-The full delegate result is saved to a file (`$TMPDIR/acp-delegate/<runId>.out`, defaulting to `/tmp/acp-delegate/<runId>.out`); the tool result and injected notification carry only the **task title + file path** (no preview) - use `read` for the details. This keeps the parent context lean.
-
-- **Interactive (TUI) & RPC modes**: `async:true` (default) runs the child in the background; a short completion notification is injected into the chat when it finishes — **unless the model already read the result file after the run finished** (detected via the `read` tool or a bash command referencing the file), in which case the notification is skipped: the model already has the result, so re-injecting it would only waste context. Set `delegate: { notifyIfRead: "always" }` in `acp.json` to restore the always-inject behavior.
-- **Print / JSON modes** (`pi -p`, SDK): `async:true` auto-downgrades to **synchronous** — the result returns as the tool result in the same turn (the parent exits after one turn, so background injection would be lost).
-- **Failures are loud, never silent.** A run that fails (nonzero exit, spawn error, watchdog timeout) injects a `FAILED ⚠️` notification carrying a short error excerpt, so a failed delegate cannot hide among sibling completions. If a notification cannot be delivered at all, a recovery notice is attached to the next delegate notification or the next `acp_delegate` / `acp_delegate_wait` / `acp_delegate_cancel` tool result — a dispatched run's failure always reaches the model before it wraps up.
-
-In the **interactive TUI**, async runs also show a live status widget below the editor (agent, elapsed seconds, task preview), so you always know what's running and for how long. Disabled automatically in RPC/print/JSON.
-
-#### Using your own sub-agent instead
-
-If you already run another sub-agent extension (pi-subagents, pi-lens, …), turn ACP's delegate off so the model is offered only one way to delegate. In `~/.pi/acp.json` (global) or `<project>/.pi/acp.json` (per project):
-
-```json
-{ "delegate": false }
+```bash
+pi install npm:billion-context-pi-subagents
 ```
 
-- Equivalent object form: `{ "delegate": { "enabled": false } }`.
-- **What it removes:** the `acp_delegate`, `acp_delegate_wait` and `acp_delegate_cancel` tools, the `ACP_DELEGATE NOTIFICATIONS` system-prompt section, and the `ctrl+alt+f` fleet shortcut (`/acp-fleet` then reports that delegate is off). Compression is unaffected — `compress`, `decompress`, `search_context`, `acp_status` and `acp_cache` stay.
-- **When it applies:** the three tools are registered at session start, so a change needs a **new session** (or a Pi restart). The system-prompt section is resolved live on every turn, so it can disappear mid-session before the tools do.
-- Want to drop only the prompt section and keep the tools? Set `{ "delegatePrompt": null }`.
-- Pi's `--exclude-tools acp_delegate,acp_delegate_wait,acp_delegate_cancel` is **not** a substitute: it hides the tools but the model still receives the `ACP_DELEGATE NOTIFICATIONS` section describing tools it cannot call. Use `delegate: false`.
+It reads the same `acp.json` files — all `delegate.*`, `displayUsage` and `delegatePrompt` keys moved there, so existing keys are picked up unchanged by the new package and ignored by this one. Roles, execution model (async/sync, notifications, watchdogs), configuration keys, and the env overrides are documented in its README.
 
 ## `/acp` command
 
@@ -220,7 +185,7 @@ Blocks: 3 active (3.7K summary, 15.2K original compressed)
 
 **Optional, one-time setup — only if you also use [pi-subagents](https://github.com/nicobailon/pi-subagents).**
 
-billion-context-pi's own `acp_delegate` tool works standalone. If you additionally keep pi-subagents installed and want its builtin sub-agents to have ACP context tools (`compress`/`decompress`/`search_context`/`acp_status`) for long-running tasks, run:
+If you keep pi-subagents installed (with or without [billion-context-pi-subagents](https://github.com/ranxianglei/billion-context-pi-subagents)) and want its builtin sub-agents to have ACP context tools (`compress`/`decompress`/`search_context`/`acp_status`) for long-running tasks, run:
 
 ```
 /acp-subagents
@@ -238,7 +203,7 @@ Behavior is tuned via an optional `acp.json` config file (`~/.pi/acp.json` for g
 
 billion-context-pi writes a structured, always-on log to `~/.pi/acp.log` (override with `ACP_LOG_FILE`). It covers the model's whole working session and is useful for diagnosing problems:
 
-- **Always written** (even with `debug: false`): `error`, `warn`, `info` levels — session start, every context turn (token usage / nudge decision), compress/decompress, delegate spawn/done, and **all errors and warnings** (config/state/tool failures, delegate errors, guardrail caps, update failures). Error lines include the message and stack trace.
+- **Always written** (even with `debug: false`): `error`, `warn`, `info` levels — session start, every context turn (token usage / nudge decision), compress/decompress, and **all errors and warnings** (config/state/tool failures, guardrail caps, update failures). Error lines include the message and stack trace. ([billion-context-pi-subagents](https://github.com/ranxianglei/billion-context-pi-subagents) writes to the same file when installed.)
 - **Written only when `debug: true`**: verbose `debug`-level diagnostics (full field dumps, per-turn internals).
 
 - **Nudge audit trail**: whenever a context-limit nudge is injected, a compact one-line record (e.g. `[ACP nudge] EMERGENCY 95% · T1 · top range m00120–m00168`) is appended as a *display-only* session entry — it survives process restarts, shows up in TUI scrollback and the session file, and is never sent to the model.

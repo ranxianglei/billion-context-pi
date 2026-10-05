@@ -43,11 +43,6 @@
     "maxRetries": 10
   },
 
-  "delegate": {
-    "enabled": true,
-    "displayUsage": "separate"
-  },
-
   "compress": {
     "maxContextLimit": "75%",
     "emergencyThresholdPercent": "95%",
@@ -138,21 +133,9 @@
 | `hostSession` | boolean \| object | `false` | 🟢 ACTIVE | 多会话宿主的回合边界策略：是否把注入的 `custom_message` 计为回合起点。默认关闭（pi 原生行为）。 |
 | `rules` | boolean | `false` | 🟢 ACTIVE | 注册可选的 `acp_rule` 记录工具：简短、原则性的提醒，硬保护免于压缩。默认关闭。 |
 
-**delegate 键**
+**子代理（delegate）键**
 
-| 键 | 类型 | 默认值 | 状态 | 说明 |
-|----|------|--------|------|------|
-| `delegate.enabled` | boolean | `true` | 🟢 ACTIVE | 启用 `acp_delegate` 工具及其系统提示部分。 |
-| `delegate.forceEnable` | boolean | `false` | 🟢 ACTIVE | 检测到**项目级** `pi-subagents` 安装时仍保留 `acp_delegate`（默认：自动停用；仅用户级安装只记警告日志）。可被 `PI_ACP_DELEGATE_FORCE_ENABLE` 覆盖。 |
-| `delegate.displayUsage` | string | `"separate"` | 🟢 ACTIVE | 控制 delegate 子代理的 token 用量如何报回主会话。 |
-| `delegate.maxDepth` | number | `2` | 🟢 ACTIVE | `acp_delegate` 最大嵌套深度（主会话 = 深度 0；处于该深度的会话成为叶子，不能再委派）。设为 `1` 可禁止 delegate 再嵌套。 |
-| `delegate.syncTimeoutMinutes` | number | `5` | 🟢 ACTIVE | **同步** `acp_delegate` 调用的硬超时（分钟）。`0` / `null` 禁用。 |
-| `delegate.idleTimeoutMinutes` | number | `5` | 🟢 ACTIVE | 异步 delegate 子进程的闲置看门狗——无输出超过该时长即强制结束。`0` / `null` 禁用。 |
-| `delegate.asyncTimeoutMinutes` | number | `30` | 🟢 ACTIVE | 异步 delegate 子进程的绝对硬上限（分钟）。`0` / `null` 禁用。 |
-| `delegate.maxConcurrent` | number | unlimited | 🟢 ACTIVE | 同时运行的后台（`async`）delegate 上限；超出的启动按 FIFO 排队，有空位时自动开始。`1` = 强制串行。可被 `PI_ACP_DELEGATE_MAX_CONCURRENT` 覆盖。 |
-| `delegate.thinkingLevel` | string | _（未设置）_ | 🟢 ACTIVE | delegate 全局默认 thinking level（per-call > 角色 > 全局 > Pi 默认）。 |
-| `delegate.agents` | object | _（未设置）_ | 🟢 ACTIVE | 按角色配置默认模型 + thinking level，以角色名为键。 |
-| `delegate.fleetShortcut` | string | `ctrl+alt+d` | 🟢 ACTIVE | `acp_delegate` fleet inspector 的 TUI 快捷键；设为 `""` 可关闭注册。 |
+`delegate.*`、`displayUsage`、`delegatePrompt` 键已随 delegate 子系统迁移至 [billion-context-pi-subagents](https://github.com/ranxianglei/billion-context-pi-subagents)（[#612](https://github.com/ranxianglei/billion-context-pi/issues/612)）——本包不再读取它们。现有键会被该包从同样的 `acp.json` 文件中原样读取；完整键参考见其 README。
 
 **provider 限流重试键**
 
@@ -194,7 +177,6 @@
 | `promptSections` | object | *(内置默认)* | 🟢 ACTIVE | 覆盖 ACP 系统提示词的 13 个段，统一三态：字符串=替换 / null=删除 / 省略=默认。不经风险门禁。 |
 | `nudgeSections` | object | *(内置默认)* | 🟢 ACTIVE | 覆盖压缩提示的 4 段引导类文本（efficiencyNote / emergencyHeader / t2Guidance / t3Guidance），同样三态。不经风险门禁。 |
 | `toolPrompts` | object | *(内置默认)* | 🟢 ACTIVE | 覆盖四个 ACP 工具的 LLM 文案（description / paramDescriptions / promptSnippet / promptGuidelines）。扩展加载时同步读取，改后需重启 pi。 |
-| `delegatePrompt` | string \| null | *(内置附录)* | 🟢 ACTIVE | 替换（string）或删除（null）delegate 启用时的 ACP_DELEGATE_NOTIFICATIONS 系统提示词附录。 |
 | `promptPack` | string | `default` | 🟢 ACTIVE | 选择具名[提示词包](#提示词包)（如内置 `lean`）——一行替代整块内联 `promptSections`/`toolPrompts` JSON；作为内联覆盖之下的基础层生效。 |
 
 **环境变量**
@@ -206,11 +188,8 @@
 | `ACP_DEBUG` | 设为 `1` / `true` 开启调试日志。 |
 | `ACP_LOG_FILE` | 覆盖日志文件路径（默认 `~/.pi/acp.log`）。 |
 | `PI_ACP_FORK_HOST` | 设为 `1` / `true` 声明当前宿主是兼容 Pi 的 fork（无 `buildContextEntries()`），使其被识别为受支持宿主。OMP 默认仍被拒绝。见 [docs/host-adapter.md](./docs/host-adapter.md)。 |
-| `PI_ACP_DELEGATE_MAX_DEPTH` | 覆盖 `delegate.maxDepth`。 |
-| `PI_ACP_DELEGATE_SYNC_TIMEOUT_MINUTES` | 覆盖 `delegate.syncTimeoutMinutes`；`0` 禁用同步硬超时。 |
-| `PI_ACP_DELEGATE_IDLE_TIMEOUT_MINUTES` | 覆盖 `delegate.idleTimeoutMinutes`；`0` 禁用闲置看门狗。 |
-| `PI_ACP_DELEGATE_ASYNC_TIMEOUT_MINUTES` | 覆盖 `delegate.asyncTimeoutMinutes`；`0` 禁用异步硬上限。 |
-| `PI_ACP_DELEGATE_FORCE_ENABLE` | 覆盖 `delegate.forceEnable`；取值 `true` / `false`。 |
+
+`PI_ACP_DELEGATE_*` 环境变量已随 delegate 键迁移至 [billion-context-pi-subagents](https://github.com/ranxianglei/billion-context-pi-subagents)（[#612](https://github.com/ranxianglei/billion-context-pi/issues/612)）；本包不再读取它们。
 
 > **只有文档中列出的键才会从 `acp.json` 读取。** 其他调优参数（`preserveRecentMessages`）是代码级别的，不开放给用户。三个压缩阈值构成三级递进：基于增长的软 nudge → 越过 `compress.maxContextLimit` 后的强制 nudge → 越过 `compress.emergencyThresholdPercent` 后的紧急截断。
 
@@ -223,7 +202,7 @@
 - **类型：** `boolean`
 - **默认值：** `false`
 - **状态：** 🟢 ACTIVE
-- **说明：** 在日志文件（默认 `~/.pi/acp.log`）中开启详细的**调试级**事件。无论此设置如何，常驻日志（会话/轮次/压缩/delegate 生命周期事件，所有错误和警告）始终写入；`debug` 只添加额外的诊断信息，如完整字段转储和逐轮内部数据。也可通过环境变量 `ACP_DEBUG=1`（或 `ACP_DEBUG=true`）开启。
+- **说明：** 在日志文件（默认 `~/.pi/acp.log`）中开启详细的**调试级**事件。无论此设置如何，常驻日志（会话/轮次/压缩生命周期事件，所有错误和警告）始终写入；`debug` 只添加额外的诊断信息，如完整字段转储和逐轮内部数据。（安装 [billion-context-pi-subagents](https://github.com/ranxianglei/billion-context-pi-subagents) 后它也写入同一文件。）也可通过环境变量 `ACP_DEBUG=1`（或 `ACP_DEBUG=true`）开启。
 
 ### `autoUpdate`
 
@@ -318,110 +297,13 @@
 
 ---
 
-## Delegate
+## 子代理（独立包）
 
-`delegate` 子对象控制 `acp_delegate` 子代理工具族（`acp_delegate`、`acp_delegate_wait`、`acp_delegate_cancel`）及其 token 用量的报告方式。
+`acp_delegate` 子代理工具族（`acp_delegate`、`acp_delegate_wait`、`acp_delegate_cancel`）已从本包拆分至 [**billion-context-pi-subagents**](https://github.com/ranxianglei/billion-context-pi-subagents)（[#612](https://github.com/ranxianglei/billion-context-pi/issues/612)）。其配置面随之一并迁移：
 
-> **向后兼容：** 为方便使用，`delegate` 同时接受对象和布尔简写：
-> - `delegate: true` 等同于 `delegate: { enabled: true }`。
-> - 遗留的顶层平铺 `displayUsage` 键仍被接受，作为 `delegate.displayUsage` 的别名。推荐使用嵌套形式 `delegate.displayUsage`。
-
-### `delegate.enabled`
-
-- **类型：** `boolean`
-- **默认值：** `true`
-- **状态：** 🟢 ACTIVE
-- **说明：** 启用 `acp_delegate` 工具（`acp_delegate`、`acp_delegate_wait`、`acp_delegate_cancel`）及其对应的系统提示部分。设为 `false` 可完全跳过注册——例如你使用了其他子代理扩展，或者在无头环境下运行时异步结果注入没有意义。保留自带子代理的完整步骤见 [README.zh-CN.md](./README.zh-CN.md) 的 **改用你自己的子代理**。
-- **生效时机：** 三个工具在会话启动时注册，因此改动在**下一个会话**（或重启 Pi）生效。系统提示段每回合实时解析，可能在工具之前先于会话内消失。
-- **只关提示段：** `delegatePrompt: null` 移除 `ACP_DELEGATE NOTIFICATIONS` 段但保留工具。
-- **不能替代：** Pi 原生的 `--exclude-tools acp_delegate,acp_delegate_wait,acp_delegate_cancel` 只隐藏工具、**不**隐藏系统提示段，会让模型被告知它调不到的工具。
-
-### `delegate.forceEnable`
-
-- **类型：** `boolean`
-- **默认值：** `false`
-- **状态：** 🟢 ACTIVE
-- **说明：** 检测到第三方 [`pi-subagents`](https://github.com/nicobailon/pi-subagents) 扩展的**项目级**安装（`<cwd>/.pi/npm/node_modules/pi-subagents` 或 `<cwd>/.pi/extensions/`）时仍保留 `acp_delegate`。默认（`false`）下，会话启动检测到项目级安装会自动停用 `acp_delegate`——两个扩展各带一套重叠的子代理系统（各自的 fleet 检查器、spawn 路径，以及 #412 背后的 inspector 快捷键冲突），两套 fleet 并存会让模型困惑。**仅用户级**（全局，`~/.pi/npm`、用户 extensions 目录）安装不会停用 `acp_delegate`，只记一条警告日志——避免一次全局安装让所有项目都失去 acp_delegate。停用时会打印醒目提醒：说明 pi-subagents 的子代理默认拿不到 ACP 上下文压缩，运行 `/acp-subagents` 可把 compress / decompress / search_context / acp_status 注入其 agent overrides。优先级：显式 `delegate.enabled: false` 永远赢过 `forceEnable`；env `PI_ACP_DELEGATE_FORCE_ENABLE` 覆盖本键。
-- **生效时机：** 与 `delegate.enabled` 相同——工具与快捷键在会话启动时注册，改动在**下一个会话**生效；系统提示段每回合实时解析，可能在工具之前先于会话内消失。
-
-### `delegate.displayUsage`
-
-- **类型：** 字符串枚举 `"merged" | "separate"`
-- **默认值：** `"separate"`
-- **状态：** 🟢 ACTIVE
-- **说明：** 控制 delegate 子代理的 token 用量如何报回主会话。`"separate"`（默认）将 delegate token 记入独立累加器——主会话总量保持干净，delegate 用量在 `acp_status` 中单独显示一块（不计入主总量）。`"merged"` 将 delegate token 用量并入工具返回的 `usage` 字段，算作主会话总量的一部分。仅在 `delegate.enabled` 为 `true` 时有意义。
-
-### `delegate.maxDepth`
-
-- **类型：** 整数 ≥ 1
-- **默认值：** `2`
-- **状态：** 🟢 ACTIVE
-- **说明：** `acp_delegate` 的最大嵌套深度。深度表示会话距主会话的层数（主会话 = 0）；只有当自身深度**低于**该限制时才能再委派，因此*处于*该深度的会话成为叶子、不能再委派。默认 `2` 允许 主 → delegate → 二级 delegate；设为 `1` 可实现编排者 / 叶子工作者模式（delegate 不再嵌套）。解析后的限制值通过内部环境变量 `PI_ACP_DELEGATE_MAX_DEPTH` 传递给子进程，即使某个子进程加载了不同的项目级 `acp.json`，也能约束整棵委派树。非法值（非整数、`< 1`）回退到默认值并记录警告日志。环境变量覆盖：`PI_ACP_DELEGATE_MAX_DEPTH`（优先于本键）。
-
-### `delegate.syncTimeoutMinutes`
-
-- **类型：** number（分钟，支持小数）或 `0` / `null`
-- **默认值：** `5`
-- **状态：** 🟢 ACTIVE
-- **说明：** **同步** `acp_delegate` 调用的硬超时——子进程未在该时间窗内结束即被杀死（SIGTERM）。设为 `0`（或 `null`）可禁用同步硬超时。支持小数分钟（如 `0.5` = 30 秒）。非法值回退到默认值并记录警告日志。环境变量覆盖：`PI_ACP_DELEGATE_SYNC_TIMEOUT_MINUTES`（`0` 禁用）。
-
-### `delegate.idleTimeoutMinutes`
-
-- **类型：** number（分钟，支持小数）或 `0` / `null`
-- **默认值：** `5`
-- **状态：** 🟢 ACTIVE
-- **说明：** 异步 delegate 子进程的闲置看门狗：若子进程在该时长内**没有任何输出**，即视为挂死并强制结束。这是防止卡住的子进程长期占用 stdout 管道的主要防线。设为 `0`（或 `null`）可禁用它——ACP 会记录一条醒目的警告；`acp_delegate_cancel` 仍可作为手动逃生通道。支持小数分钟。非法值回退到默认值并记录警告日志。环境变量覆盖：`PI_ACP_DELEGATE_IDLE_TIMEOUT_MINUTES`（`0` 禁用）。
-
-### `delegate.asyncTimeoutMinutes`
-
-- **类型：** number（分钟，支持小数）或 `0` / `null`
-- **默认值：** `30`
-- **状态：** 🟢 ACTIVE
-- **说明：** **异步** delegate 子进程的绝对硬上限，与是否活跃无关。设为 `0`（或 `null`）可让长任务不受绝对上限约束——闲置看门狗仍然生效（除非另行禁用）。支持小数分钟。非法值回退到默认值并记录警告日志。环境变量覆盖：`PI_ACP_DELEGATE_ASYNC_TIMEOUT_MINUTES`（`0` 禁用）。
-
-### `delegate.maxConcurrent`
-
-- **类型：** number（整数 ≥ 1）
-- **默认值：** unlimited（不限制并发）
-- **状态：** 🟢 ACTIVE
-- **环境变量覆盖：** `PI_ACP_DELEGATE_MAX_CONCURRENT`（优先于本键）
-- **说明：** 限制**同时运行**的后台（`async: true`）delegate 数量。达到上限后，后续启动进入 FIFO 队列，有空位时自动开始——不会丢弃，只是排队等待。设为 `1` 可强制严格串行执行（适合低性能机器上并行子代理争抢 CPU 而超时的场景）。同步（`async: false`）调用始终立即运行，不受此上限影响。无效值（非整数或 `< 1`）会带警告回退到 unlimited，而不是让会话失败。仅在 `delegate.enabled` 为 `true` 时有意义。
-
-### `delegate.thinkingLevel`
-
-- **类型：** 字符串枚举 `"off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"`
-- **默认值：** _（未设置——每个子进程使用 Pi 自身默认值）_
-- **状态：** 🟢 ACTIVE
-- **说明：** 全局默认 thinking level。当 per-call `thinkingLevel` 与角色自身的 `thinkingLevel`（见 `delegate.agents`）都未设置时生效。所有层级都未设置时不传 `--thinking`，每个子进程使用 Pi 自身默认值。非法值会被忽略并记录警告（不会导致运行失败）。per-call 的 `acp_delegate({ thinkingLevel })` 始终优先于该全局值。
-
-### `delegate.agents`
-
-- **类型：** 对象——角色名 → `{ model?, thinkingLevel? }` 的映射
-- **默认值：** _（未设置——所有角色继承父模型 + Pi 默认值）_
-- **状态：** 🟢 ACTIVE
-- **说明：** 按角色配置默认值，便于长期自动化为不同 delegate 角色固定更便宜或更强的模型与 thinking level，而无需主 Agent 每次调用都填写。键为角色名（`reviewer`、`researcher`、`worker`、`planner`、`oracle`，或任意自定义角色）。每个值可设置：
-  - `model`（`"provider/id"`）——该角色的默认模型。优先级：per-call `model` > 该角色的 `model` > 父 Agent 当前模型。非合法 `"provider/id"` 的值会被忽略。若配置的模型在当前 registry 中不存在，则回退到父模型并记录警告——绝不导致失败。
-  - `thinkingLevel`——该角色的默认 thinking level（枚举同 `delegate.thinkingLevel`）。优先级：per-call > 角色 > 全局。
-
-```jsonc
-{
-  "delegate": {
-    "thinkingLevel": "low",
-    "agents": {
-      "reviewer": { "model": "opencode-go/deepseek-v4-flash", "thinkingLevel": "high" },
-      "worker":   { "model": "anthropic/claude-sonnet-4-5" },
-      "oracle":   { "model": "openai/gpt-5", "thinkingLevel": "xhigh" }
-    }
-  }
-}
-```
-
-### `delegate.fleetShortcut`
-
-- **类型：** 字符串——任意 Pi 键位（如 `"ctrl+alt+d"`、`"ctrl+shift+f"`）；空字符串 `""` 表示不注册快捷键
-- **默认值：** `ctrl+alt+d`
-- **状态：** 🟢 ACTIVE
-- **说明：** TUI **fleet inspector**（运行中 / 已结束的 `acp_delegate` run 的实时列表 + 会话转录）的键盘快捷键。默认键已从 `ctrl+alt+f` 挪开，因为该组合键同时被 `pi-subagents` 扩展占用——Pi 加载器既不去重跨扩展的快捷键冲突、也不允许用户覆盖，两者会争抢同一按键（#412）。无论此设置如何，fleet inspector 始终可通过 `/acp-fleet` 打开。设为 `""` 则完全不注册快捷键（例如你依赖其他扩展的 fleet 界面时）。非法值会注册一个永不触发的绑定，而不会导致启动失败。
+- 所有 `delegate.*` 键（`enabled`、`forceEnable`、`displayUsage`、`maxDepth`、`syncTimeoutMinutes`、`idleTimeoutMinutes`、`asyncTimeoutMinutes`、`maxConcurrent`、`thinkingLevel`、`agents`、`fleetShortcut`）、遗留的顶层平铺 `displayUsage` 别名以及顶层 `delegatePrompt` 覆盖现属于该包。它们由该包从同样的文件（`~/.pi/acp.json`、`<project>/.pi/acp.json`）读取——现有键在那里原样生效，被本包忽略。
+- 所有 `PI_ACP_DELEGATE_*` 环境变量随键一并迁移。
+- 完整键参考（类型、默认值、优先级顺序）：见 [billion-context-pi-subagents README](https://github.com/ranxianglei/billion-context-pi-subagents#configuration)。
 
 ---
 
@@ -834,17 +716,6 @@ provider 的 key 是 **Pi provider 名**(如 `"anthropic"`、`"openai"`、`"zhip
   }
   ```
 
-### `delegatePrompt`
-
-- **类型：** `string | null`
-- **默认值：** *(内置 `ACP_DELEGATE_NOTIFICATIONS` 附录)*
-- **状态：** 🟢 ACTIVE
-- **说明：** 替换（`string`）或删除（`null`）delegate 工具启用时追加到系统提示词的 `ACP_DELEGATE_NOTIFICATIONS` 附录。适用于用自己的后台任务机制、语义不同的宿主。仅在 `delegate` 启用时生效。示例：
-
-  ```json
-  { "delegatePrompt": "后台任务结果以系统通知到达——如相关则读取结果文件。" }
-  ```
-
 ### `acknowledgePromptsRisk`
 
 - **类型：** `boolean`
@@ -906,7 +777,6 @@ provider 的 key 是 **Pi provider 名**(如 `"anthropic"`、`"openai"`、`"zhip
 
 - `promptSections` / `nudgeSections`：内联键胜包键（含 `null`）。
 - `toolPrompts`：先按工具，再按字段（`description`、`promptSnippet`、`promptGuidelines`），再按 `paramDescriptions` 内逐参数。
-- `delegatePrompt`：内联存在则胜（含 `null`）。
 
 ### 可编程来源（宿主与未来安装器）
 
@@ -971,44 +841,3 @@ interface PackSource {
 - **状态：** 🟢 ACTIVE
 - **说明：** 覆盖日志文件路径。默认情况下，结构化日志写入 `~/.pi/acp.log`（文件在 10MB 时轮转为 `~/.pi/acp.log.old`）。指向不同位置可为每个项目或每次运行保留独立日志。在 Pi 的 fork 上，`~/.pi` 指该 fork 自己的配置目录（Prime 上为 `~/.prime`）——见 [docs/host-adapter.md §4](./docs/host-adapter.md#4-config-directory-config_dir_name)。
 
-### `PI_ACP_DELEGATE_MAX_DEPTH`
-
-- **类型：** 整数 ≥ 1
-- **默认值：** *(未设置——遵循 `delegate.maxDepth`，再回退到 2)*
-- **状态：** 🟢 ACTIVE
-- **说明：** 不编辑配置文件，为单个会话覆盖 delegate 最大嵌套深度。优先于 `delegate.maxDepth`。解析后的值会被向下传递到整棵委派树。请勿在委派树中间手动设置它：这也是 ACP 用来把*生效限制*传入子进程的内部变量。
-
-### `PI_ACP_DELEGATE_SYNC_TIMEOUT_MINUTES`
-
-- **类型：** number（分钟）或 `0`
-- **默认值：** *(未设置——遵循 `delegate.syncTimeoutMinutes`，再回退到 5)*
-- **状态：** 🟢 ACTIVE
-- **说明：** 覆盖同步 `acp_delegate` 的硬超时。设为 `0` 可为单个会话禁用同步硬超时。优先于 `delegate.syncTimeoutMinutes`。
-
-### `PI_ACP_DELEGATE_IDLE_TIMEOUT_MINUTES`
-
-- **类型：** number（分钟）或 `0`
-- **默认值：** *(未设置——遵循 `delegate.idleTimeoutMinutes`，再回退到 5)*
-- **状态：** 🟢 ACTIVE
-- **说明：** 覆盖异步闲置看门狗的时间窗。设为 `0` 可为单个会话禁用闲置看门狗（ACP 会记录警告；`acp_delegate_cancel` 仍可作为手动逃生通道）。优先于 `delegate.idleTimeoutMinutes`。
-
-### `PI_ACP_DELEGATE_ASYNC_TIMEOUT_MINUTES`
-
-- **类型：** number（分钟）或 `0`
-- **默认值：** *(未设置——遵循 `delegate.asyncTimeoutMinutes`，再回退到 30)*
-- **状态：** 🟢 ACTIVE
-- **说明：** 覆盖异步 delegate 子进程的绝对硬上限。设为 `0` 可让长任务不受绝对上限约束（闲置看门狗仍然生效，除非另行禁用）。优先于 `delegate.asyncTimeoutMinutes`。
-
-### `PI_ACP_DELEGATE_MAX_CONCURRENT`
-
-- **类型：** integer（≥ 1）
-- **默认值：** *(未设置——上限遵循 `delegate.maxConcurrent`，再否则 unlimited)*
-- **状态：** 🟢 ACTIVE
-- **说明：** 覆盖后台（`async`）delegate 并发上限。**优先于** `delegate.maxConcurrent`。设为 `1` 强制串行执行。无效值会带警告回退到下一个来源（最终 unlimited），而不是让会话失败。
-
-### `PI_ACP_DELEGATE_FORCE_ENABLE`
-
-- **类型：** `true` | `false`
-- **默认值：** *(未设置——遵循 `delegate.forceEnable`，再否则 false)*
-- **状态：** 🟢 ACTIVE
-- **说明：** 覆盖"检测到项目级 `pi-subagents` 安装时是否仍保留 `acp_delegate`"。**优先于** `delegate.forceEnable`。无法解析的值带警告回退到配置值，而不是让会话失败。

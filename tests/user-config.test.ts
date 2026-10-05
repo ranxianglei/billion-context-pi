@@ -76,11 +76,10 @@ test("loadUserConfig reads global config from home directory", async () => {
 test("loadUserConfig reads project config from cwd", async () => {
   const tmpDir = path.join(os.tmpdir(), `acp-test-project-${Date.now()}`);
   await fs.mkdir(tmpDir, { recursive: true });
-  await writeConfig(tmpDir, { modelContextLimit: 100_000, delegate: false });
+  await writeConfig(tmpDir, { modelContextLimit: 100_000 });
   try {
     const config = await loadUserConfig(tmpDir);
     assert.equal(config.modelContextLimit, 100_000);
-    assert.equal(config.delegate, false);
   } finally {
     await fs.rm(tmpDir, { recursive: true, force: true });
   }
@@ -175,7 +174,6 @@ test("loadUserConfig handles bad JSON gracefully", async () => {
 test("applyUserConfig merges user config onto adapter config", () => {
   const adapter: AdapterConfig = {
     modelContextLimit: 200_000,
-    delegate: true,
     autoUpdate: true,
     preserveRecentMessages: 5000,
   };
@@ -185,13 +183,11 @@ test("applyUserConfig merges user config onto adapter config", () => {
   assert.equal(result.autoUpdate, false, "user autoUpdate overrides adapter");
   assert.equal(result.toolOutputMaxBytes, 50000, "user toolOutputMaxBytes added");
   assert.equal(result.modelContextLimit, 200_000, "adapter modelContextLimit preserved");
-  assert.equal(result.delegate, true, "adapter delegate preserved");
 });
 
 test("applyUserConfig preserves protected adapter fields", () => {
   const adapter: AdapterConfig = {
     modelContextLimit: 200_000,
-    delegate: true,
     preserveRecentMessages: 5000,
     coreOverrides: { someKey: "someValue" },
     protectedTools: ["read", "write"],
@@ -207,12 +203,10 @@ test("applyUserConfig preserves protected adapter fields", () => {
 test("applyUserConfig with empty user config returns adapter unchanged", () => {
   const adapter: AdapterConfig = {
     modelContextLimit: 200_000,
-    delegate: true,
     preserveRecentMessages: 5000,
   };
   const result = applyUserConfig(adapter, {});
   assert.equal(result.modelContextLimit, 200_000);
-  assert.equal(result.delegate, true);
   assert.equal(result.preserveRecentMessages, 5000);
 });
 
@@ -222,7 +216,6 @@ test("applyUserConfig supports all user config keys", () => {
     debug: true,
     autoUpdate: false,
     modelContextLimit: 50_000,
-    delegate: false,
     toolBashDefaultTimeout: 120,
     toolOutputMaxBytes: 100_000,
     outputHeadroomMaxPct: 0.1,
@@ -232,7 +225,6 @@ test("applyUserConfig supports all user config keys", () => {
   assert.equal(result.debug, true);
   assert.equal(result.autoUpdate, false);
   assert.equal(result.modelContextLimit, 50_000);
-  assert.equal(result.delegate, false);
   assert.equal(result.toolBashDefaultTimeout, 120);
   assert.equal(result.toolOutputMaxBytes, 100_000);
   assert.equal(result.outputHeadroomMaxPct, 0.1);

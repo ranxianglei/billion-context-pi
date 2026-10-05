@@ -18,7 +18,27 @@ import { makeSearchTool } from "./search-tool.js";
 import { makeStatusTool } from "./status-tool.js";
 import { makeCacheTool } from "./cache-tool.js";
 import { makeRuleTool } from "./rule-tool.js";
-import { makeDelegateTool, makeDelegateWaitTool, makeDelegateCancelTool, runningRunsSnapshot, resetDelegateUsage, setDelegateDisplayUsage, setDelegatePolicy, setDelegateDefaults, setDelegateNotifyIfRead, markDelegateResultRead, markDelegateRunReadByCommand } from "./delegate-tool.js";
+import {
+  ACP_DELEGATE_PROMPT,
+  DELEGATE_STAND_DOWN_MESSAGE,
+  delegateStatusWidget,
+  findPiSubagentsInstalls,
+  makeDelegateCancelTool,
+  makeDelegateTool,
+  makeDelegateWaitTool,
+  markDelegateResultRead,
+  markDelegateRunReadByCommand,
+  markEmbedded,
+  openFleetInspector,
+  resolveAgentDir,
+  resetDelegateUsage,
+  runningRunsSnapshot,
+  setDebugEnabled,
+  setDelegateDefaults,
+  setDelegateDisplayUsage,
+  setDelegateNotifyIfRead,
+  setDelegatePolicy,
+} from "billion-context-pi-subagents";
 import { makeCommands } from "./commands.js";
 import { mergeSurface, readToolSurfaceWithPacks, resolveActivePack, resolvePackName, surfaceMetaOf } from "./prompt-pack.js";
 import type { NudgeSectionsConfig } from "./surface.js";
@@ -28,9 +48,7 @@ import { carryHostSystemMessages } from "./system-passthrough.js";
 import { sanitizeToolPairing } from "./tool-pair-sanitizer.js";
 import { countThinkingChars, dropCompressReasoning } from "./reasoning-drop.js";
 import { collapseAssistantDegeneration, degenerationNotice, lastAssistantRuns, resolveDegenerationGuard } from "./degeneration.js";
-import { buildAcpSystemPrompt, ACP_DELEGATE_PROMPT } from "./system-prompt.js";
-import { delegateStatusWidget } from "./fleet-widget.js";
-import { openFleetInspector } from "./fleet-inspector.js";
+import { buildAcpSystemPrompt } from "./system-prompt.js";
 import { applyStripImages } from "./strip-images.js";
 import { wireToolGuardrails } from "./tool-guardrails.js";
 import { debug, logError, logInfo, logWarn, logThrow, closeLogStream } from "./log.js";
@@ -53,7 +71,6 @@ import { applyOutputHeadroom, inspectOverflowMessage, isNoBody4xxError, resolveO
 import { FORK_HOST_WARNING_MESSAGE, UNSUPPORTED_HOST_MESSAGE } from "./omp.js";
 import { isDeclaredForkHost, isUnsupportedHost } from "./host.js";
 import { isBiliProxyBaseUrl, PROXY_STAND_DOWN_MESSAGE, nativeStandDownMessage } from "./proxy-detect.js";
-import { findPiSubagentsInstalls, resolveAgentDir, DELEGATE_STAND_DOWN_MESSAGE } from "./setup-subagent-tools.js";
 
 // Host-facing API for multi-session hosts (docs/host-adapter.md, #367): the
 // extension keeps its own runtime instance private; hosts build their own via
@@ -78,6 +95,12 @@ export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactor
       return;
     }
     const runtime = createRuntime(adapter);
+    // acp_delegate lives in billion-context-pi-subagents, inlined below via
+    // the exact-pinned devDependency (acp-kernel pattern). Marking embedded at
+    // factory entry keeps a SEPARATELY installed copy of that extension
+    // stood down in this process — no double tool/command/shortcut
+    // registration, no double prompt sections.
+    markEmbedded();
     // Double-compression guards (#296, #461): exactly one side may own
     // compression. Three signals, ALL checked lazily on every event because
     // none can be trusted at factory time:
@@ -279,6 +302,7 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     let delegateStoodDown = false;
     try {
       await runtime.reloadConfig(ctx.cwd);
+      setDebugEnabled(runtime.adapter.debug === true);
       const delegateCfg = resolveDelegate(runtime.adapter);
       setDelegateDisplayUsage(delegateCfg.displayUsage);
       setDelegatePolicy(delegateCfg);
@@ -305,7 +329,7 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
             else console.error(DELEGATE_STAND_DOWN_MESSAGE);
           }
         } else if (scopes.user[0] !== undefined) {
-          logWarn("delegate", { event: "delegate-user-scope-detected", sid, install: scopes.user[0], action: "warn-only", hint: "user-level pi-subagents does not disable acp_delegate; run /acp-subagents to give its agents ACP compression tools" });
+          logWarn("delegate", { event: "delegate-user-scope-detected", sid, install: scopes.user[0], scope: "user", action: "warn-only", hint: "user-level pi-subagents does not disable acp_delegate; run /acp-subagents to give its agents ACP compression tools" });
         }
       }
     } catch (e) {
@@ -348,7 +372,7 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     // in-memory runs Map (via runningRunsSnapshot) and renders a live list of
     // running delegates below the editor. Only the interactive TUI has a UI;
     // rpc/json/print have hasUI=false and the call is a no-op.
-    delegateStatusWidget.setContext(ctx, runningRunsSnapshot, delegatePolicy.fleetShortcut);
+    delegateStatusWidget.setContext(ctx, runningRunsSnapshot, delegatePolicy.fleetShortcut, "billion-context-pi");
   });
   pi.on("session_shutdown", (_event, ctx) => {
     const sid = ctx.sessionManager.getSessionId();

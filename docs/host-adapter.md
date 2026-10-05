@@ -83,7 +83,7 @@ throttle/overflow cycle statistics distort.
 
 | Kind | How pi tracks it | Adapter behavior |
 |---|---|---|
-| **Separate-process delegate** (Pi-native sub-agents) | child session file's JSONL header carries `parentSession` | On load, the adapter inherits the parent's state **verbatim** (blocks *and* rhythm). **Unchanged by #364.** Do NOT call `deriveChildState` for these. |
+| **Separate-process child** (e.g. delegates spawned by [billion-context-pi-subagents](https://github.com/ranxianglei/billion-context-pi-subagents)) | child session file's JSONL header carries `parentSession` | On load, the adapter inherits the parent's state **verbatim** (blocks *and* rhythm). **Unchanged by #364.** Do NOT call `deriveChildState` for these. |
 | **Inline same-process child** (Prime RLM & co.) | whatever the host creates; may or may not carry a header | Fresh state by default. Call `deriveChildState` once to inherit blocks with reset rhythm. |
 
 Why derive at all for inline children? If the child starts empty, `decompress` and
@@ -186,20 +186,17 @@ the live-message merge and reintroduce the branch-lag bug.
 
 ### Entry-source semantics
 
-| Host | Entry source | Live-message merge | Delegate CLI flags |
-|---|---|---|---|
-| Pi | `buildContextEntries()` — the effective context, always current including the in-flight message | not needed | pi flags (`--mode json`, `--session`) |
-| Declared fork (Prime…) | `getBranch()` — raw branch chronology, **lags one message** (the current user message persists only after transform) | adapter merges each context event's `event.messages` into state building (`runtime.stateFor` live merge) | disabled — spawned children get no pi-only flags |
+| Host | Entry source | Live-message merge |
+|---|---|---|
+| Pi | `buildContextEntries()` — the effective context, always current including the in-flight message | not needed |
+| Declared fork (Prime…) | `getBranch()` — raw branch chronology, **lags one message** (the current user message persists only after transform) | adapter merges each context event's `event.messages` into state building (`runtime.stateFor` live merge) |
 
 Consequences for hosts:
 
 - Under a declared fork, refs injected during turn N become visible to branch reads from
   turn N+1 onward; the live merge compensates for exactly this lag. This merge fires for
   *any* non-Pi-shaped session manager (`!isPiHost`), which is what makes declared forks work.
-- Delegation (`acp_delegate`) spawns real pi CLI processes. On non-Pi hosts the delegate
-  tool refuses to spawn with pi-only flags, regardless of the declaration. Hosts that run
-  sub-agents natively (e.g. Prime RLM) should set `"delegate": false` in acp.json so the
-  model is not offered a tool whose children cannot run.
+- Delegation now lives in [billion-context-pi-subagents](https://github.com/ranxianglei/billion-context-pi-subagents): its `acp_delegate` spawns real pi CLI processes and, on non-Pi hosts, refuses to spawn with pi-only flags regardless of the declaration. Hosts that run sub-agents natively (e.g. Prime RLM) should install that package only where delegation makes sense.
 
 Fixtures: `tests/host-detection.test.ts` (Prime-shaped host = `{ getBranch }` only) and
 `tests/omp-refuse.test.ts` (refusal behavior + the opt-in test).

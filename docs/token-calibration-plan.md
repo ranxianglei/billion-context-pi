@@ -2,6 +2,7 @@
 
 > 分支：`feat/token-calibration`（worktree: `/Users/yintianan/GitHub/billion-context-pi-wt2`）
 > 状态：**已实现 + 真实会话验证**（Phase 1/2 + §11 快照化，详见 §10/§11）
+> 注（#612）：本文引用的 `src/delegate-tool.ts` 已随 delegate 子系统拆分至 [billion-context-pi-subagents](https://github.com/ranxianglei/billion-context-pi-subagents)，文中行号为拆分前快照。
 > 实测环境：**DeepSeek V4-Flash**（1M 窗口）。其 tokenizer 中英文密度差异大
 > （官方：1 英文字符 ≈ 0.3 token、1 中文字符 ≈ 0.6 token，中文密度为英文 2 倍；
 > 实测 1 汉字 ≈ 1.2-1.3 token），chars/4 估算对中文内容严重低估 —— 本方案的

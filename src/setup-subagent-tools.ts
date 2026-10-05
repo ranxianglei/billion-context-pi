@@ -17,14 +17,6 @@ import { CONFIG_DIR_NAME } from "./config-dir.js";
 /** The four ACP tools to ensure on every pi-subagents builtin agent. */
 export const ACP_TOOLS = ["compress", "decompress", "search_context", "acp_status"] as const;
 
-/** Printed/logged once per process when acp_delegate stands down because
- *  pi-subagents is installed (issue #415). Same shape as PROXY_STAND_DOWN_MESSAGE. */
-export const DELEGATE_STAND_DOWN_MESSAGE = [
-  "[billion-context-pi] pi-subagents detected — acp_delegate has been automatically disabled to avoid two overlapping sub-agent systems.",
-  "pi-subagents' agents do NOT get ACP context compression by default. Run /acp-subagents to inject compress/decompress/search_context/acp_status into its agent overrides.",
-  'To keep acp_delegate despite pi-subagents being installed, set "delegate": { "forceEnable": true } in acp.json.',
-].join("\n");
-
 export interface SetupResult {
   path: string;
   action: "skipped" | "updated" | "failed";
@@ -134,22 +126,6 @@ export function findPiSubagentsInstall(agentDir: string, cwd: string): string | 
     extensionInstallUnder(path.join(agentDir, "extensions")) ??
     extensionInstallUnder(path.join(cwd, CONFIG_DIR_NAME, "extensions"))
   );
-}
-
-/** Scope-split detection result (#415): a user-scope install must not silently
- *  disable acp_delegate in every project — only project-scope hits trigger the
- *  auto stand-down; user-scope-only hits get a warning log instead. */
-export interface PiSubagentsScopes {
-  user: string[];
-  project: string[];
-}
-
-export function findPiSubagentsInstalls(agentDir: string, cwd: string): PiSubagentsScopes {
-  const pick = (paths: Array<string | null>): string[] => paths.filter((p): p is string => p !== null);
-  return {
-    user: pick([npmInstallAt(agentDir), extensionInstallUnder(path.join(agentDir, "extensions"))]),
-    project: pick([npmInstallAt(path.join(cwd, CONFIG_DIR_NAME)), extensionInstallUnder(path.join(cwd, CONFIG_DIR_NAME, "extensions"))]),
-  };
 }
 
 /**

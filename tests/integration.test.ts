@@ -1,15 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createAcpExtension } from "../src/index.js";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 import { setRunNpmForTest } from "../src/update.js";
-import { DELEGATE_STAND_DOWN_MESSAGE } from "../src/setup-subagent-tools.js";
-import { DEFAULT_FLEET_SHORTCUT } from "../src/config.js";
 import { tmpPath } from "./tmp-path.js";
 
 // Headless handlers await the update check — keep every test hermetic by
@@ -494,11 +491,6 @@ test("system prompt sources compression rules from acp-kernel (no hardcoded drif
   assert.ok(sp.includes("HOW TO COMPRESS"), "kernel HOW_TO_COMPRESS_RULES inlined");
   assert.ok(sp.includes("TIER 2 COMPRESSION"), "kernel TIER2_DISTILL_RULES inlined");
   assert.ok(sp.includes("TIER 3 COMPRESSION"), "kernel TIER3_CONDENSE_RULES inlined");
-  // acp_delegate notification education present (models must learn to treat
-  // injected delegate results as system notifications, not user messages)
-  assert.ok(sp.includes("ACP_DELEGATE NOTIFICATIONS"), "delegate notification section present");
-  assert.ok(/NOT .*(user message|user request)/i.test(sp), "delegates marked as not-user-message");
-  assert.ok(/no status tool|NO .?status tool|only way.*acp_delegate_wait/i.test(sp), "wait replaces status tool");
   // marker system removed entirely from kernel constants
   assert.ok(!sp.includes("[[KEEP:"), "no KEEP marker teaching");
   assert.ok(!sp.includes("[[REF:"), "no REF marker teaching");
@@ -740,24 +732,6 @@ test("omp keeps compression active when persisted and provider tails diverge", a
 });
 
 
-test("delegate:false omits the ACP_DELEGATE NOTIFICATIONS section from the system prompt", () => {
-  const { api, handlers } = captureApi();
-  createAcpExtension({ delegate: false })(api as any);
-  const result = handlers.get("before_agent_start")![0]!({ systemPrompt: "" }, {});
-  assert.ok(!result.systemPrompt.includes("ACP_DELEGATE NOTIFICATIONS"), "delegate section omitted when delegate:false");
-  // Core ACP prompt is still present — only the delegate section is dropped.
-  assert.ok(result.systemPrompt.includes("ACP TAGS"), "core ACP prompt still present when delegate disabled");
-});
-
-test("delegate:{enabled:false} omits the ACP_DELEGATE NOTIFICATIONS section from the system prompt", () => {
-  const { api, handlers } = captureApi();
-  createAcpExtension({ delegate: { enabled: false } })(api as any);
-  const result = handlers.get("before_agent_start")![0]!({ systemPrompt: "" }, {});
-  assert.ok(!result.systemPrompt.includes("ACP_DELEGATE NOTIFICATIONS"), "delegate section omitted when delegate:{enabled:false}");
-  // Core ACP prompt is still present — only the delegate section is dropped.
-  assert.ok(result.systemPrompt.includes("ACP TAGS"), "core ACP prompt still present when delegate disabled");
-});
-
 // ─── ISSUE-9: modelContextLimit changes in <cwd>/.pi/acp.json hot-reload ──
 
 test("modelContextLimit changes in .pi/acp.json are picked up on the next context event", async () => {
@@ -903,28 +877,6 @@ test("TUI (hasUI=true) context handler resolves without waiting for the update c
   }
 });
 
-// ─── #415: third-party subagent (pi-subagents) auto stand-down ──────────────
-
-type StandDownScope = "none" | "user" | "project";
-
-function standDownFixture(scope: StandDownScope) {
-  const tmp = mkdtempSync(join(tmpdir(), "acp-standdown-"));
-  const agentDir = join(tmp, "agent");
-  const cwd = join(tmp, "proj");
-  mkdirSync(agentDir, { recursive: true });
-  mkdirSync(cwd, { recursive: true });
-  if (scope === "user") {
-    const pkg = join(agentDir, "npm", "node_modules", "pi-subagents");
-    mkdirSync(pkg, { recursive: true });
-    writeFileSync(join(pkg, "package.json"), JSON.stringify({ name: "pi-subagents", version: "0.53.0" }));
-  } else if (scope === "project") {
-    const pkg = join(cwd, CONFIG_DIR_NAME, "npm", "node_modules", "pi-subagents");
-    mkdirSync(pkg, { recursive: true });
-    writeFileSync(join(pkg, "package.json"), JSON.stringify({ name: "pi-subagents", version: "0.53.0" }));
-  }
-  return { tmp, agentDir, cwd, cleanup: () => rmSync(tmp, { recursive: true, force: true }) };
-}
-
 async function withAgentDir(agentDir: string, fn: () => Promise<void>): Promise<void> {
   const prev = process.env.PI_CODING_AGENT_DIR;
   process.env.PI_CODING_AGENT_DIR = agentDir;
@@ -951,152 +903,6 @@ async function withAgentDir(agentDir: string, fn: () => Promise<void>): Promise<
     else process.env.USERPROFILE = prevUserProfile;
   }
 }
-
-function piSessionCtx(tmp: string, cwd: string, extra?: Record<string, unknown>) {
-  const base = fakeCtx([], join(tmp, "state.json"));
-  // session_start refuses OMP hosts (feature-detect: no buildContextEntries) —
-  // give the fake the pi shape so the stand-down gate under test is the only gate.
-  return { ...base, cwd, hasUI: true, sessionManager: { ...base.sessionManager, buildContextEntries: () => [] }, ...extra };
-}
-
-test("#415: project-scope pi-subagents → acp_delegate stands down (tools, shortcut, prompt section) + reminder points to /acp-subagents", async () => {
-  const fx = standDownFixture("project");
-  try {
-    await withAgentDir(fx.agentDir, async () => {
-      const { api, handlers } = captureApi();
-      const shortcuts: string[] = [];
-      (api as any).registerShortcut = (key: string) => { shortcuts.push(key); };
-      createAcpExtension()(api as any);
-
-      const notified: string[] = [];
-      const ctx = piSessionCtx(fx.tmp, fx.cwd, {
-        ui: { notify: (msg: string) => { notified.push(msg); }, confirm: async () => true, select: async () => undefined, input: async () => "", setStatus: () => {} },
-      });
-
-      await handlers.get("session_start")![0]!({}, ctx);
-
-      const toolNames = api.tools.map((t) => t.name);
-      assert.ok(!toolNames.includes("acp_delegate"), "acp_delegate not registered while stood down");
-      assert.ok(!toolNames.includes("acp_delegate_wait"), "acp_delegate_wait not registered while stood down");
-      assert.ok(!toolNames.includes("acp_delegate_cancel"), "acp_delegate_cancel not registered while stood down");
-      assert.ok(toolNames.includes("compress"), "core ACP tools still registered");
-      assert.deepEqual(shortcuts, [], "fleet shortcut not registered while stood down");
-
-      const promptResult = handlers.get("before_agent_start")![0]!({ systemPrompt: "" }, {});
-      assert.ok(!promptResult.systemPrompt.includes("ACP_DELEGATE NOTIFICATIONS"), "delegate prompt section omitted while stood down");
-      assert.ok(promptResult.systemPrompt.includes("ACP TAGS"), "core ACP prompt still present");
-
-      assert.ok(notified.some((m) => m === DELEGATE_STAND_DOWN_MESSAGE), "stand-down reminder surfaced via ui.notify");
-    });
-  } finally {
-    fx.cleanup();
-  }
-});
-
-test("#415: user-scope-only pi-subagents → acp_delegate stays active (warning log only, no stand-down)", async () => {
-  const fx = standDownFixture("user");
-  try {
-    await withAgentDir(fx.agentDir, async () => {
-      const { api, handlers } = captureApi();
-      const shortcuts: string[] = [];
-      (api as any).registerShortcut = (key: string) => { shortcuts.push(key); };
-      createAcpExtension()(api as any);
-
-      const notified: string[] = [];
-      const ctx = piSessionCtx(fx.tmp, fx.cwd, {
-        ui: { notify: (msg: string) => { notified.push(msg); }, confirm: async () => true, select: async () => undefined, input: async () => "", setStatus: () => {} },
-      });
-
-      await handlers.get("session_start")![0]!({}, ctx);
-
-      const toolNames = api.tools.map((t) => t.name);
-      assert.ok(toolNames.includes("acp_delegate"), "a global install must not disable acp_delegate in every project");
-      assert.ok(toolNames.includes("acp_delegate_wait"), "acp_delegate_wait registered");
-      assert.ok(toolNames.includes("acp_delegate_cancel"), "acp_delegate_cancel registered");
-      assert.deepEqual(shortcuts, [DEFAULT_FLEET_SHORTCUT], "fleet shortcut registered by default");
-      assert.ok(!notified.some((m) => m === DELEGATE_STAND_DOWN_MESSAGE), "no stand-down reminder for a user-scope-only install");
-    });
-  } finally {
-    fx.cleanup();
-  }
-});
-
-test("#415: delegate.forceEnable keeps acp_delegate despite project-scope pi-subagents", async () => {
-  const fx = standDownFixture("project");
-  try {
-    await withAgentDir(fx.agentDir, async () => {
-      const { api, handlers } = captureApi();
-      const shortcuts: string[] = [];
-      (api as any).registerShortcut = (key: string) => { shortcuts.push(key); };
-      createAcpExtension({ delegate: { forceEnable: true } })(api as any);
-
-      const notified: string[] = [];
-      const ctx = piSessionCtx(fx.tmp, fx.cwd, {
-        ui: { notify: (msg: string) => { notified.push(msg); }, confirm: async () => true, select: async () => undefined, input: async () => "", setStatus: () => {} },
-      });
-      await handlers.get("session_start")![0]!({}, ctx);
-
-      const toolNames = api.tools.map((t) => t.name);
-      assert.ok(toolNames.includes("acp_delegate"), "acp_delegate registered with forceEnable");
-      assert.ok(toolNames.includes("acp_delegate_wait"), "acp_delegate_wait registered with forceEnable");
-      assert.ok(toolNames.includes("acp_delegate_cancel"), "acp_delegate_cancel registered with forceEnable");
-      assert.deepEqual(shortcuts, [DEFAULT_FLEET_SHORTCUT], "shortcut registered with forceEnable");
-      assert.ok(!notified.some((m) => m === DELEGATE_STAND_DOWN_MESSAGE), "no stand-down reminder when forceEnable is set");
-
-      const promptResult = handlers.get("before_agent_start")![0]!({ systemPrompt: "" }, {});
-      assert.ok(promptResult.systemPrompt.includes("ACP_DELEGATE NOTIFICATIONS"), "delegate prompt section present with forceEnable");
-    });
-  } finally {
-    fx.cleanup();
-  }
-});
-
-test("#415: explicit enabled:false wins over detection and forceEnable (priority matrix)", async () => {
-  const fx = standDownFixture("project");
-  try {
-    await withAgentDir(fx.agentDir, async () => {
-      const { api, handlers } = captureApi();
-      const shortcuts: string[] = [];
-      (api as any).registerShortcut = (key: string) => { shortcuts.push(key); };
-      createAcpExtension({ delegate: { enabled: false, forceEnable: true } })(api as any);
-
-      const ctx = piSessionCtx(fx.tmp, fx.cwd);
-      await handlers.get("session_start")![0]!({}, ctx);
-
-      const toolNames = api.tools.map((t) => t.name);
-      assert.ok(!toolNames.includes("acp_delegate"), "explicitly disabled delegate stays off despite forceEnable");
-      assert.ok(!toolNames.includes("acp_delegate_wait"), "acp_delegate_wait stays off");
-      assert.ok(!toolNames.includes("acp_delegate_cancel"), "acp_delegate_cancel stays off");
-      assert.deepEqual(shortcuts, [], "no shortcut when explicitly disabled");
-
-      const promptResult = handlers.get("before_agent_start")![0]!({ systemPrompt: "" }, {});
-      assert.ok(!promptResult.systemPrompt.includes("ACP_DELEGATE NOTIFICATIONS"), "delegate prompt section absent when explicitly disabled");
-    });
-  } finally {
-    fx.cleanup();
-  }
-});
-
-test("#415: no pi-subagents → acp_delegate registers normally (regression guard)", async () => {
-  const fx = standDownFixture("none");
-  try {
-    await withAgentDir(fx.agentDir, async () => {
-      const { api, handlers } = captureApi();
-      const shortcuts: string[] = [];
-      (api as any).registerShortcut = (key: string) => { shortcuts.push(key); };
-      createAcpExtension()(api as any);
-
-      const ctx = piSessionCtx(fx.tmp, fx.cwd);
-      await handlers.get("session_start")![0]!({}, ctx);
-
-      const toolNames = api.tools.map((t) => t.name);
-      assert.ok(toolNames.includes("acp_delegate"), "acp_delegate registered when no third-party subagent is installed");
-      assert.deepEqual(shortcuts, [DEFAULT_FLEET_SHORTCUT], "shortcut registered by default");
-    });
-  } finally {
-    fx.cleanup();
-  }
-});
 
 test("withAgentDir restores PI_CODING_AGENT_DIR/HOME/USERPROFILE without leaking env", async () => {
   const prevAgent = process.env.PI_CODING_AGENT_DIR;

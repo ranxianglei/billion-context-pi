@@ -41,7 +41,6 @@ test("lean pack is a kernel builtin carrying its pi surface under adapters", () 
   assert.equal(leanPack.name, "lean");
   assert.equal(leanPack.source, "builtin:lean");
   assert.equal(leanPack.surface.promptSections, undefined);
-  assert.equal(leanPack.surface.delegatePrompt, undefined);
   assert.equal(leanPack.surface.prompts, undefined);
   assert.equal(typeof leanPack.surface.toolPrompts?.compress?.description, "string");
   const rules = leanPiSections().acpTags;
@@ -73,7 +72,6 @@ test("piAdapterSurface(leanPack): aligned rules kept, every other section nulled
   for (const t of ["compress", "decompress", "search_context", "acp_status"] as const) {
     assert.deepEqual(s.toolExtras[t], { promptSnippet: "", promptGuidelines: [] });
   }
-  assert.equal(s.delegatePrompt, undefined);
   assert.deepEqual(piAdapterSurface(defaultPack), { promptSections: {}, toolExtras: {} });
 });
 
@@ -162,7 +160,6 @@ test("mergeSurface: inline wins per field, pack fills the rest", () => {
         pi: {
           promptSections: { acpTags: "PACK TAGS", tools: "PACK TOOLS" },
           toolExtras: { compress: { promptSnippet: "PACK SNIP", promptGuidelines: ["pack-g"] } },
-          delegatePrompt: "PACK DELEGATE",
         },
       },
     },
@@ -180,15 +177,7 @@ test("mergeSurface: inline wins per field, pack fills the rest", () => {
   assert.deepEqual(merged.toolPrompts.compress?.promptGuidelines, ["pack-g"]);
   assert.equal(merged.toolPrompts.compress?.paramDescriptions?.startId, "inline-start");
   assert.equal(merged.toolPrompts.compress?.paramDescriptions?.endId, "pack-end");
-  assert.equal(merged.delegatePrompt, "PACK DELEGATE");
   assert.equal((merged.prompts as Record<string, string>).compressPhilosophy, "INLINE PHILO");
-});
-
-test("mergeSurface: inline delegatePrompt (incl. null) beats pack", () => {
-  const pack: Pack = { name: "t", source: "test", surface: { adapters: { pi: { delegatePrompt: "PACK DELEGATE" } } } };
-  assert.equal(mergeSurface(pack, {}).delegatePrompt, "PACK DELEGATE");
-  assert.equal(mergeSurface(pack, { delegatePrompt: "INLINE" }).delegatePrompt, "INLINE");
-  assert.equal(mergeSurface(pack, { delegatePrompt: null }).delegatePrompt, null);
 });
 
 test("piAdapterSurface sanitizes junk: bad section types dropped, malformed extras dropped", () => {
@@ -205,7 +194,6 @@ test("piAdapterSurface sanitizes junk: bad section types dropped, malformed extr
             acp_status: { promptSnippet: "s", promptGuidelines: [1, "ok"] },
             decompress: { promptGuidelines: ["fine"] },
           },
-          delegatePrompt: "D",
         },
       },
     },
@@ -217,7 +205,6 @@ test("piAdapterSurface sanitizes junk: bad section types dropped, malformed extr
     acp_status: { promptSnippet: "s" },
     decompress: { promptGuidelines: ["fine"] },
   });
-  assert.equal(s.delegatePrompt, "D");
 });
 
 test("piAdapterSurface pass-through: every kernel-shipped tri-state value on a pi key survives untouched", () => {

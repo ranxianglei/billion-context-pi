@@ -43,11 +43,6 @@ Create `~/.pi/acp.json` (or `<project>/.pi/acp.json`) and drop in whichever keys
     "maxRetries": 10
   },
 
-  "delegate": {
-    "enabled": true,
-    "displayUsage": "separate"
-  },
-
   "compress": {
     "maxContextLimit": "75%",
     "emergencyThresholdPercent": "95%",
@@ -139,21 +134,9 @@ All keys below are currently **ACTIVE**.
 | `hostSession` | boolean \| object | `false` | 🟢 ACTIVE | Turn-boundary policy for multi-session hosts: count injected `custom_message` entries as turn starts. Off by default (pi-native behavior). |
 | `rules` | boolean | `false` | 🟢 ACTIVE | Register the opt-in `acp_rule` record tool: short, principle-level reminders hard-protected from compression. Off by default. |
 
-**Delegate keys**
+**Sub-agent (delegate) keys**
 
-| Key | Type | Default | Status | Description |
-|-----|------|---------|--------|-------------|
-| `delegate.enabled` | boolean | `true` | 🟢 ACTIVE | Enable the `acp_delegate` tools and their system-prompt section. |
-| `delegate.forceEnable` | boolean | `false` | 🟢 ACTIVE | Keep `acp_delegate` active even when a **project-scope** `pi-subagents` install is detected (default: auto stand-down; a user-scope-only install just logs a warning). Overridden by `PI_ACP_DELEGATE_FORCE_ENABLE`. |
-| `delegate.displayUsage` | string | `"separate"` | 🟢 ACTIVE | Controls how delegate sub-agent token usage is reported. |
-| `delegate.maxDepth` | number | `2` | 🟢 ACTIVE | Max nesting depth for `acp_delegate` (main session = depth 0; a session *at* this depth is a leaf and cannot delegate again). Set `1` so delegates never nest. |
-| `delegate.syncTimeoutMinutes` | number | `5` | 🟢 ACTIVE | Hard timeout for **synchronous** `acp_delegate` calls, in minutes. `0` / `null` disables it. |
-| `delegate.idleTimeoutMinutes` | number | `5` | 🟢 ACTIVE | Idle watchdog for async delegate children — force-finish after this many minutes without output. `0` / `null` disables it. |
-| `delegate.asyncTimeoutMinutes` | number | `30` | 🟢 ACTIVE | Absolute hard limit for async delegate children, in minutes. `0` / `null` disables it. |
-| `delegate.maxConcurrent` | number | unlimited | 🟢 ACTIVE | Max background (`async`) delegates running at once; extra launches queue FIFO and start as slots free. `1` = forced serial. Overridden by `PI_ACP_DELEGATE_MAX_CONCURRENT`. |
-| `delegate.thinkingLevel` | string | _(unset)_ | 🟢 ACTIVE | Global default thinking level for delegates (per-call > role > global > Pi default). |
-| `delegate.agents` | object | _(unset)_ | 🟢 ACTIVE | Per-role default model + thinking level, keyed by role name. |
-| `delegate.fleetShortcut` | string | `ctrl+alt+d` | 🟢 ACTIVE | TUI shortcut for the `acp_delegate` fleet inspector; set `""` to disable registration. |
+The `delegate.*`, `displayUsage` and `delegatePrompt` keys were moved to [billion-context-pi-subagents](https://github.com/ranxianglei/billion-context-pi-subagents) ([#612](https://github.com/ranxianglei/billion-context-pi/issues/612)) — this package no longer reads them. Existing keys are picked up unchanged by that package from the same `acp.json` files; its README carries the full key reference.
 
 **Provider throttle retry keys**
 
@@ -203,11 +186,8 @@ All keys below are currently **ACTIVE**.
 | `ACP_DEBUG` | Set to `1` / `true` to enable debug logging. |
 | `ACP_LOG_FILE` | Override the log file path (default `~/.pi/acp.log`). |
 | `PI_ACP_FORK_HOST` | Set to `1` / `true` to declare a Pi-compatible fork host (no `buildContextEntries()`) as supported. OMP stays refused by default. See [docs/host-adapter.md](./docs/host-adapter.md). |
-| `PI_ACP_DELEGATE_MAX_DEPTH` | Override `delegate.maxDepth`. |
-| `PI_ACP_DELEGATE_SYNC_TIMEOUT_MINUTES` | Override `delegate.syncTimeoutMinutes`; `0` disables the sync hard timeout. |
-| `PI_ACP_DELEGATE_IDLE_TIMEOUT_MINUTES` | Override `delegate.idleTimeoutMinutes`; `0` disables the idle watchdog. |
-| `PI_ACP_DELEGATE_ASYNC_TIMEOUT_MINUTES` | Override `delegate.asyncTimeoutMinutes`; `0` disables the async hard limit. |
-| `PI_ACP_DELEGATE_FORCE_ENABLE` | Override `delegate.forceEnable`; takes `true` / `false`. |
+
+The `PI_ACP_DELEGATE_*` environment variables moved with the delegate keys to [billion-context-pi-subagents](https://github.com/ranxianglei/billion-context-pi-subagents) ([#612](https://github.com/ranxianglei/billion-context-pi/issues/612)); this package no longer reads them.
 
 > **Only the documented keys are read from `acp.json`.** Other tuning knobs (`preserveRecentMessages`) are code-level and not user-overridable. The three compression thresholds form a three-tier escalation: growth-driven soft nudges → forced nudges at `compress.maxContextLimit` → emergency truncation at `compress.emergencyThresholdPercent`.
 
@@ -227,7 +207,7 @@ All keys below are currently **ACTIVE**.
 - **Type:** `boolean`
 - **Default:** `false`
 - **Status:** 🟢 ACTIVE
-- **Description:** Enable verbose **debug-level** events in the log file (default `~/.pi/acp.log`). The always-on log (session/turn/compress/delegate lifecycle events, all errors and warnings) is written regardless of this setting; `debug` only adds extra diagnostics such as full field dumps and per-turn internals. Also enabled by the environment variable `ACP_DEBUG=1` (or `ACP_DEBUG=true`).
+- **Description:** Enable verbose **debug-level** events in the log file (default `~/.pi/acp.log`). The always-on log (session/turn/compress lifecycle events, all errors and warnings) is written regardless of this setting; `debug` only adds extra diagnostics such as full field dumps and per-turn internals. Also enabled by the environment variable `ACP_DEBUG=1` (or `ACP_DEBUG=true`). ([billion-context-pi-subagents](https://github.com/ranxianglei/billion-context-pi-subagents) writes to the same file when installed.)
 
 ### `autoUpdate`
 
@@ -322,110 +302,13 @@ The `rules` key controls the `acp_rule` record tool — an opt-in way to persist
 
 ---
 
-## Delegate
+## Sub-agents (separate package)
 
-The `delegate` sub-object controls the `acp_delegate` sub-agent tool family (`acp_delegate`, `acp_delegate_wait`, `acp_delegate_cancel`) and how their token usage is reported.
+The `acp_delegate` sub-agent tool family (`acp_delegate`, `acp_delegate_wait`, `acp_delegate_cancel`) was split out of this package into **[billion-context-pi-subagents](https://github.com/ranxianglei/billion-context-pi-subagents)** ([#612](https://github.com/ranxianglei/billion-context-pi/issues/612)). Its configuration surface moved with it:
 
-> **Backward compatibility:** For convenience, `delegate` accepts both an object and a boolean shorthand:
-> - `delegate: true` is treated as `delegate: { enabled: true }`.
-> - The legacy flat top-level `displayUsage` key is still accepted as an alias for `delegate.displayUsage`. Prefer the nested `delegate.displayUsage` form.
-
-### `delegate.enabled`
-
-- **Type:** `boolean`
-- **Default:** `true`
-- **Status:** 🟢 ACTIVE
-- **Description:** Enable the `acp_delegate` tools (`acp_delegate`, `acp_delegate_wait`, `acp_delegate_cancel`) and the system-prompt section that describes them. Set to `false` to skip registering them entirely — for example, if you use a different sub-agent extension, or when running headless where async result injection adds no value. See **Using your own sub-agent instead** in [README.md](./README.md) for the "I keep my own sub-agent" walkthrough.
-- **When it applies:** the three tools are registered at session start, so a change takes effect on the **next session** (or a Pi restart). The system-prompt section is resolved live on every turn and can disappear mid-session before the tools do.
-- **Only the prompt section:** `delegatePrompt: null` removes the `ACP_DELEGATE NOTIFICATIONS` block while keeping the tools.
-- **Not a substitute:** Pi's `--exclude-tools acp_delegate,acp_delegate_wait,acp_delegate_cancel` hides the tools but **not** the prompt section, which would leave the model told about tools it cannot call.
-
-### `delegate.forceEnable`
-
-- **Type:** `boolean`
-- **Default:** `false`
-- **Status:** 🟢 ACTIVE
-- **Description:** Keep `acp_delegate` active even when the third-party [`pi-subagents`](https://github.com/nicobailon/pi-subagents) extension is installed at project scope. By default (`false`), a **project-scope** `pi-subagents` install (`<cwd>/.pi/npm/node_modules/pi-subagents` or `<cwd>/.pi/extensions/`) detected at session start makes `acp_delegate` stand down automatically — both extensions ship overlapping sub-agent systems (own fleet checker, spawn path, and the inspector shortcut clash behind #412), and running two fleets confuses the model. A **user-scope-only** install (`~/.pi/npm`, user extensions dir) does NOT disable `acp_delegate`; it logs a warning instead, so a global install can't silently turn it off in every project. When it stands down, a reminder explains that `pi-subagents`' agents do NOT get ACP context compression by default, and that running `/acp-subagents` injects `compress` / `decompress` / `search_context` / `acp_status` into its agent overrides. Precedence: an explicit `delegate.enabled: false` always wins over `forceEnable`; the env var `PI_ACP_DELEGATE_FORCE_ENABLE` overrides this key.
-- **When it applies:** same timing as `delegate.enabled` — tools and the shortcut register at session start, so a change takes effect on the **next session**; the system-prompt section is resolved live on every turn and can disappear mid-session before the tools do.
-
-### `delegate.displayUsage`
-
-- **Type:** string enum `"merged" | "separate"`
-- **Default:** `"separate"`
-- **Status:** 🟢 ACTIVE
-- **Description:** Controls how delegate sub-agent token usage is reported back to the main session. `"separate"` (default) tracks delegate tokens in a separate accumulator — the main session totals stay clean and delegate usage shows as its own block in `acp_status` (excluded from main totals). `"merged"` folds delegate token usage into the tool-result `usage` field so it is counted as part of the main session totals. Only meaningful when `delegate.enabled` is `true`.
-
-### `delegate.maxDepth`
-
-- **Type:** integer ≥ 1
-- **Default:** `2`
-- **Status:** 🟢 ACTIVE
-- **Description:** Maximum nesting depth for `acp_delegate`. Depth counts how far a session sits below the main session (main = 0); a session may only spawn a delegate while its own depth is **below** this limit, so a session *at* the limit becomes a leaf and cannot delegate again. The default `2` allows main → delegate → sub-delegate; set `1` for an orchestrator / leaf-worker pattern where delegates never nest further. The resolved limit is propagated to children via the internal `PI_ACP_DELEGATE_MAX_DEPTH` environment variable, so it binds the whole delegation tree even if a child loads a different project `acp.json`. Invalid values (non-integer, `< 1`) fall back to the default with a warning log. Environment override: `PI_ACP_DELEGATE_MAX_DEPTH` (takes precedence over this key).
-
-### `delegate.syncTimeoutMinutes`
-
-- **Type:** number (minutes, fractional allowed) or `0` / `null`
-- **Default:** `5`
-- **Status:** 🟢 ACTIVE
-- **Description:** Hard timeout for **synchronous** `acp_delegate` calls — the child process is killed (SIGTERM) if it has not finished within this window. Set `0` (or `null`) to run synchronous delegates without a hard timeout. Fractional minutes are accepted (e.g. `0.5` = 30s). Invalid values fall back to the default with a warning log. Environment override: `PI_ACP_DELEGATE_SYNC_TIMEOUT_MINUTES` (`0` disables).
-
-### `delegate.idleTimeoutMinutes`
-
-- **Type:** number (minutes, fractional allowed) or `0` / `null`
-- **Default:** `5`
-- **Status:** 🟢 ACTIVE
-- **Description:** Idle watchdog for async delegate children: if a child produces **no output** for this long, it is considered hung and force-finished. This is the primary defense against a stuck child holding its stdout pipe open. Set `0` (or `null`) to disable it — ACP logs a prominent warning when you do; `acp_delegate_cancel` remains available as a manual escape hatch. Fractional minutes are accepted. Invalid values fall back to the default with a warning log. Environment override: `PI_ACP_DELEGATE_IDLE_TIMEOUT_MINUTES` (`0` disables).
-
-### `delegate.asyncTimeoutMinutes`
-
-- **Type:** number (minutes, fractional allowed) or `0` / `null`
-- **Default:** `30`
-- **Status:** 🟢 ACTIVE
-- **Description:** Absolute hard limit for **asynchronous** delegate children, regardless of activity. Set `0` (or `null`) to run long tasks without an absolute cap — the idle watchdog still applies unless separately disabled. Fractional minutes are accepted. Invalid values fall back to the default with a warning log. Environment override: `PI_ACP_DELEGATE_ASYNC_TIMEOUT_MINUTES` (`0` disables).
-
-### `delegate.maxConcurrent`
-
-- **Type:** number (integer ≥ 1)
-- **Default:** unlimited (no concurrency cap)
-- **Status:** 🟢 ACTIVE
-- **Environment override:** `PI_ACP_DELEGATE_MAX_CONCURRENT` (takes precedence over this key)
-- **Description:** Caps how many background (`async: true`) delegates run **at the same time**. When the limit is reached, further launches are held in a FIFO queue and start automatically as soon as a slot frees, so nothing is dropped — they just wait their turn. Set `1` to force strictly serial execution (useful on low-power machines where parallel sub-agents contend for CPU and time out). Sync (`async: false`) calls always run immediately and are not affected by this cap. Invalid values (non-integers or `< 1`) fall back to unlimited with a warning rather than failing the session. Only meaningful when `delegate.enabled` is `true`.
-
-### `delegate.thinkingLevel`
-
-- **Type:** string enum `"off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"`
-- **Default:** _(unset — each child uses Pi's own default)_
-- **Status:** 🟢 ACTIVE
-- **Description:** Global default thinking level applied to every delegate when neither the per-call `thinkingLevel` nor the role's own `thinkingLevel` (see `delegate.agents`) is set. Without any value at all levels, no `--thinking` flag is passed and each child runs on Pi's own default. An invalid value is ignored with a warning logged (it never fails the run). A per-call `acp_delegate({ thinkingLevel })` always wins over this global.
-
-### `delegate.agents`
-
-- **Type:** object — map of role name → `{ model?, thinkingLevel? }`
-- **Default:** _(unset — all roles inherit the parent model + Pi defaults)_
-- **Status:** 🟢 ACTIVE
-- **Description:** Per-role defaults so long-lived automation can pin a cheaper or more capable model and thinking level per delegate role without the main agent having to fill them in on every call. Keys are role names (`reviewer`, `researcher`, `worker`, `planner`, `oracle`, or any custom role). Each value may set:
-  - `model` (`"provider/id"`) — this role's default model. Resolution priority: per-call `model` > this role's `model` > parent agent's current model. A value that isn't a valid `"provider/id"` is ignored. If the configured model doesn't exist in the live registry, the child falls back to the parent model and a warning is logged — it never fails.
-  - `thinkingLevel` — this role's default thinking level (same enum as `delegate.thinkingLevel`). Priority: per-call > role > global.
-
-```jsonc
-{
-  "delegate": {
-    "thinkingLevel": "low",
-    "agents": {
-      "reviewer": { "model": "opencode-go/deepseek-v4-flash", "thinkingLevel": "high" },
-      "worker":   { "model": "anthropic/claude-sonnet-4-5" },
-      "oracle":   { "model": "openai/gpt-5", "thinkingLevel": "xhigh" }
-    }
-  }
-}
-```
-
-### `delegate.fleetShortcut`
-
-- **Type:** string — any Pi key id (e.g. `"ctrl+alt+d"`, `"ctrl+shift+f"`); the empty string `""` disables registration
-- **Default:** `ctrl+alt+d`
-- **Status:** 🟢 ACTIVE
-- **Description:** Keyboard shortcut for the TUI **fleet inspector** (live list + transcript of running/finished `acp_delegate` runs). The default was moved off `ctrl+alt+f`, which is also claimed by the `pi-subagents` extension — Pi's loader cannot deduplicate or let users override cross-extension shortcut conflicts, so both extensions would fight over the key (#412). The inspector remains reachable via `/acp-fleet` regardless of this setting. Set to `""` to register no shortcut (e.g. when you rely on another extension's fleet UI). An invalid value registers a never-matching binding instead of failing startup.
+- All `delegate.*` keys (`enabled`, `forceEnable`, `displayUsage`, `maxDepth`, `syncTimeoutMinutes`, `idleTimeoutMinutes`, `asyncTimeoutMinutes`, `maxConcurrent`, `thinkingLevel`, `agents`, `fleetShortcut`), the legacy flat top-level `displayUsage` alias, and the top-level `delegatePrompt` override now belong to that package. They are read from the same files (`~/.pi/acp.json`, `<project>/.pi/acp.json`) by that package — existing keys work unchanged there and are ignored by this one.
+- All `PI_ACP_DELEGATE_*` environment variables moved with the keys.
+- Full key reference (types, defaults, precedence): see the [billion-context-pi-subagents README](https://github.com/ranxianglei/billion-context-pi-subagents#configuration).
 
 ---
 
@@ -696,7 +579,7 @@ The flow is:
 - **Type:** `string` — pack name (`[A-Za-z0-9][A-Za-z0-9._-]*`, no path separators)
 - **Default:** `"default"`
 - **Status:** 🟢 ACTIVE
-- **Description:** Selects a **prompt pack** — a named bundle of surface overrides (prompt sections, nudge sections, tool prompts, delegate prompt, compression rules) applied as the base layer under your inline `acp.json` overrides. Resolved through the same three-level cascade as every other `compress.*` field: `models > providers > global`, per active model, per turn. See [Prompt Packs](#prompt-packs) for the full reference and the built-in `lean` pack.
+- **Description:** Selects a **prompt pack** — a named bundle of surface overrides (prompt sections, nudge sections, tool prompts, compression rules) applied as the base layer under your inline `acp.json` overrides. Resolved through the same three-level cascade as every other `compress.*` field: `models > providers > global`, per active model, per turn. See [Prompt Packs](#prompt-packs) for the full reference and the built-in `lean` pack.
 
 ### Soft target with elastic headroom (#1122)
 
@@ -845,22 +728,11 @@ The `prompts` object overrides acp-kernel's **load-bearing** compression prompt 
   }
   ```
 
-### `delegatePrompt`
-
-- **Type:** `string | null`
-- **Default:** *(built-in `ACP_DELEGATE_NOTIFICATIONS` appendix)*
-- **Status:** 🟢 ACTIVE
-- **Description:** Replace (`string`) or remove (`null`) the `ACP_DELEGATE_NOTIFICATIONS` appendix appended to the system prompt when the delegate tool is enabled. Useful for hosts that run their own delegate scheme with different semantics. Only applies when `delegate` is enabled. Example:
-
-  ```json
-  { "delegatePrompt": "Background task results arrive as system notifications — read the result file if relevant." }
-  ```
-
 ---
 
 ## Prompt Packs
 
-A **prompt pack** is a named JSON file bundling surface overrides — prompt sections, nudge sections, tool prompts, the delegate prompt, and the four load-bearing compression rules — so you can switch a model's entire ACP surface with one line instead of pasting a block of `promptSections`/`toolPrompts` JSON into `acp.json`:
+A **prompt pack** is a named JSON file bundling surface overrides — prompt sections, nudge sections, tool prompts, and the four load-bearing compression rules — so you can switch a model's entire ACP surface with one line instead of pasting a block of `promptSections`/`toolPrompts` JSON into `acp.json`:
 
 ```json
 { "compress": { "promptPack": "lean" } }
@@ -897,8 +769,7 @@ Names must match `[A-Za-z0-9][A-Za-z0-9._-]*` (no `..`, no path separators); inv
   },
   "promptSections": { "acpTags": "...", "tier2": null },   // same schema as acp.json promptSections
   "nudgeSections": { "efficiencyNote": "..." },             // same schema as acp.json nudgeSections
-  "toolPrompts": { "compress": { "description": "..." } }, // same schema as acp.json toolPrompts
-  "delegatePrompt": "..."          // string replaces, null removes
+  "toolPrompts": { "compress": { "description": "..." } } // same schema as acp.json toolPrompts
 }
 ```
 
@@ -910,7 +781,6 @@ The effective surface for a turn = **pack defaults ⊕ inline `acp.json` overrid
 
 - `promptSections` / `nudgeSections`: inline key beats pack key (including `null`).
 - `toolPrompts`: per-tool, then per-field (`description`, `promptSnippet`, `promptGuidelines`), then per-param inside `paramDescriptions`.
-- `delegatePrompt`: inline wins if present (including `null`).
 
 ### Programmatic sources (hosts & future installers)
 
@@ -975,44 +845,4 @@ Environment variables take precedence over the JSON config files. They are usefu
 - **Status:** 🟢 ACTIVE
 - **Description:** Override the path to the log file. By default, structured logs are written to `~/.pi/acp.log` (the file rotates to `~/.pi/acp.log.old` at 10 MB). Point this at a different location to keep per-project or per-run logs separate. On a Pi fork, `~/.pi` is the fork's own config directory (`~/.prime` on Prime) — see [docs/host-adapter.md §4](./docs/host-adapter.md#4-config-directory-config_dir_name).
 
-### `PI_ACP_DELEGATE_MAX_DEPTH`
 
-- **Type:** integer ≥ 1
-- **Default:** *(unset — follows `delegate.maxDepth`, then 2)*
-- **Status:** 🟢 ACTIVE
-- **Description:** Override the maximum delegate nesting depth for one session without editing config. Takes precedence over `delegate.maxDepth`. The resolved value is what gets propagated down the delegation tree. Do not set this manually mid-tree: it is also the internal variable ACP uses to pass the *effective limit* into child processes.
-
-### `PI_ACP_DELEGATE_SYNC_TIMEOUT_MINUTES`
-
-- **Type:** number (minutes) or `0`
-- **Default:** *(unset — follows `delegate.syncTimeoutMinutes`, then 5)*
-- **Status:** 🟢 ACTIVE
-- **Description:** Override the synchronous `acp_delegate` hard timeout. Set `0` to disable the sync hard timeout for one session. Takes precedence over `delegate.syncTimeoutMinutes`.
-
-### `PI_ACP_DELEGATE_IDLE_TIMEOUT_MINUTES`
-
-- **Type:** number (minutes) or `0`
-- **Default:** *(unset — follows `delegate.idleTimeoutMinutes`, then 5)*
-- **Status:** 🟢 ACTIVE
-- **Description:** Override the async idle watchdog window. Set `0` to disable the idle watchdog for one session (ACP logs a warning; `acp_delegate_cancel` remains as a manual escape hatch). Takes precedence over `delegate.idleTimeoutMinutes`.
-
-### `PI_ACP_DELEGATE_ASYNC_TIMEOUT_MINUTES`
-
-- **Type:** number (minutes) or `0`
-- **Default:** *(unset — follows `delegate.asyncTimeoutMinutes`, then 30)*
-- **Status:** 🟢 ACTIVE
-- **Description:** Override the absolute hard limit for async delegate children. Set `0` to run long tasks without an absolute cap (the idle watchdog still applies unless disabled). Takes precedence over `delegate.asyncTimeoutMinutes`.
-
-### `PI_ACP_DELEGATE_MAX_CONCURRENT`
-
-- **Type:** integer (≥ 1)
-- **Default:** *(unset — cap follows `delegate.maxConcurrent`, then unlimited)*
-- **Status:** 🟢 ACTIVE
-- **Description:** Override the background (`async`) delegate concurrency cap. **Takes precedence** over `delegate.maxConcurrent`. Set to `1` for forced serial execution. Invalid values fall back to the next source (then unlimited) with a warning rather than failing the session.
-
-### `PI_ACP_DELEGATE_FORCE_ENABLE`
-
-- **Type:** `true` | `false`
-- **Default:** *(unset — follows `delegate.forceEnable`, then false)*
-- **Status:** 🟢 ACTIVE
-- **Description:** Override whether `acp_delegate` stays active despite a detected project-scope `pi-subagents` install. **Takes precedence** over `delegate.forceEnable`. Unparseable values fall back to the config value with a warning rather than failing the session.

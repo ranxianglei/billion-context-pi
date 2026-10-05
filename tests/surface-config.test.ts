@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { defaultPrompts } from "acp-kernel";
-import { buildAcpSystemPrompt, ACP_DELEGATE_PROMPT, sanitizePromptSections, SECTION_KEYS } from "../src/system-prompt.js";
+import { buildAcpSystemPrompt, sanitizePromptSections, SECTION_KEYS } from "../src/system-prompt.js";
 import { sanitizeToolPrompts, sanitizeNudgeSections, applyToolPromptOverrides, readToolSurfaceSync, sanitizeSurfaceConfig } from "../src/surface.js";
 import { loadUserConfig } from "../src/user-config.js";
 
@@ -14,11 +14,6 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 test("default system prompt is byte-identical to the recorded fixture", async () => {
   const fixture = await import("node:fs/promises").then((fs) => fs.readFile(path.join(here, "fixtures/pi-system-prompt-default.txt"), "utf8"));
   assert.equal(buildAcpSystemPrompt(defaultPrompts), fixture);
-});
-
-test("default delegate appendix is byte-identical to the recorded fixture", async () => {
-  const fixture = await import("node:fs/promises").then((fs) => fs.readFile(path.join(here, "fixtures/pi-delegate-prompt-default.txt"), "utf8"));
-  assert.equal(ACP_DELEGATE_PROMPT, fixture);
 });
 
 test("promptSections: string replaces, null removes, unknown keys ignored", () => {
@@ -100,33 +95,30 @@ test("readToolSurfaceSync picks up project .pi/acp.json (global ignored when abs
   }
 });
 
-test("sanitizeSurfaceConfig sanitizes all four surface fields", () => {
+test("sanitizeSurfaceConfig sanitizes all three surface fields", () => {
   const out = sanitizeSurfaceConfig({
     promptSections: { acpTags: "ok", bogus: "drop" },
     nudgeSections: { efficiencyNote: null, t2Guidance: "t", bogus: 1 },
     toolPrompts: { compress: { description: "d" }, bogus: {} },
-    delegatePrompt: 42,
   });
   assert.deepEqual(out.promptSections, { acpTags: "ok" });
   assert.deepEqual(out.nudgeSections, { efficiencyNote: null, t2Guidance: "t" });
   assert.deepEqual(out.toolPrompts, { compress: { description: "d" } });
-  assert.equal(out.delegatePrompt, undefined);
 });
 
-test("loadUserConfig picks up the four new keys from project acp.json", async () => {
+test("loadUserConfig picks up the three new keys from project acp.json", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "acp-usercfg-"));
   try {
     await mkdir(path.join(dir, ".pi"), { recursive: true });
     await writeFile(
       path.join(dir, ".pi/acp.json"),
-      JSON.stringify({ promptSections: { acpTags: "P" }, nudgeSections: { emergencyHeader: null }, toolPrompts: { acp_status: { promptSnippet: "S" } }, delegatePrompt: "D" }),
+      JSON.stringify({ promptSections: { acpTags: "P" }, nudgeSections: { emergencyHeader: null }, toolPrompts: { acp_status: { promptSnippet: "S" } } }),
       "utf8",
     );
     const cfg = await loadUserConfig(dir);
     assert.deepEqual(cfg.promptSections, { acpTags: "P" });
     assert.deepEqual(cfg.nudgeSections, { emergencyHeader: null });
     assert.deepEqual(cfg.toolPrompts, { acp_status: { promptSnippet: "S" } });
-    assert.equal(cfg.delegatePrompt, "D");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
