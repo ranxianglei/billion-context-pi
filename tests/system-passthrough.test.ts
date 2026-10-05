@@ -95,3 +95,71 @@ test("non-system message order and identity are preserved when carrying", () => 
   const out = carryHostSystemMessages([u1, a1, u2] as AgentMessage[], [sys, u1, a1, u2] as AgentMessage[]) as object[];
   assert.deepEqual(out.slice(1), [u1, a1, u2]);
 });
+
+// ─── #616: pi 1.0.x `sections` (MCP `<mcp_servers>` patches) ────────────────
+
+const MCP_SECTIONS = { mcp_servers: "<mcp_servers>\n- docx_mcp (codemode)\n</mcp_servers>" };
+
+test("section-only system message missing from the rebuild is carried back verbatim (#616)", () => {
+  const s0 = system("base prompt", { sections: { env: "e" }, timestamp: 7 });
+  const sMcp = system("", { sections: MCP_SECTIONS, timestamp: 9 });
+  const u = user("q");
+  // Rebuilt view knows only s0 (the section-only patch never entered the kernel).
+  const rebuilt = [{ role: "system", content: "base prompt", timestamp: 7, sections: { env: "e" } }, u];
+  const out = carryHostSystemMessages(rebuilt as unknown as AgentMessage[], [s0, u, sMcp] as AgentMessage[]) as object[];
+  const sysMsgs = out.filter((m) => (m as Record<string, unknown>).role === "system");
+  assert.equal(sysMsgs.length, 2);
+  assert.deepEqual((sysMsgs[1] as Record<string, unknown>).sections, MCP_SECTIONS);
+  assert.equal(out.length, 3);
+});
+
+test("compressed-away leading system message is re-carried in host order (#616)", () => {
+  const s0 = system("base prompt", { sections: { env: "e" }, timestamp: 7 });
+  const s1 = system("", { sections: MCP_SECTIONS, timestamp: 9 });
+  const u = user("q");
+  // Kernel pruned s0 into a compression block; only s1 survives the rebuild.
+  const rebuilt = [{ role: "system", content: "", timestamp: 9, sections: MCP_SECTIONS }, u];
+  const out = carryHostSystemMessages(rebuilt as unknown as AgentMessage[], [s0, s1, u] as AgentMessage[]) as object[];
+  const sysMsgs = out.filter((m) => (m as Record<string, unknown>).role === "system") as Record<string, unknown>[];
+  assert.equal(sysMsgs.length, 2);
+  assert.deepEqual(sysMsgs[0].sections, { env: "e" });
+  assert.deepEqual(sysMsgs[1].sections, MCP_SECTIONS);
+  assert.deepEqual(out.map((m) => (m as Record<string, unknown>).role), ["system", "system", "user"]);
+});
+
+test("matched pair deep-merges stale sections: live wins per key, explicit null removes (#616)", () => {
+  const built = {
+    role: "system",
+    content: "base prompt",
+    timestamp: 7,
+    sections: { mcp_servers: "<stale server list>", env: "e" },
+  };
+  const live = system("base prompt", { sections: { mcp_servers: null, env: "e2" }, timestamp: 7 });
+  const out = carryHostSystemMessages([built] as unknown as AgentMessage[], [live] as AgentMessage[]) as object[];
+  assert.notEqual(out[0], built);
+  assert.deepEqual((out[0] as Record<string, unknown>).sections, { mcp_servers: null, env: "e2" });
+  assert.equal((out[0] as Record<string, unknown>).content, "base prompt");
+  assert.deepEqual(built.sections, { mcp_servers: "<stale server list>", env: "e" });
+});
+
+test("identical matched pair is a strict no-op (same reference, prefix-cache stable)", () => {
+  const s0 = system("base prompt", { sections: { env: "e" }, timestamp: 7 });
+  const twin = system("base prompt", { sections: { env: "e" }, timestamp: 7 });
+  const rebuilt = [s0, user("q")] as AgentMessage[];
+  assert.equal(carryHostSystemMessages(rebuilt, [twin, user("q")] as AgentMessage[]), rebuilt);
+});
+
+test("ref-tagged rebuilt copy still pairs by identity (no duplicate, fields filled)", () => {
+  const TAG = "\x3cacp tokens=\"1\" type=\"system\"\x3em00001\x3c/acp\x3e";
+  const s0 = system("base prompt", { sections: { env: "e" }, toolsAdded: [TOOL], timestamp: 7 });
+  const tagged = {
+    role: "system",
+    content: [{ type: "text", text: `base prompt\n\n${TAG}` }],
+    timestamp: 7,
+    sections: { env: "e" },
+  };
+  const out = carryHostSystemMessages([tagged] as unknown as AgentMessage[], [s0] as AgentMessage[]) as object[];
+  assert.equal(out.length, 1);
+  assert.deepEqual((out[0] as Record<string, unknown>).toolsAdded, [TOOL]);
+  assert.deepEqual((out[0] as Record<string, unknown>).sections, { env: "e" });
+});
