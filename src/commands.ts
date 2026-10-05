@@ -10,6 +10,8 @@ import { usageAnchorPredatesCompression } from "./floor-stale.js";
 import { applyOutputHeadroom, resolveOutputHeadroomCap } from "./overflow-selfheal.js";
 import { buildStatusPanel } from "acp-kernel/panel";
 import { resolveSurfaceMeta } from "./prompt-pack.js";
+import { getDelegateUsage, openFleetInspector } from "billion-context-pi-subagents";
+import { resolveDelegate } from "./config.js";
 import { ensureSubagentAcpTools } from "./setup-subagent-tools.js";
 import { cacheReportText } from "./cache-tool.js";
 
@@ -89,7 +91,7 @@ export function makeCommands(runtime: AcpRuntime, pi?: ExtensionAPI): Array<{ na
     {
       name: "acp-status",
       options: {
-        description: "Detailed ACP status (block tiers, token breakdown).",
+        description: "Detailed ACP status (block tiers, token breakdown, delegate usage).",
         handler: statusHandler,
       },
     },
@@ -277,6 +279,19 @@ export function makeCommands(runtime: AcpRuntime, pi?: ExtensionAPI): Array<{ na
         },
       },
     },
+    {
+      name: "acp-fleet",
+      options: {
+        description: "Inspect acp_delegate sub-agent runs: live list + transcript overlay (TUI), text snapshot elsewhere.",
+        handler: async (_args, ctx) => {
+          if (!resolveDelegate(runtime.adapter).enabled) {
+            ctx.ui.notify("acp_delegate is not enabled in this session's config.");
+            return;
+          }
+          await openFleetInspector(ctx);
+        },
+      },
+    },
   ];
 }
 
@@ -336,5 +351,13 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
     cacheUsages: cacheUsageSamples(entries ?? []),
   });
 
+  // pi-specific footer: delegate usage is tracked outside the main totals.
+  const delegateUsage = getDelegateUsage();
+  if (delegateUsage && delegateUsage.totalTokens > 0) {
+    const cost = delegateUsage.cost.total;
+    const costStr = cost > 0 ? ` ($${cost.toFixed(4)})` : "";
+    text += "\n\n── Session delegate usage (excluded from main totals) ──\n";
+    text += `Tokens: ${delegateUsage.input.toLocaleString()} in, ${delegateUsage.output.toLocaleString()} out (${delegateUsage.totalTokens.toLocaleString()} total)${costStr}`;
+  }
   return text;
 }

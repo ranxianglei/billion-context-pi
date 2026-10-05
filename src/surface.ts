@@ -106,5 +106,6 @@ export function sanitizeSurfaceConfig(adapter: AdapterConfig): AdapterConfig {
     promptSections: sanitizePromptSections(adapter.promptSections),
     nudgeSections: sanitizeNudgeSections(adapter.nudgeSections),
     toolPrompts: sanitizeToolPrompts(adapter.toolPrompts),
+    delegatePrompt: typeof adapter.delegatePrompt === "string" || adapter.delegatePrompt === null ? adapter.delegatePrompt : undefined,
   };
 }

@@ -6,6 +6,13 @@ import type { PiPromptSections } from "./system-prompt.js";
 import type { NudgeSectionsConfig, ToolPromptsConfig } from "./surface.js";
 import { logWarn } from "./log.js";
 
+// acp_delegate moved to billion-context-pi-subagents (#612); this repo inlines
+// it via the exact-pinned devDependency and re-exports the resolved surface so
+// internal import sites (and the public ./config.js module shape) stay stable.
+export { DEFAULT_DELEGATE_POLICY, DEFAULT_FLEET_SHORTCUT, resolveDelegate } from "billion-context-pi-subagents";
+export type { DelegateConfig, DelegatePolicy, DelegateRoleConfig } from "billion-context-pi-subagents";
+import type { DelegateConfig } from "billion-context-pi-subagents";
+
 /** Compression tuning fields, shared by all three levels (global, provider,
  *  model). Percentage fields accept a ratio (0.75) or percent string ("75%").
  *  Resolution is per-field, deepest-wins (model > provider > global); an
@@ -150,7 +157,7 @@ export interface AdapterConfig {
    *  network calls on startup. */
   autoUpdate?: boolean;
   /** Enable debug-level events in the ACP log file (default ~/.pi/acp.log).
-   *  Always-on events (session/turn/compress lifecycle, all errors and
+   *  Always-on events (session/turn/compress/delegate lifecycle, all errors and
    *  warnings) are written regardless; `debug` only adds verbose diagnostics.
    *  Default: false (or env ACP_DEBUG=1/true). */
   debug?: boolean;
@@ -170,6 +177,10 @@ export interface AdapterConfig {
    *  telling the model how to see the full output (bash: read
    *  BashToolDetails.fullOutputPath). */
   toolOutputMaxBytes?: number;
+  /** Delegate sub-agent config. Accepts a boolean shorthand (`true` →
+   *  `{ enabled: true }`, `false` → `{ enabled: false }`) or a DelegateConfig
+   *  object. Default: enabled. */
+  delegate?: boolean | DelegateConfig;
   /** Compression tuning. */
   compress?: CompressConfig;
   /** Provider token-throttle (Bedrock "Too many tokens, please wait before
@@ -211,6 +222,9 @@ export interface AdapterConfig {
    *  the model-side `acp_rule` tool (#490). Custom limits via
    *  coreOverrides.rules ({ maxRules?, maxRuleChars? }). */
   rules?: boolean;
+  /** Legacy flat alias for `delegate.displayUsage`. Kept for backward
+   *  compatibility with existing acp.json files. Prefer `delegate.displayUsage`. */
+  displayUsage?: "merged" | "separate";
   /** Override acp-kernel's load-bearing compression prompt rules (the 4
    *  Prompts fields). Each set field replaces the kernel default verbatim.
    *  Requires acknowledgePromptsRisk: true — without it, overrides are dropped
@@ -232,6 +246,9 @@ export interface AdapterConfig {
    *  paramDescriptions, promptSnippet, promptGuidelines). Read synchronously
    *  at extension load — tool defs are frozen at registration time. */
   toolPrompts?: ToolPromptsConfig;
+  /** Replace (string) or remove (null) the ACP_DELEGATE_NOTIFICATIONS appendix
+   *  injected when the delegate tool is enabled. */
+  delegatePrompt?: string | null;
   coreOverrides?: Partial<Config>;
 }
 

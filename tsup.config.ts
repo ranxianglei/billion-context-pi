@@ -20,5 +20,5 @@ export default defineConfig({
     "@earendil-works/pi-ai",
     "@earendil-works/pi-agent-core",
   ],
-  noExternal: ["typebox"],
+  noExternal: ["typebox", "billion-context-pi-subagents"],
 });

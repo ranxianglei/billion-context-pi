@@ -9,6 +9,8 @@ import { usageAnchorPredatesCompression } from "./floor-stale.js";
 import { applyOutputHeadroom, resolveOutputHeadroomCap } from "./overflow-selfheal.js";
 import { getSystemPromptText } from "./compat.js";
 import { logThrow } from "./log.js";
+import { getDelegateUsage } from "billion-context-pi-subagents";
+import { resolveDelegate } from "./config.js";
 import { UNSUPPORTED_HOST_MESSAGE } from "./omp.js";
 
 const StatusParams = Type.Object({
@@ -127,6 +129,20 @@ async function handleStatus(args: StatusArgs, runtime: AcpRuntime, ctx: Extensio
     // and /acp all render compressible+protected ranges identically
     // (merged oldest-first, with mixed-range breakdowns).
     extra.push(formatRanges(ranges, protectedRanges));
+  }
+  const delegateUsage = getDelegateUsage();
+  if (delegateUsage && delegateUsage.totalTokens > 0) {
+    extra.push("");
+    const cost = delegateUsage.cost.total;
+    const costStr = cost > 0 ? ` ($${cost.toFixed(4)})` : "";
+    extra.push("── Session delegate usage (excluded from main totals) ──");
+    extra.push(`Tokens: ${delegateUsage.input.toLocaleString()} in, ${delegateUsage.output.toLocaleString()} out (${delegateUsage.totalTokens.toLocaleString()} total)${costStr}`);
+  } else if (resolveDelegate(runtime.adapter).displayUsage === "merged") {
+    extra.push("");
+    extra.push("merged mode: delegate usage is included in main session totals.");
+  } else {
+    extra.push("");
+    extra.push("Delegate usage: none this session.");
   }
   return extra.length > 0 ? `${base}\n${extra.join("\n")}` : base;
 }
