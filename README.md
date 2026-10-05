@@ -145,7 +145,7 @@ billion-context-pi is built for the **Pi** coding agent (`@earendil-works/pi-cod
 | `search_context` | Search compressed block summaries (and visible messages) by keyword |
 | `acp_status` | Show context usage, compressed blocks, compressible ranges |
 | `acp_cache` | Prompt-cache reconciliation: grand ledger (input/cached/hit rate), per-request miss attribution, per-fold economics |
-| `acp_rule` | Record a short, principle-level reminder that survives compression (opt-in: `"rules": true`) |
+| `acp_rule` | Manage short, principle-level reminders that survive compression: record / list / delete by id / clear all (opt-in: `"rules": true`; humans: `/acp-rule`) |
 | `acp_delegate` | Spawn a clean-context sub-agent for a task (review / research / implement / plan / advise) |
 | `acp_delegate_wait` | Block until a delegate run finishes (returns its result; times out otherwise) |
 | `acp_delegate_cancel` | Cancel a running delegate by runId |
@@ -215,6 +215,21 @@ Blocks: 3 active (3.7K summary, 15.2K original compressed)
   b2 (T1)  8.2K→2.1K  age=2m  "Debug session"
   b3 (T2)  3.3K→1.0K  age=1m  "Architecture review"
 ```
+
+## `/acp-rule` command
+
+Human-side access to the same persistent session rules the model manages with `acp_rule` (requires `"rules": true`; otherwise every subcommand shows the enablement hint):
+
+```
+/acp-rule                    # list all recorded rules
+/acp-rule <text>             # record a rule directly (same echo as the tool: Recorded ruleN: …)
+/acp-rule remove <id>        # remove one rule by id (e.g. remove rule3)
+/acp-rule clear              # remove every recorded rule
+```
+
+One operation per call; mixed operations are rejected without mutating anything. Rules live in the session's ACP state sidecar next to pi's session file, so tool-side and command-side edits see each other and survive restarts. Kernel validation errors (unknown id, over-limit record) surface verbatim.
+
+**If you also run the [`billion-context`](https://github.com/ranxianglei/billion-context) thin plugin with rules enabled:** both plugins register an `acp_rule` tool in pi, and pi dedupes tools by name — **first registration per name wins**, the other is silently ignored. Which implementation answers then depends on extension load order, and the two back different stores (this adapter writes the pi session sidecar; the proxy keeps its own session state). Enable rules on only one side. (When the proxy is detectable — `BILLION_CONTEXT_PROXY` exported or a `/bili/` baseURL — this adapter stands down entirely, so the collision can only arise from an undetectable transparent-proxy setup; see the reverse-collision note above.)
 
 ## `/acp-subagents` command
 

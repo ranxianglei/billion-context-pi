@@ -133,7 +133,7 @@ billion-context-pi 面向 **Pi** 编码代理(`@earendil-works/pi-coding-agent`)
 | `decompress` | 恢复之前压缩的块内容 |
 | `search_context` | 按关键词搜索已压缩块摘要(及可见消息) |
 | `acp_status` | 显示上下文用量、已压缩块、可压缩范围 |
-| `acp_rule` | 记录一条简短、原则性的提醒,穿越压缩保留(可选:`"rules": true`) |
+| `acp_rule` | 管理穿越压缩保留的简短、原则性提醒:记录 / 列表 / 按 id 删除 / 全部清空(可选:`"rules": true`;人类侧:`/acp-rule`) |
 | `acp_delegate` | 为某个任务派生一个干净上下文的子代理(审查 / 调研 / 实现 / 规划 / 建议) |
 | `acp_delegate_wait` | 阻塞等待委派任务完成(返回结果,否则超时) |
 | `acp_delegate_cancel` | 按 runId 取消正在运行的委派任务 |
@@ -202,6 +202,21 @@ Blocks: 3 active (3.7K summary, 15.2K original compressed)
   b2 (T1)  8.2K→2.1K  age=2m  "Debug session"
   b3 (T2)  3.3K→1.0K  age=1m  "Architecture review"
 ```
+
+## `/acp-rule` 命令
+
+人类侧访问与模型通过 `acp_rule` 管理的同一份持久会话规则(需要 `"rules": true`;否则每个子命令都会显示启用提示):
+
+```
+/acp-rule                    # 列出所有已记录的规则
+/acp-rule <text>             # 直接记录一条规则(与工具端相同的回显:Recorded ruleN: …)
+/acp-rule remove <id>        # 按 id 删除一条规则(例如 remove rule3)
+/acp-rule clear              # 删除所有已记录的规则
+```
+
+每次调用仅执行一个操作;混合操作会被拒绝且不会产生任何变更。规则存储在会话的 ACP state sidecar 中,与 pi 的会话文件并列存放,因此工具侧和命令侧的编辑彼此可见,且在重启后仍然保留。内核校验错误(未知 id、超出上限的记录)会原样呈现。
+
+**如果你同时运行了启用规则的 [`billion-context`](https://github.com/ranxianglei/billion-context) 薄插件:** 两个插件都会在 pi 中注册一个 `acp_rule` 工具,而 pi 按名称对工具去重——**同名以首次注册为准**,另一个会被静默忽略。最终哪个实现响应取决于扩展加载顺序,且两者背后是不同的存储(本适配器写入 pi 会话 sidecar;代理维护自己的会话状态)。请只在一侧启用规则。(当代理可被检测到时——导出了 `BILLION_CONTEXT_PROXY` 或 baseURL 带 `/bili/` 前缀——billion-context-pi 会整体让位,因此该冲突只能出现在无法检测的透明代理配置中;详见上方反向冲突说明。)
 
 ## `/acp-subagents` 命令
 
