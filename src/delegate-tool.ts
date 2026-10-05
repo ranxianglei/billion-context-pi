@@ -721,12 +721,12 @@ The delegate runs in its own clean pi process — it does NOT see this conversat
     promptSnippet:
       'acp_delegate({ agent: "reviewer", task: "Review src/index.ts for race conditions" })',
     promptGuidelines: [
-      "Delegate to get a focused result in a clean context, or to parallelize independent work.",
-      "The sub-agent has NO access to this conversation — write a fully self-contained task.",
-      "Prefer async=true and launch several; results arrive back automatically when each finishes.",
-      "A FAILED notification (⚠️) means that task produced no usable result — read the excerpt and the output files, then decide whether to re-dispatch it before wrapping up.",
-      "A failed/cancelled run keeps its output files and can be resumed with resumeFrom: \"<runId>\" — prefer resuming over re-dispatching when the earlier work is worth keeping.",
-      "For changes you must apply yourself, delegate read-only investigation (reviewer/researcher/oracle) and keep the main context as the sole writer.",
+      "acp_delegate: use to get a focused result in a clean context, or to parallelize independent work.",
+      "acp_delegate: the sub-agent has NO access to this conversation — write a fully self-contained task.",
+      "acp_delegate: prefer async=true and launch several; results arrive back automatically when each finishes.",
+      "acp_delegate: a FAILED notification (⚠️) means that task produced no usable result — read the excerpt and the output files, then decide whether to re-dispatch it before wrapping up.",
+      "acp_delegate: a failed/cancelled run keeps its output files and can be resumed with resumeFrom: \"<runId>\" — prefer resuming over re-dispatching when the earlier work is worth keeping.",
+      "acp_delegate: for changes you must apply yourself, delegate read-only investigation (reviewer/researcher/oracle) and keep the main context as the sole writer.",
     ],
     parameters: DelegateParams,
     async execute(toolCallId, params, signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {
@@ -1128,8 +1128,8 @@ export function makeDelegateWaitTool(_pi: ExtensionAPI): ToolDefinition<typeof W
       "Block until an acp_delegate async run finishes, then return its result (status + file path). This is the ONLY way to fetch a delegate's result — there is no non-blocking status tool, so you cannot poll. Default timeout is 10s (max 300s). If the delegate finishes within the timeout, its result is returned here (same format as a sync delegate). If it times out, the run keeps going in the background and you should STOP waiting — do not retry in a loop; go do other work, and a completion notification will still be injected into the chat when it finishes.",
     promptSnippet: 'acp_delegate_wait({ runId: "del_..." })',
     promptGuidelines: [
-      "Use this to fetch a delegate's result instead of polling a status tool.",
-      "If it times out, do NOT retry — go do other work and let the background notification reach you.",
+      "acp_delegate_wait: use to fetch a delegate's result instead of polling a status tool.",
+      "acp_delegate_wait: if it times out, do NOT retry — go do other work and let the background notification reach you.",
     ],
     parameters: WaitParams,
     async execute(_toolCallId, params, signal): Promise<AgentToolResult<unknown>> {

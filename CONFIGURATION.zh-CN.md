@@ -821,7 +821,7 @@ provider 的 key 是 **Pi provider 名**(如 `"anthropic"`、`"openai"`、`"zhip
 - **类型：** `object`（逐工具部分覆盖）
 - **默认值：** *(内置默认)*
 - **状态：** 🟢 ACTIVE
-- **说明：** 覆盖四个 ACP 工具面向 LLM 的文案。键：`compress`、`decompress`、`search_context`、`acp_status`。每项可设 `description`（字符串）、`paramDescriptions`（参数名→字符串的对象——重写 schema 字段描述）、`promptSnippet`（字符串，显示在系统提示词的“可用工具”段）、`promptGuidelines`（字符串或字符串数组——追加到系统提示词 Guidelines 段）。在**扩展加载时同步读取**（工具定义在注册时固化），修改后需重启 pi。示例：
+- **说明：** 覆盖四个 ACP 工具面向 LLM 的文案。键：`compress`、`decompress`、`search_context`、`acp_status`。每项可设 `description`（字符串）、`paramDescriptions`（参数名→字符串的对象——重写 schema 字段描述）、`promptSnippet`（字符串，显示在系统提示词的“可用工具”段）、`promptGuidelines`（字符串或字符串数组——追加到系统提示词 Guidelines 段）。注意：pi 会把**所有** ACP 工具的 guidelines 合并进同一个无工具标题的扁平列表，因此每条 guideline 应以工具名开头（如 `"acp_cache: call when asked about cache hits"`），否则合并后无法区分属于哪个工具。同理，清空某工具的 `promptSnippet` 会使其从“可用工具”段整体消失。在**扩展加载时同步读取**（工具定义在注册时固化），修改后需重启 pi。示例：
 
   ```json
   {

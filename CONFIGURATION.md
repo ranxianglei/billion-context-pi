@@ -832,7 +832,7 @@ The `prompts` object overrides acp-kernel's **load-bearing** compression prompt 
 - **Type:** `object` (per-tool partial)
 - **Default:** *(built-in defaults)*
 - **Status:** 🟢 ACTIVE
-- **Description:** Override the LLM-facing text of the four ACP tools. Keys: `compress`, `decompress`, `search_context`, `acp_status`. Each accepts `description` (string), `paramDescriptions` (object mapping parameter names to strings — rewrites the schema field descriptions), `promptSnippet` (string, shown in the "Available tools" system prompt section), and `promptGuidelines` (string or string[] — appended to the system prompt Guidelines section). Read **synchronously at extension load** (tool definitions are frozen at registration), so changes require restarting pi. Example:
+- **Description:** Override the LLM-facing text of the four ACP tools. Keys: `compress`, `decompress`, `search_context`, `acp_status`. Each accepts `description` (string), `paramDescriptions` (object mapping parameter names to strings — rewrites the schema field descriptions), `promptSnippet` (string, shown in the "Available tools" system prompt section), and `promptGuidelines` (string or string[] — appended to the system prompt Guidelines section). Note: pi merges **all** ACP tools' guidelines into one flat list with no per-tool headers, so each guideline should lead with its tool name (`"acp_cache: call when asked about cache hits"`); unnamed bullets are indistinguishable across tools once merged. Likewise, clearing a tool's `promptSnippet` removes it from the "Available tools" section entirely. Read **synchronously at extension load** (tool definitions are frozen at registration), so changes require restarting pi. Example:
 
   ```json
   {
