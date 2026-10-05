@@ -530,3 +530,71 @@ test("in-place refold of a non-tail block: span clause and fingerprint reference
   assert.equal(blocks.find((b) => b.blockId === "b1")!.summary, s1b, "b1 summary replaced by the refold");
   assert.equal(blocks.find((b) => b.blockId === "b2")!.summary, s2, "b2 summary untouched");
 });
+
+// issue #520: when a successful compress leaves nothing compressible behind,
+// the panel must say so explicitly — otherwise models re-call compress on
+// phantom refs past the session tail. The stop line is withheld while ranges
+// remain or when this run produced errors (the model still owes a reaction).
+test("success panel emits an explicit stop line when no viable ranges remain (#520)", async () => {
+  const STOP = "No compressible ranges remain — the context is already at its minimum";
+  const LIST = "Current compressible ranges (use these refs exactly as listed)";
+  const BIG = "中".repeat(6000);
+
+  function setup(entries: any[]) {
+    const { api, handlers } = captureApi();
+    createAcpExtension({ modelContextLimit: 200_000, preserveRecentMessages: 1 })(api as any);
+    const ctx = fakeCtx(entries, undefined);
+    ctx.__setUsage(100_000);
+    return { api, handlers, ctx };
+  }
+
+  // Part A: clean successes reach the minimum → stop line; the all-dead
+  // follow-up (the exact #520 failure shape) gets an error, not the stop line.
+  {
+    const { api, handlers, ctx } = setup([userMsg("e1", BIG), userMsg("e2", BIG), userMsg("e3", BIG), userMsg("e4", BIG)]);
+    await runContextRound(handlers, ctx);
+    const compressTool = api.tools.find((t: any) => t.name === "compress")!;
+    async function doCompress(callId: string, content: any[]) {
+      const out = await compressTool.execute(callId, { content }, undefined, undefined, ctx);
+      return typeof out === "string" ? out : out.content?.[0]?.text ?? String(out);
+    }
+
+    const first = await doCompress("tc1", [{ startId: "m00001", endId: "m00001", summary: "first block of the #520 stop-line scenario, folding the initial big message" }]);
+    assert.ok(first.includes("▣ ACP") && !first.includes("Errors:"), `first compress failed: ${first}`);
+    assert.ok(first.includes(LIST), `ranges remain, so the list line must be present: ${first}`);
+    assert.ok(!first.includes(STOP), `no stop line while ranges remain: ${first}`);
+
+    await runContextRound(handlers, ctx);
+    const second = await doCompress("tc2", [{ startId: "m00002", endId: "m00003", summary: "second block folds the middle two messages; only the protected tail remains" }]);
+    assert.ok(second.includes("▣ ACP") && !second.includes("Errors:"), `second compress failed: ${second}`);
+    assert.ok(second.includes(STOP), `stop line required once nothing viable remains: ${second}`);
+    assert.ok(!second.includes(LIST), `no list line alongside the stop line: ${second}`);
+
+    await runContextRound(handlers, ctx);
+    const third = await doCompress("tc3", [{ startId: "m99998", endId: "m99999", summary: "phantom tail range past the session end, every ref unknown to this session" }]);
+    assert.ok(third.includes("Errors:"), `phantom refs must error: ${third}`);
+    assert.ok(!third.includes(STOP), `all-failed runs must not claim the minimum: ${third}`);
+  }
+
+  // Part B: partial success with errors and nothing left → stop line withheld.
+  {
+    const { api, handlers, ctx } = setup([userMsg("f1", BIG), userMsg("f2", BIG), userMsg("f3", BIG), userMsg("f4", BIG)]);
+    await runContextRound(handlers, ctx);
+    const compressTool = api.tools.find((t: any) => t.name === "compress")!;
+    async function doCompress(callId: string, content: any[]) {
+      const out = await compressTool.execute(callId, { content }, undefined, undefined, ctx);
+      return typeof out === "string" ? out : out.content?.[0]?.text ?? String(out);
+    }
+
+    const warm = await doCompress("tc4", [{ startId: "m00001", endId: "m00001", summary: "warm-up block for the partial-success gate scenario in the #520 test" }]);
+    assert.ok(warm.includes("▣ ACP") && !warm.includes("Errors:"), `warm-up compress failed: ${warm}`);
+
+    await runContextRound(handlers, ctx);
+    const partial = await doCompress("tc5", [
+      { startId: "m00002", endId: "m00003", summary: "real range that succeeds alongside the dead one in this same call" },
+      { startId: "m99998", endId: "m99999", summary: "dead range in the same call, refs unknown to this session" },
+    ]);
+    assert.ok(partial.includes("▣ ACP") && partial.includes("Errors:"), `partial success expected: ${partial}`);
+    assert.ok(!partial.includes(STOP), `errors suppress the stop line: ${partial}`);
+  }
+});
