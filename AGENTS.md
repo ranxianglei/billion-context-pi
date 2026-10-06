@@ -37,6 +37,8 @@ pi-acp/
 │   ├── state.ts              # State persistence (~/.pi/agent/sessions/*.acp.json)
 │   ├── messages.ts           # Pi ↔ kernel message conversion + ref tag patching
 │   ├── compress-tool.ts      # compress tool handler
+│   ├── async-compress.ts     # compress.async: background fork, capture, apply
+│   ├── retained-nudges.ts    # claude-bridge: re-send ACP's own nudge so the bridge session is not rebuilt
 │   ├── decompress-tool.ts    # decompress tool handler
 │   ├── search-tool.ts        # search_context tool (delegates to kernel.searchBlocks)
 │   ├── search-index.ts       # Builds SearchDoc[] from session log + ACP blocks

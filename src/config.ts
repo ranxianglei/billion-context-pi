@@ -180,6 +180,11 @@ export interface CompressSettings {
   /** How many of the MOST RECENT messages keep their image payloads when
    *  `stripImages` is enabled. Default: 5. Ignored when stripImages is off. */
   stripImagesKeepRecent?: number;
+  /** Opt-in (#614). Default: false. When true, non-emergency nudges are answered
+   *  by a same-model fork in the background; emergency nudges stay synchronous. */
+  async?: boolean;
+  /** Additional opt-in for experimental claude-bridge async compression. Default: false. */
+  asyncClaudeBridge?: boolean;
 }
 
 /** Per-provider compression overrides. Carries the same tuning fields as the
@@ -570,6 +575,8 @@ export function mergeCompress(
     promptPack: model?.promptPack ?? provider?.promptPack ?? global?.promptPack,
     stripImages: model?.stripImages ?? provider?.stripImages ?? global?.stripImages,
     stripImagesKeepRecent: model?.stripImagesKeepRecent ?? provider?.stripImagesKeepRecent ?? global?.stripImagesKeepRecent,
+    async: model?.async ?? provider?.async ?? global?.async,
+    asyncClaudeBridge: model?.asyncClaudeBridge ?? provider?.asyncClaudeBridge ?? global?.asyncClaudeBridge,
   };
 }
 

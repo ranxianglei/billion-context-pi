@@ -37,6 +37,8 @@ export const ACP_RULE_CUSTOM_TYPE = "acp-rule";
  *  type:"custom" entry — never projected into the sent view (see above), so
  *  the compact one-liner stays out of model context while surviving restarts. */
 export const ACP_NUDGE_CUSTOM_TYPE = "acp-nudge";
+export const ASYNC_COMPRESS_CUSTOM_TYPE = "acp-async-compress";
+export const ASYNC_CALL_ID_PREFIX = "acp-bg-";
 export interface AcpNudgeRecord {
   text: string;
 }
@@ -346,6 +348,8 @@ function safeStringify(value: unknown): string {
 export function coreOutToAgentMessages(
   coreOut: CoreMessage[],
   originalById: Map<string, AgentMessage>,
+  summaryCarriers?: ReadonlyMap<string, { label: string; timestamp: number }>,
+  ids?: string[],
 ): AgentMessage[] {
   const out: AgentMessage[] = [];
   const emittedSplit = new Set<string>();
@@ -357,12 +361,26 @@ export function coreOutToAgentMessages(
   }
 
   for (const core of coreOut) {
-    if (core.id.startsWith("acp_summary_")) continue;
+    if (core.id.startsWith("acp_summary_")) {
+      const carrier = summaryCarriers?.get(core.id.slice("acp_summary_".length));
+      if (carrier && core.text) {
+        out.push({
+          role: "user",
+          content: [{ type: "text", text: `${core.text}\n\n[ACP async compression: ${carrier.label}]` }],
+          timestamp: carrier.timestamp,
+        } as AgentMessage);
+        ids?.push(core.id);
+      }
+      continue;
+    }
 
     const hashIdx = core.id.indexOf("#");
     if (hashIdx < 0) {
       const original = originalById.get(core.id);
-      if (original) out.push(patchRefTag(original, core));
+      if (original) {
+        out.push(patchRefTag(original, core));
+        ids?.push(core.id);
+      }
       continue;
     }
 
@@ -381,6 +399,7 @@ export function coreOutToAgentMessages(
     );
 
     out.push(reconstructToolCallMessage(original, core, survivingCallIds, kernelTextByCallId));
+    ids?.push(baseId);
   }
 
   return out;

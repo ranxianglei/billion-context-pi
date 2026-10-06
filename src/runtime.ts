@@ -14,7 +14,7 @@ import { resolveCompress, resolveConfig, type AdapterConfig } from "./config.js"
 import { applyStrictReasoningGate, resolveReasoningDrop, type CompressReasoningConfig } from "./reasoning-drop.js";
 import { entriesToCoreMessages, EntryProjectionCache, extractText, matchesStoredText, messageIdentity, messageRef } from "./messages.js";
 import { SessionStateStore, deriveChildState, type LiveRefOrigin } from "./state.js";
-import { hasCompressHistory, rebuildStateFromLog } from "./state-rebuild.js";
+import { hasCompressHistory, rebuildStateFromLog, recoverPendingAsyncRecords } from "./state-rebuild.js";
 import { loadUserConfig, applyUserConfig } from "./user-config.js";
 import { sanitizeSurfaceConfig } from "./surface.js";
 import { ThrottleEpisode } from "./throttle-retry.js";
@@ -815,6 +815,7 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   // a resumed session starts with an empty cache and the first context fire
   // repopulates it before any tool can run.
   const lastLiveBySession = new Map<string, AgentMessage[]>();
+  const asyncRecoveryAttempted = new Map<string, Set<string>>();
 
   // Issue #561: per-session incremental projection cache — pi hosts rebuild the
   // entries array (fresh objects) every turn from an append-only jsonl, so the
@@ -877,6 +878,18 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     if (!projection) { projection = new EntryProjectionCache(); projectionCaches.set(sessionId, projection); }
     const coreMessages = projection.project(entries);
     if (live === undefined) pruneOrphanRefs(state, coreMessages);
+    if (sessionFile && state.blocks.length > 0) {
+      let attempted = asyncRecoveryAttempted.get(sessionId);
+      if (!attempted) { attempted = new Set(); asyncRecoveryAttempted.set(sessionId, attempted); }
+      const recovered = recoverPendingAsyncRecords({ entries, view: coreMessages, state, config: configFor(ctx), core, attempted });
+      if (recovered) {
+        logInfo("state", { sid: sessionId, event: "async-record-recovery", applied: recovered.report.callsApplied, skipped: recovered.report.callsSkipped });
+        if (recovered.report.callsApplied > 0) {
+          state = recovered.state;
+          await store.save(state, sessionFile, sessionId);
+        }
+      }
+    }
     return { state, coreMessages, entries };
   }
 

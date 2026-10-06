@@ -45,7 +45,16 @@ const CompressParams = Type.Object({
 
 type CompressArgs = Static<typeof CompressParams>;
 
-export function makeCompressTool(runtime: AcpRuntime, overrides?: ToolPromptOverrides): ToolDefinition<typeof CompressParams> {
+/** Async compression's hold on compress: the empty-content trigger, and sync folds that make a queued job stale. */
+export interface AsyncCompressGate {
+  /** Reply to compress({content: []}), or undefined to keep the sync reply. */
+  queue(ctx: ExtensionContext, toolCallId: string, nudge: () => Promise<NudgeDecision | undefined>, signal?: AbortSignal): Promise<string | undefined>;
+  folded(ctx: ExtensionContext): void;
+  /** Tokens every request carries beyond the session messages and system prompt (retained nudges). */
+  extraTokens(ctx: ExtensionContext): number;
+}
+
+export function makeCompressTool(runtime: AcpRuntime, overrides?: ToolPromptOverrides, gate?: AsyncCompressGate): ToolDefinition<typeof CompressParams> {
   return applyToolPromptOverrides({
     name: "compress",
     label: "Compress",
@@ -63,7 +72,7 @@ export function makeCompressTool(runtime: AcpRuntime, overrides?: ToolPromptOver
       if (runtime.refused) return { details: undefined, content: [{ type: "text", text: runtime.refusalMessage ?? UNSUPPORTED_HOST_MESSAGE }] };
       let result: string;
       try {
-        result = await handleCompress(params as CompressArgs, runtime, ctx, toolCallId, signal);
+        result = await handleCompress(params as CompressArgs, runtime, ctx, toolCallId, signal, gate);
       } catch (e) {
         logThrow("compress", e, { sid: ctx.sessionManager.getSessionId(), ranges: typeof (params as CompressArgs).content === "string" ? "string" : ((params as CompressArgs).content?.length ?? 0) });
         throw e;
@@ -82,11 +91,20 @@ type RangeEntry = Static<typeof RangeSpec>;
 // the failure cap (a returned string would land as isError:false and count
 // as neutral). An empty array passes through (the call site returns "No
 // ranges provided.").
+// The schema accepts the JSON-encoded form, so "[]" is the same empty call as [].
+function isEmptyContent(content: unknown): boolean {
+  let v = content;
+  for (let i = 0; i < 2 && typeof v === "string"; i++) {
+    try { v = JSON.parse(v); } catch { return false; }
+  }
+  return Array.isArray(v) && v.length === 0;
+}
+
 export function normalizeRanges(args: CompressArgs): RangeEntry[] | string {
   const effective = repairContentTail(repairBareRangeObjects(args));
   const { ranges, diagnostics } = parseCompressArgs(effective);
   if (ranges.length === 0) {
-    if (Array.isArray(effective.content) && effective.content.length === 0) return [];
+    if (isEmptyContent(effective.content)) return [];
     return describeDiagnostics(diagnostics, effective.content);
   }
   return ranges.map((r) => ({ startId: r.startRef, endId: r.endRef, summary: r.summary, topic: r.topic }));
@@ -413,7 +431,7 @@ function cappedRejectionText(snapshot: string): string {
   ].join("\n");
 }
 
-function tier3OnlyRewrite(newBlocks: CompressionBlock[], allBlocks: CompressionBlock[]): string[] | null {
+export function tier3OnlyRewrite(newBlocks: CompressionBlock[], allBlocks: CompressionBlock[]): string[] | null {
   if (newBlocks.length === 0) return null;
   const byId = new Map(allBlocks.map((b) => [b.blockId, b]));
   const spans: string[] = [];
@@ -452,7 +470,25 @@ export function tierReadyHint(state: CompressionState, config: ReturnType<AcpRun
   return "";
 }
 
-async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: ExtensionContext, toolCallId?: string, signal?: AbortSignal): Promise<string> {
+function sentTokenCount(runtime: AcpRuntime, ctx: ExtensionContext, state: CompressionState, coreMessages: Parameters<typeof estimateTokens>[0], entries: Parameters<typeof collectImageTokens>[0], config: ReturnType<AcpRuntime["configFor"]>, extraTokens = 0) {
+  const systemPromptText = getSystemPromptText(ctx);
+  const systemPromptTokens = (systemPromptText ? defaultCountTokens(systemPromptText) : 0) + extraTokens;
+  const imageTokens = collectImageTokens(entries, modelSupportsImages(ctx.model));
+  const sentTokens = estimateTokens(coreMessages, collectCoveredMessageIds(state), imageTokens) + systemPromptTokens;
+  // Same view-based recount as the context transform (issue #289): with blocks
+  // present, the raw-view count can sit far above the sent view and mis-scale
+  // this pass's emergency-truncate band before boundary resolution.
+  return { imageTokens, systemPromptTokens, tokenCount: adjustedTokenCount(runtime.core, coreMessages, state, config, sentTokens, imageTokens, systemPromptTokens) };
+}
+
+async function currentNudge(runtime: AcpRuntime, ctx: ExtensionContext, extraTokens: number): Promise<NudgeDecision | undefined> {
+  const { state, coreMessages, entries } = await runtime.stateFor(ctx);
+  const config = runtime.configFor(ctx);
+  const { tokenCount } = sentTokenCount(runtime, ctx, state, coreMessages, entries, config, extraTokens);
+  return runtime.core.processTurn({ messages: coreMessages, state: structuredClone(state), config, tokenCount }).nudge ?? undefined;
+}
+
+async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: ExtensionContext, toolCallId?: string, signal?: AbortSignal, gate?: AsyncCompressGate): Promise<string> {
   assertNotAborted(signal);
   const maybeRanges = normalizeRanges(args);
   // Argument errors throw (not return): pi-agent-core only sets isError:true
@@ -461,21 +497,19 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
   // counts toward the cap nor lifts it.
   if (typeof maybeRanges === "string") throw new Error(maybeRanges);
   const ranges = maybeRanges;
-  if (ranges.length === 0) return "No ranges provided.";
+  const extraTokens = gate?.extraTokens(ctx) ?? 0;
+  if (ranges.length === 0) {
+    const queued = gate && toolCallId ? await gate.queue(ctx, toolCallId, () => currentNudge(runtime, ctx, extraTokens), signal) : undefined;
+    assertNotAborted(signal);
+    return queued ?? "No ranges provided.";
+  }
   const { state: initialState, coreMessages, entries } = await runtime.stateFor(ctx);
   assertNotAborted(signal);
   const config = runtime.configFor(ctx);
   // Sent-view arbitration — the same scale as the context transform and
   // acp_status (see src/index.ts): never the session-tree tokenCount.
   const modelId = (ctx.model as { id?: string } | undefined)?.id ?? "default";
-  const systemPromptText = getSystemPromptText(ctx);
-  const systemPromptTokens = systemPromptText ? defaultCountTokens(systemPromptText) : 0;
-  const imageTokens = collectImageTokens(entries, modelSupportsImages(ctx.model));
-  const sentTokens = estimateTokens(coreMessages, collectCoveredMessageIds(initialState), imageTokens) + systemPromptTokens;
-  // Same view-based recount as the context transform (issue #289): with blocks
-  // present, the raw-view count can sit far above the sent view and mis-scale
-  // this pass's emergency-truncate band before boundary resolution.
-  const firstTokenCount = adjustedTokenCount(runtime.core, coreMessages, initialState, config, sentTokens, imageTokens, systemPromptTokens);
+  const { imageTokens, systemPromptTokens, tokenCount: firstTokenCount } = sentTokenCount(runtime, ctx, initialState, coreMessages, entries, config, extraTokens);
   const turn = runtime.core.processTurn({
     messages: coreMessages,
     state: initialState,
@@ -529,6 +563,7 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
     activeBefore: state.blocks.filter((b) => b.active).length,
     beforeMsgCount: messages.length,
     beforeTokens,
+    sentTokens: firstTokenCount,
   });
   // #540: select changed blocks by before/after runId diff — every
   // applyCompression assigns a fresh runId to both NEW and REFOLDED blocks,
@@ -565,6 +600,7 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
   const { blocksCreated, tokensCompressed, errors, warnings } = applied.result;
   if (blocksCreated > 0) {
     runtime.clearDeadCompress(sid);
+    gate?.folded(ctx);
   } else if (allDead) {
     const count = runtime.noteDeadCompress(sid, ranges.map((r) => `${r.startId}..${r.endId}`).join("|"));
     if (count >= DEAD_REPEAT_REJECT) {

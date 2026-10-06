@@ -158,3 +158,12 @@ test("compress tool succeeds on a missing-`}` string payload (end-to-end)", asyn
   assert.doesNotMatch(text, /must be an ARRAY|no-valid-ranges/, `misleading parse error regressed: ${text}`);
   await rm(`${stateFile}.acp.json`, { force: true });
 });
+
+test("JSON-string empty content is the same empty call as []; malformed or non-empty strings keep their errors", () => {
+  assert.deepEqual(normalizeRanges({ content: [] }), []);
+  assert.deepEqual(normalizeRanges({ content: "[]" }), []);
+  assert.deepEqual(normalizeRanges({ content: JSON.stringify("[]") }), []);
+  assert.equal(typeof normalizeRanges({ content: "[" }), "string");
+  assert.equal(typeof normalizeRanges({ content: JSON.stringify(JSON.stringify("[]")) }), "string");
+  assert.equal(typeof normalizeRanges({ content: "[{}]" }), "string");
+});

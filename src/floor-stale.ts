@@ -3,7 +3,7 @@
 // the pre-compression request until the next turn reports fresh usage.
 import type { CompressionBlock } from "acp-kernel";
 import { isCompressSuccessText } from "./compress-tool.js";
-import { extractText } from "./messages.js";
+import { extractText, ASYNC_COMPRESS_CUSTOM_TYPE } from "./messages.js";
 
 type UsageLike = {
   totalTokens?: number;
@@ -15,6 +15,8 @@ type UsageLike = {
 
 type AnchorEntry = {
   type: string;
+  customType?: string;
+  data?: unknown;
   message?: {
     role?: string;
     stopReason?: string;
@@ -56,6 +58,15 @@ function scanEntries(entries: AnchorEntry[]): AnchorScan {
   let lastUsageTotal = 0;
   const compressIdxByCallId = new Map<string, number>();
   for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i]!;
+    if (entry.type === "custom" && entry.customType === ASYNC_COMPRESS_CUSTOM_TYPE) {
+      const callId = (entry.data as { callId?: unknown } | undefined)?.callId;
+      if (typeof callId === "string") {
+        lastCompressIdx = i;
+        compressIdxByCallId.set(callId, i);
+      }
+      continue;
+    }
     const m = entries[i]!.message;
     if (!m) continue;
     if (m.role === "assistant") {

@@ -185,6 +185,8 @@ All keys below are currently **ACTIVE**.
 | `compress.reasoning` | object | `{ "drop": true, "threshold": 2048 }` | 🟢 ACTIVE | Drop oversized thinking from historical `compress` calls (request-time; persisted history untouched). |
 | `compress.stripImages` | boolean | `false` | 🟢 ACTIVE | **Opt-in** wire-level strip of historical image payloads (issue #321). When `true`, every message older than the most recent `stripImagesKeepRecent` has its image parts dropped from the outbound provider body; image-only messages collapse to a `"[image]"` text placeholder. Supported wire dialects: anthropic-messages, openai-completions, openai-responses (incl. azure/codex variants). |
 | `compress.stripImagesKeepRecent` | number | `5` | 🟢 ACTIVE | How many of the most recent messages keep their image payloads when `stripImages` is on. |
+| `compress.async` | boolean | `false` | 🟢 ACTIVE | **Opt-in, experimental** async compression (#614). The main agent queues it with `compress({ content: [] })` and continues; a same-model fork of the next request picks ranges and writes summaries, applied at a later request boundary after validation. See [`compress.async`](#compressasync). |
+| `compress.asyncClaudeBridge` | boolean | `false` | 🟢 ACTIVE | **Experimental** second opt-in for async compression on `claude-bridge`. Needs `compress.async: true` as well. The bridge fork's live cache reuse is measured in one Sonnet run so far. See [`compress.asyncClaudeBridge`](#compressasyncclaudebridge). |
 
 **Prompts keys**
 
@@ -697,6 +699,55 @@ The flow is:
 - **Default:** `"default"`
 - **Status:** 🟢 ACTIVE
 - **Description:** Selects a **prompt pack** — a named bundle of surface overrides (prompt sections, nudge sections, tool prompts, delegate prompt, compression rules) applied as the base layer under your inline `acp.json` overrides. Resolved through the same three-level cascade as every other `compress.*` field: `models > providers > global`, per active model, per turn. See [Prompt Packs](#prompt-packs) for the full reference and the built-in `lean` pack.
+
+### `compress.async`
+
+- **Type:** `boolean`
+- **Default:** `false`
+- **Status:** 🟢 ACTIVE (experimental)
+- **Description:** Opt-in async compression ([#614](https://github.com/ranxianglei/billion-context-pi/issues/614)). Resolved through the same `models > providers > global` cascade as every other `compress.*` field; only the literal `true` enables it (any other non-boolean value logs a warning and stays off). With it off (the default) nothing changes.
+
+  When on, the main agent decides when to compress, and a separate pass writes the summaries:
+
+  1. Nudges still reach the main agent, with one extra line: `compress({ content: [] })` queues background compression. While async is available the system prompt explains the same call, so the agent can use it without a nudge.
+  2. `compress({ content: [] })` returns at once with "Background compression queued…" and does nothing else. The main agent carries on. A second empty call while one is queued gets "already queued"; nothing compressible gets "Nothing is compressible right now" and queues nothing. In an emergency, after a fallback, or on an unsupported wire, it returns plain guidance to compress ranges directly. `compress` with ranges is unchanged and synchronous; a successful one cancels a queued job (its snapshot would be stale), a failed one does not.
+  3. The next request (the one carrying the "queued" result) starts the job. ACP sends **one** fork request through the same provider adapter, model, API key/base URL and request headers: that request's provider payload (same system prompt, tools, history incl. the queued result, and signed reasoning blocks, unchanged) with one user turn appended: a short directive (compress only, with non-empty content) and the nudge for the current ranges. Its prefix is the request just sent, so it reads from the prompt cache. Only the fork's `compress` tool-call arguments are used; nothing the fork returns is executed.
+  4. At the next request boundary (the next `context` event, under the session lock) the result is validated against the current session: the history the fork saw must still be an exact prefix of the current view, the cited refs must bind to the same messages, and the active block set must be unchanged (e.g. no compress landed meanwhile). It then passes the same kernel validation as the `compress` tool and applies **all-or-nothing**. A stale or invalid result is discarded and the live state is untouched.
+  5. On success a display-only `acp-async-compress` entry is appended to the session log **before** the new state is adopted (if it cannot be written the result is discarded). It records the applied ranges so a lost `.acp.json` sidecar can be rebuilt from the log, in log order with ordinary compress calls; if only the sidecar write was lost (record present, block missing from an existing sidecar), the next load re-applies the record against the current view. The block's summary reaches the model as a stable user-role checkpoint at the block's position (`[Compressed conversation section] … [ACP async compression: bN=mA–mB]`); refolding or decompressing `bN` works as for any block.
+
+  **Stays synchronous:** emergencies; while a job is queued or running, further non-emergency nudges are held back. If the job cannot run (capture without the queued result, a main request that fails or ends first, a fork that makes no compress call, a bridge refusal), the next request shows the nudge synchronously, prefixed with "Background compression did not run (reason)". A queued result is never treated as a compression: it is not a usage-floor landmark and is not replayed; after a restart a leftover one is inert. **Scope:** Pi host only, wires `anthropic-messages`, `openai-completions`, `openai-responses`, `openai-codex-responses` (ChatGPT/Codex login), `claude-bridge` (only with [`compress.asyncClaudeBridge`](#compressasyncclaudebridge) also `true` and a pi-claude-bridge build that answers the isolated-fork request; see below), and no server-side conversation state (`previous_response_id` / `conversation` / `context_management`). Anything else, a failed fork request, invalid fork output, the 5-minute fork timeout, or a failed record write switches the session back to synchronous nudges (one notice per session). Session switch / fork / tree navigation / compaction / model change / shutdown, or a user abort of the main request, abort an in-flight fork; turning `compress.async` off discards any pending result. Under the proxy / native stand-down and on refused hosts the feature is inert.
+
+  **Limitations:**
+  - The fork reuses the provider payload **as seen by ACP's `before_provider_request` handler**. Pi lets later-loaded extensions *replace* that payload, and the replacement is not observable from an extension; with such an extension the fork can read different bytes than the main request (cache miss, and a summary of content the main agent did not see). Header changes made in place by later `before_provider_headers` handlers *are* included. Validation proves the history structure and refs, not that the summary is faithful to bytes ACP never saw.
+  - Fork usage is written to the ACP log (`event=fork-finished` with input / output / cacheRead / cacheWrite) but is **not** counted in Pi's session cost totals. For claude-bridge forks, `usageComplete` is `false` when the bridge could not confirm the response's final totals (output may understate), and `null` when the bridge does not say.
+  - Anthropic: the fork keeps the main request's cache breakpoint (so its prefix is a cache read); the sync request would have moved that breakpoint onto the nudge.
+  - Providers with environment-based auth flows (Bedrock, Vertex) are unsupported wires today and stay synchronous.
+  - Codex (`openai-codex-responses`): the fork always goes over HTTP/SSE, even when the main agent uses the Codex WebSocket, so it never shares the main socket or its `previous_response_id` continuation. It sends the same `prompt_cache_key` and session id, and its OAuth token comes from Pi's provider auth at fork time (refreshed if close to expiry). Whether the backend serves the fork's prefix from cache while the main request is still streaming is not verified.
+  - claude-bridge (`claude-bridge`): there is no request body to replay, so the bridge runs the fork itself. At the stream start of the request carrying the "queued" result, ACP emits a `claude-bridge:isolated-fork` request on `pi.events` with `cutAfterToolResult` set to the triggering call's id. The bridge checks that the request it is serving delivers that result, waits (at most 10 seconds from the request) for it to reach Claude Code's transcript, and Claude Code copies the main session right after it and the attachments written with it (`resume` + `forkSession` + `resumeSessionAt`, under a session id the bridge picks). The main turn keeps running; the main transcript is never written. The fork runs one query with the main query's options and tool definitions, refuses every tool call, returns the first `compress` arguments, and is deleted. Hooks from Claude Code settings files and installed plugins are off in it (`disableAllHooks`); managed-policy hooks still run, and Claude Code still writes its own state (for example `~/.claude.json`). `unsupported-context`, `stale-context` and `cut-timeout` refusals keep async on and show the nudge synchronously next; after 3 in a row the session falls back to synchronous nudges. Other refusals fall back at once, e.g. when the bridge's `provider.strictMcpConfig` is off. A bridge without this capability never accepts (`bridge-fork-unavailable`); an older bridge that ignores `cutAfterToolResult` cuts at the request's final answer instead. Measured in one live Sonnet run (hooks disabled, ~64K tokens of tool results, one earlier thinking block): the fork read 82,251 cached tokens, the same as the main agent's next request, and wrote 2,728 new ones; the summary was applied and survived a restart. In that run the main turn had already ended when the fork started, so a fork during a still-running main turn was not observed live.
+  - A fork result that would refold an inline-restored block **in place** (same block id, new summary) is rejected as a whole and the next nudge goes synchronous: the kernel keeps the block's original `compressCallId` on such a refold, so the async record could not be matched to it again. Record recovery applies the same guard and never overwrites a newer block.
+
+### `compress.asyncClaudeBridge`
+
+- **Type:** `boolean`
+- **Default:** `false`
+- **Status:** 🟢 ACTIVE (experimental)
+- **Description:** Separate opt-in for async compression on the `claude-bridge` wire. On `claude-bridge`, async runs only when **both** `compress.async` and `compress.asyncClaudeBridge` resolve to the literal `true`. Both resolve through the same `models > providers > global` cascade as every other `compress.*` field. Other wires ignore this field.
+
+  **Why a second switch:** the bridge fork is experimental. Its cache reuse has been measured in one live run only (see the claude-bridge limitation under [`compress.async`](#compressasync)), so it may still cost more than a synchronous compression request in some sessions. Enabling `compress.async` alone does not accept that risk.
+
+  With `compress.async: true` and this field off, `claude-bridge` sessions keep synchronous nudges. This is not treated as a failure: ACP logs `bridge-async-not-enabled` once per session and shows no fallback notice. Turning the field off while a bridge fork is running or its result is pending aborts the fork and discards the result, the same as turning `compress.async` off. A non-boolean value logs `compress-async-claude-bridge-invalid` (value type only) and counts as off.
+
+  **Draft testers:** `compress.async: true` used to enable the bridge too. Add this field to keep bridge async:
+
+  ```json
+  { "compress": { "async": true, "asyncClaudeBridge": true } }
+  ```
+
+  Or scope it to the bridge provider only:
+
+  ```json
+  { "compress": { "async": true, "providers": { "claude-bridge": { "asyncClaudeBridge": true } } } }
+  ```
 
 ### Soft target with elastic headroom (#1122)
 
