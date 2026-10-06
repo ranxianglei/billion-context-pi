@@ -67,7 +67,10 @@ export function userConfigPath(root: string, ...segments: string[]): string {
   return userConfigPathIn(CONFIG_DIR_NAME, root, ...segments);
 }
 
-/** Global then project acp.json; later entries override earlier ones. */
-export function acpJsonFiles(cwd: string): string[] {
-  return [userConfigPath(homedir(), "acp.json"), userConfigPath(cwd, "acp.json")];
+/** Global then project acp.json; later entries override earlier ones.
+ *  includeProject (#624): false returns global only — callers gate the project
+ *  scope on Pi project trust (ctx.isProjectTrusted()). */
+export function acpJsonFiles(cwd: string, includeProject = true): string[] {
+  const global = userConfigPath(homedir(), "acp.json");
+  return includeProject ? [global, userConfigPath(cwd, "acp.json")] : [global];
 }

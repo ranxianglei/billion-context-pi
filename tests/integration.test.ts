@@ -778,13 +778,16 @@ test("modelContextLimit changes in .pi/acp.json are picked up on the next contex
     createAcpExtension()(api as any);
 
     function ctxWithCwd() {
-      return { ...fakeCtx([], join(tmp, "state.json")), cwd: tmp };
+      // #624: this fixture exercises PROJECT acp.json hot-reload, so the
+      // host must report the project as trusted for it to apply at all.
+      return { ...fakeCtx([], join(tmp, "state.json")), cwd: tmp, isProjectTrusted: () => true };
     }
     async function acpStatus(): Promise<string> {
       let captured = "";
       const ctx = {
         ...fakeCtx([], join(tmp, "state.json")),
         cwd: tmp,
+        isProjectTrusted: () => true,
         ui: { notify: (s: string) => { captured = s; }, confirm: async () => true, select: async () => undefined, input: async () => "", setStatus: () => {} },
       };
       await api.commands.get("acp").handler([], ctx);

@@ -6,6 +6,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { acpJsonFiles } from "./config-dir.js";
 import { parseAcpJson } from "./user-config.js";
+import { readProjectTrusted } from "./project-trust.js";
 import { Box, Text, type KeyId } from "@earendil-works/pi-tui";
 import { readFileSync } from "node:fs";
 import type { CoreMessage, NudgeDecision, CompressionBlock, Prompts } from "acp-kernel";
@@ -67,6 +68,10 @@ type AgentMessage = SessionMessageEntry["message"];
 
 declare const CURRENT_VERSION: string;
 
+// #624: refusal text for the session-start stand-down when acp.json carries a
+// literal enabled:false (trusted project scope, or a global edited mid-run).
+const ACP_DISABLED_MESSAGE = "[bcp] disabled by acp.json (\"enabled\": false) — ACP tools and system prompt off; Pi's native context management is in control";
+
 export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactory {
   return (pi: ExtensionAPI) => {
     if (process.env.BILLION_CONTEXT_PROXY) {
@@ -125,7 +130,10 @@ export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactor
     wireToolGuardrails(pi, runtime);
     wireOverflowSelfHeal(pi, runtime);
     wireThrottleRetry(pi, runtime);
-    const toolSurface = readToolSurfaceWithPacks(process.cwd());
+    // #624: trust is unknown at factory time — fail closed to the global-only
+    // tool surface; project toolPrompts/pack customization no longer reaches
+    // tool descriptions (live prompt paths stay trust-gated per event).
+    const toolSurface = readToolSurfaceWithPacks(process.cwd(), false);
     pi.registerTool(makeCompressTool(runtime, toolSurface.compress));
     pi.registerTool(makeDecompressTool(runtime, toolSurface.decompress));
     pi.registerTool(makeSearchTool(runtime, toolSurface.search_context));
@@ -145,12 +153,16 @@ export default createAcpExtension();
 // so a disabled adapter must be detected here to register nothing at all —
 // no tools, no system prompt, no context transform, and no compaction-cancel,
 // leaving Pi's native context management in control (issue #250: models too
-// small to handle ACP). Project acp.json overrides global; only a literal
-// enabled:true/false counts; missing files mean "not disabled", while bad
-// files are repaired when possible and otherwise warned about loudly (#467).
+// small to handle ACP). Only a literal enabled:true/false counts; missing
+// files mean "not disabled", while bad files are repaired when possible and
+// otherwise warned about loudly (#467).
+// #624: GLOBAL file only — trust is unknown at factory time, so the project
+// file is never consulted here (an untrusted project could otherwise flip the
+// global switch either way). A trusted project's enabled:false is applied at
+// session_start instead (stand-down, same net effect).
 function userConfigDisabled(cwd: string): boolean {
   let disabled: boolean | undefined;
-  for (const file of acpJsonFiles(cwd)) {
+  for (const file of acpJsonFiles(cwd, false)) {
     let text: string;
     try {
       text = readFileSync(file, "utf8");
@@ -217,6 +229,7 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
   let ompWarned = false;
   let forkWarned = false;
   let subagentStandDownWarned = false;
+  let disabledWarned = false;
   pi.on("session_start", async (_event, ctx) => {
     // Unsupported hosts stand down (#234 / #364): any host without Pi's
     // buildContextEntries() API is refused unless it declared itself a
@@ -275,10 +288,30 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     // never said which model it was. id + contextWindow also catch window
     // misconfigurations.
     const modelInfo = ctx.model as { id?: string; contextWindow?: number; api?: string } | undefined;
-    logInfo("session", { event: "start", sid, cwd: ctx.cwd, debug: runtime.adapter.debug ?? null, version: typeof CURRENT_VERSION !== "undefined" ? CURRENT_VERSION : null, model: modelInfo?.id ?? null, modelApi: modelInfo?.api ?? null, contextWindow: modelInfo?.contextWindow ?? null });
+    // #624: Pi project trust gates the project-scope acp.json read below; fail
+    // closed when the host doesn't expose the signal.
+    const projectTrusted = readProjectTrusted(ctx);
+    logInfo("session", { event: "start", sid, cwd: ctx.cwd, debug: runtime.adapter.debug ?? null, version: typeof CURRENT_VERSION !== "undefined" ? CURRENT_VERSION : null, model: modelInfo?.id ?? null, modelApi: modelInfo?.api ?? null, contextWindow: modelInfo?.contextWindow ?? null, projectTrusted });
     let delegateStoodDown = false;
     try {
-      await runtime.reloadConfig(ctx.cwd);
+      await runtime.reloadConfig(ctx.cwd, projectTrusted);
+      // #624: project-level enabled:false takes effect here — the factory can't
+      // see trust, so the project file never runs at load time. The factory
+      // already guarantees the GLOBAL file isn't disabled:false, so a false here
+      // means the (trusted) project opted out (or a global edit mid-run). Stand
+      // down for the process like OMP/proxy refusals: tools refuse, no system
+      // prompt, no compaction-cancel — Pi's native management takes over.
+      if (runtime.adapter.enabled === false) {
+        runtime.refused = true;
+        runtime.refusalMessage = ACP_DISABLED_MESSAGE;
+        logWarn("config", { event: "disabled-by-acp-json", sid, action: "refused", projectTrusted });
+        if (!disabledWarned) {
+          disabledWarned = true;
+          if (ctx.hasUI) ctx.ui.notify(ACP_DISABLED_MESSAGE, "warning");
+          else console.error(ACP_DISABLED_MESSAGE);
+        }
+        return;
+      }
       const delegateCfg = resolveDelegate(runtime.adapter);
       setDelegateDisplayUsage(delegateCfg.displayUsage);
       setDelegatePolicy(delegateCfg);
@@ -418,7 +451,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     const sid = ctx.sessionManager.getSessionId();
     const release = await runtime.acquireLock(sid);
     try {
-      await runtime.reloadConfig(ctx.cwd);
+      await runtime.reloadConfig(ctx.cwd, readProjectTrusted(ctx));
       const modelId = (ctx.model as { id?: string } | undefined)?.id ?? "default";
       const { state, coreMessages, entries } = await runtime.stateFor(ctx, event.messages);
       const configBase = runtime.configFor(ctx);
@@ -955,7 +988,9 @@ function wireSystemPrompt(pi: ExtensionAPI, runtime: AcpRuntime): void {
     const m = ctx?.model as { provider?: string; id?: string } | undefined;
     const cwd = ctx?.cwd ?? process.cwd();
     const requested = resolvePackName(runtime.adapter, m?.provider, m?.id);
-    const activePack = resolveActivePack(runtime.adapter, cwd, m?.provider, m?.id);
+    // #624: project packs are resolvable only for trusted projects — an
+    // untrusted repo must not inject prompt sections into the system prompt.
+    const activePack = resolveActivePack(runtime.adapter, cwd, m?.provider, m?.id, undefined, readProjectTrusted(ctx));
     const merged = mergeSurface(activePack, runtime.adapter);
     // Audit stamp (#431 forensics): record the effective pack for this
     // session; persisted into the sidecar on the next state save.
@@ -988,7 +1023,9 @@ function wireSystemPrompt(pi: ExtensionAPI, runtime: AcpRuntime): void {
 function activeNudgeSections(runtime: AcpRuntime, ctx?: ExtensionContext): NudgeSectionsConfig {
   const m = ctx?.model as { provider?: string; id?: string } | undefined;
   const cwd = ctx?.cwd ?? process.cwd();
-  const pack = resolveActivePack(runtime.adapter, cwd, m?.provider, m?.id);
+  // #624: same trust gate as wireSystemPrompt — nudge text comes from the
+  // active pack, so project packs must not reach it untrusted.
+  const pack = resolveActivePack(runtime.adapter, cwd, m?.provider, m?.id, undefined, readProjectTrusted(ctx));
   return mergeSurface(pack, runtime.adapter).nudgeSections;
 }
 

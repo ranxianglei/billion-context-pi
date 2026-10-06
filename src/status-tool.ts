@@ -3,6 +3,7 @@ import type { AgentToolResult, ExtensionContext, ToolDefinition } from "@earendi
 import type { AcpRuntime } from "./runtime.js";
 import { applyToolPromptOverrides, type ToolPromptOverrides } from "./surface.js";
 import { resolveSurfaceMeta } from "./prompt-pack.js";
+import { readProjectTrusted } from "./project-trust.js";
 import { buildStatusReport, defaultCountTokens, formatRanges, viableRanges } from "acp-kernel";
 import { estimateTokens, collectCoveredMessageIds, collectImageTokens, modelSupportsImages, adjustedTokenCount } from "./tokens.js";
 import { usageAnchorPredatesCompression } from "./floor-stale.js";
@@ -83,7 +84,9 @@ async function handleStatus(args: StatusArgs, runtime: AcpRuntime, ctx: Extensio
   const processed = turn.messages;
 
   const modelInfo = ctx.model as { provider?: string; id?: string } | undefined;
-  const meta = resolveSurfaceMeta(runtime.adapter, ctx?.cwd ?? process.cwd(), modelInfo?.provider, modelInfo?.id);
+  // #624: report the pack that is ACTUALLY active — project packs resolve only
+  // for trusted projects, so the display must honor the same trust gate.
+  const meta = resolveSurfaceMeta(runtime.adapter, ctx?.cwd ?? process.cwd(), modelInfo?.provider, modelInfo?.id, undefined, readProjectTrusted(ctx));
 
   const base = buildStatusReport(turn.state, processed, defaultCountTokens, {
     scope: args.scope,

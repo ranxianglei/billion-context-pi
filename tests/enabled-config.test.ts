@@ -11,17 +11,19 @@ import { loadUserConfig, parseAcpJson } from "../src/user-config.js";
 // JSON.parse silently treated all of them as "not disabled", the exact
 // opposite of the user's intent. The factory-time read must repair the
 // common shapes and disable ACP as written.
+// #624: the factory-time read is GLOBAL-only (~/.pi/acp.json) — project
+// acp.json applies at session_start for trusted projects only. These
+// fixtures therefore target the global file.
 function withAcpJson(content: string, fn: (api: any) => void): void {
   const home = mkdtempSync(path.join(os.tmpdir(), "bili-acp-enabled-"));
   const prevHome = process.env.HOME;
   const prevUserProfile = process.env.USERPROFILE;
   process.env.HOME = home;
   if (prevUserProfile !== undefined) process.env.USERPROFILE = home;
-  const cwd = path.join(home, "project");
-  mkdirSync(path.join(cwd, ".pi"), { recursive: true });
-  writeFileSync(path.join(cwd, ".pi", "acp.json"), content);
+  mkdirSync(path.join(home, ".pi"), { recursive: true });
+  writeFileSync(path.join(home, ".pi", "acp.json"), content);
   const prevCwd = process.cwd();
-  process.chdir(cwd);
+  process.chdir(home);
   try {
     const handlers = new Map<string, ((e: any, ctx: any) => any)[]>();
     const api = {

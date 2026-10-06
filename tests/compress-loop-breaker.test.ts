@@ -29,8 +29,9 @@ import { tmpPath } from "./tmp-path.js";
 //     refs (the turn is paused, not just the dead range).
 //  4. A new user message resets the cap; a successful compress clears the
 //     dead-range fingerprint (the same range can fail fresh again later).
-//  5. enabled:false (adapter config or acp.json) registers nothing: no
-//     tools, no context transform — Pi's native compaction stays active.
+//  5. enabled:false disables ACP — adapter config at load time; project
+//     acp.json at session_start for trusted projects (#624). Either way Pi's
+//     native compaction stays active.
 
 function captureApi() {
   const handlers = new Map<string, ((event: any, ctx: any) => any)[]>();
@@ -194,17 +195,45 @@ test("enabled:false (adapter config) registers nothing — Pi native compaction 
   assert.equal(handlers.size, 0, "no event handlers wired");
 });
 
-test("enabled:false in project acp.json disables the adapter", () => {
+test("enabled:false in project acp.json stands a trusted session down (#624)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "bcp-loop-disabled-"));
   mkdirSync(join(dir, ".pi"));
   writeFileSync(join(dir, ".pi", "acp.json"), JSON.stringify({ enabled: false }));
   const cwd = process.cwd();
   process.chdir(dir);
   try {
+    process.env.ACP_AUTO_UPDATE = "false";
     const { api, handlers } = captureApi();
     createAcpExtension({ modelContextLimit: 200_000 })(api as any);
-    assert.equal(api.tools.length, 0, "no tools registered");
-    assert.equal(handlers.size, 0, "no event handlers wired");
+    assert.ok(api.tools.length > 0, "tools register at load — trust is unknown then");
+    const ctx = { ...fakeCtx(() => [], tmpPath("bcp-loop-disabled.session.json")), cwd: dir, isProjectTrusted: () => true };
+    await handlers.get("session_start")![0]!({ type: "session_start", reason: "startup" }, ctx);
+    const compressTool = api.tools.find((t: any) => t.name === "compress")!;
+    const text = textOf(await compressTool.execute("d1", {}, undefined, undefined, ctx));
+    assert.match(text, /disabled by acp\.json/, `refusal surfaced: ${text}`);
+    assert.equal(handlers.get("before_agent_start")![0]!({ systemPrompt: "BASE" }, ctx), undefined, "no ACP prompt when stood down");
+    assert.equal(handlers.get("session_before_compact")![0]!({}, {}), undefined, "Pi native compaction stays in control");
+  } finally {
+    process.chdir(cwd);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("enabled:false in project acp.json is ignored for untrusted projects (#624)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "bcp-loop-untrusted-"));
+  mkdirSync(join(dir, ".pi"));
+  writeFileSync(join(dir, ".pi", "acp.json"), JSON.stringify({ enabled: false }));
+  const cwd = process.cwd();
+  process.chdir(dir);
+  try {
+    process.env.ACP_AUTO_UPDATE = "false";
+    const { api, handlers } = captureApi();
+    createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+    const ctx = { ...fakeCtx(() => [], tmpPath("bcp-loop-untrusted.session.json")), cwd: dir, isProjectTrusted: () => false };
+    await handlers.get("session_start")![0]!({ type: "session_start", reason: "startup" }, ctx);
+    const sp = (handlers.get("before_agent_start")![0]!({ systemPrompt: "BASE" }, ctx) as { systemPrompt: string }).systemPrompt;
+    assert.ok(sp.startsWith("BASE") && sp.includes("compress"), "adapter stays active despite untrusted enabled:false");
+    assert.deepEqual(handlers.get("session_before_compact")![0]!({}, {}), { cancel: true }, "compaction cancellation still wired");
   } finally {
     process.chdir(cwd);
     rmSync(dir, { recursive: true, force: true });

@@ -319,11 +319,11 @@ test("before_agent_start applies pack prompts per model and resets to defaults w
     const beforeAgentStart = wireBeforeAgentStart(adapter);
     const defaultPhilo = defaultPrompts.compressPhilosophy.slice(0, 40);
 
-    const packed = beforeAgentStart({ systemPrompt: "" }, { model: { provider: "openai", id: "gpt-x" }, cwd: dir });
+    const packed = beforeAgentStart({ systemPrompt: "" }, { model: { provider: "openai", id: "gpt-x" }, cwd: dir, isProjectTrusted: () => true });
     assert.ok(packed.systemPrompt.includes("PACK PHILO RULE"), "pack rules reach the system prompt for the pack's model");
     assert.ok(!packed.systemPrompt.includes(defaultPhilo), "pack replaces the default philosophy");
 
-    const reset = beforeAgentStart({ systemPrompt: "" }, { model: { provider: "anthropic", id: "claude-x" }, cwd: dir });
+    const reset = beforeAgentStart({ systemPrompt: "" }, { model: { provider: "anthropic", id: "claude-x" }, cwd: dir, isProjectTrusted: () => true });
     assert.ok(!reset.systemPrompt.includes("PACK PHILO RULE"), "switching to a model without the pack must drop its rules");
     assert.ok(reset.systemPrompt.includes(defaultPhilo), "kernel default rules restored after switch-away");
   } finally {
@@ -376,7 +376,8 @@ test("before_agent_start risk-gates pack prompts without acknowledgePromptsRisk"
       compress: { promptPack: "gated" },
     } satisfies AdapterConfig;
     const beforeAgentStart = wireBeforeAgentStart(adapter);
-    const result = beforeAgentStart({ systemPrompt: "" }, { model: { provider: "openai", id: "gpt-x" }, cwd: dir });
+    // #624: trust is granted here so this test keeps isolating the RISK gate.
+    const result = beforeAgentStart({ systemPrompt: "" }, { model: { provider: "openai", id: "gpt-x" }, cwd: dir, isProjectTrusted: () => true });
     assert.ok(!result.systemPrompt.includes("GATED PHILO RULE"), "ungated pack prompts are dropped");
     assert.ok(result.systemPrompt.includes(defaultPrompts.compressPhilosophy.slice(0, 40)), "defaults stay in force");
   } finally {
