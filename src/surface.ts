@@ -84,9 +84,9 @@ export function applyToolPromptOverrides<TParams extends TSchema>(def: ToolDefin
   };
 }
 
-export function readToolSurfaceSync(cwd: string): ToolPromptsConfig {
+export function readToolSurfaceSync(cwd: string, includeProject = true): ToolPromptsConfig {
   let out: ToolPromptsConfig = {};
-  for (const file of acpJsonFiles(cwd)) {
+  for (const file of acpJsonFiles(cwd, includeProject)) {
     try {
       const parsed: unknown = JSON.parse(readFileSync(file, "utf8"));
       if (parsed && typeof parsed === "object") {
