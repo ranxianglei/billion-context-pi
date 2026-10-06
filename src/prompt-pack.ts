@@ -5,7 +5,6 @@ import {
   createDirPackSource,
   createPackResolver,
   defaultPack,
-  defaultPackSources as kernelPackSources,
   isValidPackName,
   leanPack,
   sanitizePackSurface,
@@ -20,19 +19,23 @@ import { sanitizeToolPrompts, type AcpToolName, type NudgeSectionsConfig, type T
 export { builtinSource, createDirPackSource, createPackResolver, defaultPack, isValidPackName, leanPack, sanitizePackSurface };
 export type { Pack, PackResolver, PackSource, PackSurface, PromptPackFile };
 
-export function defaultPackSources(cwd: string): PackSource[] {
-  return kernelPackSources({
-    projectDir: userConfigPath(cwd, "acp", "packs"),
-    userDirs: [userConfigPath(homedir(), "acp", "packs")],
-  });
+export function defaultPackSources(cwd: string, includeProject = true): PackSource[] {
+  const sources: PackSource[] = [];
+  // #624: the project pack dir only participates for trusted projects — an
+  // untrusted repo must not inject prompt packs into the resolver. Chain order
+  // mirrors acp-kernel's defaultPackSources (project → user dirs → builtin).
+  if (includeProject) sources.push(createDirPackSource("project", userConfigPath(cwd, "acp", "packs")));
+  sources.push(createDirPackSource("user", userConfigPath(homedir(), "acp", "packs")));
+  sources.push(builtinSource);
+  return sources;
 }
 
-export function packResolver(cwd: string): PackResolver {
-  return createPackResolver(defaultPackSources(cwd));
+export function packResolver(cwd: string, includeProject = true): PackResolver {
+  return createPackResolver(defaultPackSources(cwd, includeProject));
 }
 
-export function discoverPack(name: string, cwd: string): Pack | null {
-  return packResolver(cwd).resolve(name);
+export function discoverPack(name: string, cwd: string, includeProject = true): Pack | null {
+  return packResolver(cwd, includeProject).resolve(name);
 }
 
 export function resolvePackName(adapter: AdapterConfig, provider?: string, modelId?: string): string {
@@ -46,10 +49,11 @@ export function resolveActivePack(
   provider?: string,
   modelId?: string,
   resolver?: PackResolver,
+  includeProject = true,
 ): Pack {
   const name = resolvePackName(adapter, provider, modelId);
   if (name === "default") return defaultPack;
-  const r = resolver ?? packResolver(cwd);
+  const r = resolver ?? packResolver(cwd, includeProject);
   return r.resolve(name) ?? defaultPack;
 }
 
@@ -85,9 +89,10 @@ export function resolveSurfaceMeta(
   provider?: string,
   modelId?: string,
   resolver?: PackResolver,
+  includeProject = true,
 ): SurfaceMeta {
   return surfaceMetaOf(
-    resolveActivePack(adapter, cwd, provider, modelId, resolver),
+    resolveActivePack(adapter, cwd, provider, modelId, resolver, includeProject),
     resolvePackName(adapter, provider, modelId),
   );
 }
@@ -210,10 +215,12 @@ export function mergeSurface(pack: Pack | null, inline: InlineSurface): MergedSu
   };
 }
 
-export function readToolSurfaceWithPacks(cwd: string): ToolPromptsConfig {
+export function readToolSurfaceWithPacks(cwd: string, includeProject = true): ToolPromptsConfig {
   let inline: ToolPromptsConfig = {};
   let packName = "default";
-  for (const file of acpJsonFiles(cwd)) {
+  // #624: factory-time read runs before any trust decision exists, so callers
+  // that cannot know trust pass false and get global-only tool surfaces.
+  for (const file of acpJsonFiles(cwd, includeProject)) {
     try {
       const parsed: unknown = JSON.parse(readFileSync(file, "utf8"));
       if (parsed && typeof parsed === "object") {
@@ -228,6 +235,6 @@ export function readToolSurfaceWithPacks(cwd: string): ToolPromptsConfig {
       // missing file or bad JSON — keep prior
     }
   }
-  const pack = packName === "default" || !isValidPackName(packName) ? null : packResolver(cwd).resolve(packName);
+  const pack = packName === "default" || !isValidPackName(packName) ? null : packResolver(cwd, includeProject).resolve(packName);
   return mergeToolPrompts(packToolPrompts(pack), inline);
 }

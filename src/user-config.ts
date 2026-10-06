@@ -42,10 +42,14 @@ export interface UserAcpConfig {
 /** Read global + project acp.json, project overrides global. Returns {} on any
  *  error (missing file, bad JSON) — never throws. Malformed-but-repairable
  *  files are salvaged with a loud warning instead of silently meaning "not
- *  disabled" / "no config" (#467). */
-export async function loadUserConfig(cwd: string): Promise<UserAcpConfig> {
+ *  disabled" / "no config" (#467).
+ *
+ *  includeProject (#624): when false only the global file is read. The caller
+ *  gates the project scope on Pi project trust (ctx.isProjectTrusted()) — an
+ *  untrusted project must not override global policy. */
+export async function loadUserConfig(cwd: string, includeProject = true): Promise<UserAcpConfig> {
   const merged: UserAcpConfig = {};
-  for (const file of acpJsonFiles(cwd)) {
+  for (const file of acpJsonFiles(cwd, includeProject)) {
     let raw: string;
     try {
       raw = await fs.readFile(file, "utf8");

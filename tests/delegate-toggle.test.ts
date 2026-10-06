@@ -43,6 +43,9 @@ function fakeCtx(cwd: string) {
         mode: "rpc",
         hasUI: false,
         cwd,
+        // #624: this file exercises PROJECT acp.json precedence (both
+        // directions), so the host reports the project as trusted.
+        isProjectTrusted: () => true,
         ui: { notify: () => {}, confirm: async () => true, select: async () => undefined, input: async () => "", setStatus: () => {} },
         model: { contextWindow: 200_000, id: "test-model" },
         sessionManager: {

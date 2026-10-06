@@ -149,10 +149,14 @@ export interface AcpRuntime {
   /** Effective historical-image strip policy for the active model (issue #321).
    *  Host-side policy — deliberately NOT part of the kernel Config object. */
   stripImagesFor(ctx: ExtensionContext): { enabled: boolean; keepRecent: number };
-  /** Re-read ~/.<dir>/acp.json + <cwd>/<dir>/acp.json and re-derive the adapter
-   *  config when the contents change. Cheap no-op when unchanged. Called at
-   *  session_start and on every context event so config edits apply live. */
-  reloadConfig(cwd: string): Promise<void>;
+  /** Re-read ~/.<dir>/acp.json (+ <cwd>/<dir>/acp.json for trusted projects)
+   *  and re-derive the adapter config when the contents change. Cheap no-op
+   *  when unchanged. Called at session_start and on every context event so
+   *  config edits apply live. projectTrusted (#624): false skips the project
+   *  file; undefined keeps legacy include-project behavior for external hosts
+   *  that embed createRuntime directly. Trust is part of the cache identity so
+   *  a flip re-derives even with unchanged files. */
+  reloadConfig(cwd: string, projectTrusted?: boolean): Promise<void>;
   stateFor(ctx: ExtensionContext, liveMessages?: AgentMessage[]): Promise<{ state: CompressionState; coreMessages: ReturnType<typeof entriesToCoreMessages>; entries: SessionEntry[] }>;
   /** Record the EXACT sent view measured off the real processTurn output for
    *  this turn (issue #561): `viewTokens` counts turn.messages (the pruned,
@@ -784,16 +788,22 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     return { enabled: c.stripImages === true, keepRecent };
   }
 
-  async function reloadConfig(cwd: string): Promise<void> {
+  async function reloadConfig(cwd: string, projectTrusted?: boolean): Promise<void> {
+    // #624: undefined keeps the legacy include-project behavior (external hosts
+    // that embed createRuntime directly never learned about trust); only an
+    // explicit false skips the project file.
+    const includeProject = projectTrusted !== false;
     let user;
     try {
-      user = await loadUserConfig(cwd);
+      user = await loadUserConfig(cwd, includeProject);
     } catch (e) {
       logWarn("runtime", { event: "config-reload-failed", error: e instanceof Error ? e.message : String(e) });
       return;
     }
     try {
-      const key = JSON.stringify(user);
+      // Trust is part of the cache identity (#624): a flip must re-derive even
+      // when the file contents are unchanged.
+      const key = JSON.stringify({ u: user, p: includeProject });
       if (key === lastUserConfigKey) return;
       lastUserConfigKey = key;
       // Re-derive from the factory config (not adapterRef) so a key REMOVED from
