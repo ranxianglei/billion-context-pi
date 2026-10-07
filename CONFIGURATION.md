@@ -211,6 +211,13 @@ All keys below are currently **ACTIVE**.
 
 > **Only the documented keys are read from `acp.json`.** Other tuning knobs (`preserveRecentMessages`) are code-level and not user-overridable. The three compression thresholds form a three-tier escalation: growth-driven soft nudges → forced nudges at `compress.maxContextLimit` → emergency truncation at `compress.emergencyThresholdPercent`.
 
+### Tier distillation triggers (`tiers.tier2Trigger` / `tiers.tier3Trigger`)
+
+- **Type:** `number`
+- **Pi effective defaults:** `tier2Trigger = 10`, `tier3Trigger = 20`
+- **Status:** 🟢 ACTIVE — code-level defaults, not settable from `acp.json`; override by passing `coreOverrides.tiers.*` to the extension constructor.
+- **Description:** The kernel keeps count-triggered tier distillation OFF by default (`1000` / `2000` — "block count is not a need signal", acp-kernel#379), but fully off lets tier-1 summaries accumulate without bound while the token-mass paths (≥1.5× growth floor AND > T1 effective) stay unreachable at realistic summary sizes — observed in production: 22 blocks × ~26K → window overflow on every request ([#628](https://github.com/ranxianglei/billion-context-pi/issues/628)). The Pi adapter therefore applies its own effective defaults of 10 / 20 (the pre-#379 2:1 ratio): once 10 active tier-1 blocks exist, a tier-2 distillation nudge is eligible on the growth path (likewise tier-3 at 20 active tier-2 blocks); the per-tier cadence guard (≥ one growth floor of new tokens between re-nudges) bounds how often it fires. To restore the kernel's count-off behavior, pass `coreOverrides: { tiers: { tier2Trigger: 1000, tier3Trigger: 2000 } }`.
+
 ---
 
 ## General
