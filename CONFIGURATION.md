@@ -689,7 +689,13 @@ The flow is:
    { "compress": { "providers": { "openai": { "reasoning": { "drop": false } } } } }
    ```
 
-   **Strict-echo thinking upstreams (auto-disabled).** A few thinking-mode providers reject a rebuilt request with HTTP 400 (`The \`reasoning_content\` ... must be passed back to the API`) once a closed-round assistant message loses its reasoning. The adapter detects **DeepSeek** statically — the model's `baseUrl` or provider name contains `deepseek` (case-insensitive) — and forces `drop: false` for that model automatically, overriding an explicit `drop: true` for safety. This is cost-free for non-thinking DeepSeek models, which emit no `thinking` parts to drop. Strict-echo providers **not** on a `deepseek` host — GLM-thinking, QwQ, self-hosted DeepSeek mirrors — are deliberately not auto-detected (that would disable the pass for their non-thinking models); use the per-provider override above for those. Twin fixes: proxy-side billion-context#690 and kernel-side fold atomicity acp-kernel#245 (shipped in acp-kernel 0.0.63); tracked in [#361](https://github.com/ranxianglei/billion-context-pi/issues/361).
+   **Strict-echo thinking upstreams (auto-disabled).** A few thinking-mode providers reject a rebuilt request with HTTP 400 (`The \`reasoning_content\` ... must be passed back to the API`) once a closed-round assistant message loses its reasoning. The adapter detects these **statically** from the model's origin signals and forces `drop: false` for that model automatically, overriding an explicit `drop: true` for safety. It matches any of the tokens `deepseek`, `glm`, `qwq`, `reasoner` (case-insensitive) against **any** of three signals: the model's `baseUrl`, its provider name, **and its model id** ([#626](https://github.com/ranxianglei/billion-context-pi/issues/626)). The model-id signal covers **self-hosted gateways / mirrors** (LiteLLM, one-api, newapi, an internal AI gateway): there the provider id is the gateway name and the `baseUrl` is the gateway host, so the upstream vendor appears *only* in the model id (e.g. `deepseek-flash`) — host-only detection misses this shape. This is cost-free for non-thinking models on those hosts, which emit no `thinking` parts to drop.
+
+   If your strict-echo upstream uses a model id carrying **none** of those tokens (a fully custom gateway model name), detection will not fire — set `compress.reasoning.drop: false` to keep reasoning round-tripping (globally, or per-provider as above):
+    ```json
+    { "compress": { "reasoning": { "drop": false } } }
+    ```
+   Twin fixes: proxy-side billion-context#690 and kernel-side fold atomicity acp-kernel#245 (shipped in acp-kernel 0.0.63); tracked in [#361](https://github.com/ranxianglei/billion-context-pi/issues/361) and [#626](https://github.com/ranxianglei/billion-context-pi/issues/626).
 
 ### `compress.promptPack`
 
