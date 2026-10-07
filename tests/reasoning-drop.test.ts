@@ -192,13 +192,33 @@ test("isStrictReasoningEcho: deepseek detected via baseUrl or provider name, cas
   assert.equal(isStrictReasoningEcho("DeepSeek-Pro", "https://example.com"), true);
 });
 
-test("isStrictReasoningEcho: non-deepseek upstreams are not auto-detected", () => {
+// [#626] gateway/mirror shape: the upstream vendor appears ONLY in the model id
+// (provider id = gateway name, baseUrl = gateway host). Host-only detection misses
+// it, so the model id must be a signal. Pins the exact repro from the issue.
+test("isStrictReasoningEcho [#626]: detected via model id when the host signals carry no vendor token", () => {
+  assert.equal(isStrictReasoningEcho("finloop", "https://gateway.example.com/v1", "deepseek-flash"), true);
+  assert.equal(isStrictReasoningEcho(undefined, undefined, "deepseek-v3"), true);
+  assert.equal(isStrictReasoningEcho("my-gateway", "https://llm.internal.example.com/v1", "DEEPSEEK-R1"), true);
+});
+
+test("isStrictReasoningEcho [#626]: widened to the other strict-echo families (glm / qwq / reasoner)", () => {
+  assert.equal(isStrictReasoningEcho("zhipu", "https://open.bigmodel.cn/api/paas/v4", "glm-4.5"), true);
+  assert.equal(isStrictReasoningEcho(undefined, undefined, "glm-4-plus"), true);
+  assert.equal(isStrictReasoningEcho("some-gateway", "https://gw.example.com/v1", "qwq-plus"), true);
+  assert.equal(isStrictReasoningEcho(undefined, undefined, "qwq-32b"), true);
+  assert.equal(isStrictReasoningEcho(undefined, undefined, "gpt-reasoner-mini"), true);
+});
+
+test("isStrictReasoningEcho: non-strict-echo upstreams are not auto-detected", () => {
   assert.equal(isStrictReasoningEcho("anthropic", "https://api.anthropic.com"), false);
   assert.equal(isStrictReasoningEcho("openai", "https://api.openai.com/v1"), false);
-  // GLM-thinking / QwQ are strict-echo too but keyed by other hosts; they use the
-  // documented manual drop:false override so their non-thinking models keep the pass.
+  // A GLM/QwQ host whose provider+baseUrl carry NO vendor token is still not
+  // detected from the host alone — that is exactly why the model id became a
+  // signal (see the [#626] test above). No model id passed here, so false.
   assert.equal(isStrictReasoningEcho("zhipu", "https://open.bigmodel.cn/api/paas/v4"), false);
   assert.equal(isStrictReasoningEcho("qwen", "https://dashscope.aliyuncs.com/compatible-mode/v1"), false);
+  // a non-thinking model id with no vendor token keeps the pass armed
+  assert.equal(isStrictReasoningEcho("finloop", "https://gateway.example.com/v1", "gpt-4o"), false);
   assert.equal(isStrictReasoningEcho(), false);
   assert.equal(isStrictReasoningEcho(undefined, undefined), false);
 });
@@ -207,11 +227,15 @@ test("applyStrictReasoningGate: forces drop off on a strict-echo upstream, prese
   const base = resolveReasoningDrop(undefined);
   assert.deepEqual(applyStrictReasoningGate(base, "deepseek", "https://api.deepseek.com/v1"), { drop: false, threshold: 2048 });
   assert.deepEqual(applyStrictReasoningGate(base, undefined, "https://api.deepseek.com/v1"), { drop: false, threshold: 2048 });
+  // [#626] gateway shape: model id is the only vendor signal → still gated off
+  assert.deepEqual(applyStrictReasoningGate(base, "finloop", "https://gateway.example.com/v1", "deepseek-flash"), { drop: false, threshold: 2048 });
 });
 
 test("applyStrictReasoningGate: no-op for non-strict-echo and already-disabled configs (same reference)", () => {
   const base = resolveReasoningDrop(undefined);
   assert.equal(applyStrictReasoningGate(base, "openai", "https://api.openai.com/v1"), base);
+  // [#626] gateway serving a non-strict-echo model id stays armed (same ref)
+  assert.equal(applyStrictReasoningGate(base, "finloop", "https://gateway.example.com/v1", "gpt-4o"), base);
   const off = resolveReasoningDrop({ drop: false });
   assert.equal(applyStrictReasoningGate(off, "deepseek", "https://api.deepseek.com/v1"), off);
 });
