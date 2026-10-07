@@ -214,6 +214,13 @@
 
 > **只有文档中列出的键才会从 `acp.json` 读取。** 其他调优参数（`preserveRecentMessages`）是代码级别的，不开放给用户。三个压缩阈值构成三级递进：基于增长的软 nudge → 越过 `compress.maxContextLimit` 后的强制 nudge → 越过 `compress.emergencyThresholdPercent` 后的紧急截断。
 
+### Tier distillation triggers（`tiers.tier2Trigger` / `tiers.tier3Trigger`）
+
+- **类型：** `number`
+- **默认值：** Pi 生效默认 `tier2Trigger = 10`、`tier3Trigger = 20`（内核框架默认 `1000` / `2000`，count 路径关闭 —— acp-kernel#379）
+- **状态：** 🟢 ACTIVE —— 代码级默认，不从 `acp.json` 读取；通过扩展构造参数传入 `coreOverrides.tiers.*` 覆盖。
+- **说明：** 内核默认把 count 触发的 tier 蒸馏关掉（「块数本身不是需求信号」，acp-kernel#379），但完全关闭会让 tier-1 summary 无限堆积——token 体量路径（≥1.5× growth floor **且** > T1 有效量）在现实的 summary 规模下不可达。生产实测：22 块 × ~26K → 每次请求都窗口溢出（[#628](https://github.com/ranxianglei/billion-context-pi/issues/628)）。因此 Pi 适配器应用自己的生效默认 10 / 20（#379 之前的 2:1 比例）：当存在 10 个活跃 tier-1 块时，growth 路径上 tier-2 蒸馏 nudge 即有资格触发（tier-3 同理为 20 个活跃 tier-2 块）；每 tier 的 cadence 守卫（两次 nudge 之间至少一个 growth floor 的新 token）限制其触发频率。要恢复内核的 count-off 行为，传 `coreOverrides: { tiers: { tier2Trigger: 1000, tier3Trigger: 2000 } }`。
+
 ---
 
 ## 通用

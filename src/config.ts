@@ -616,6 +616,17 @@ export function resolveConfig(adapter: AdapterConfig, liveContextLimit: number, 
     ...adapter.coreOverrides,
   };
   const config = defaultConfig(limit, overrides);
+  // Pi effective default for count-path tier distillation (#628): the kernel
+  // framework default keeps it OFF (acp-kernel#379: tier2Trigger 1000 /
+  // tier3Trigger 2000 — "block count is not a need signal"), but fully off
+  // lets tier-1 summaries accumulate without bound while the token-mass paths
+  // (>=1.5x growthFloor AND > T1) stay unreachable at realistic summary sizes.
+  // 10/20 restores reachability at the pre-#379 2:1 ratio; the per-tier
+  // cadence guard (growthFloor between re-nudges) bounds re-trigger frequency.
+  // Explicit coreOverrides.tiers.* always win.
+  const tiersOverride = adapter.coreOverrides?.tiers;
+  if (tiersOverride?.tier2Trigger === undefined) config.tiers.tier2Trigger = 10;
+  if (tiersOverride?.tier3Trigger === undefined) config.tiers.tier3Trigger = 20;
   const c = resolveCompress(adapter.compress, provider, modelId);
   if (c.maxContextLimit !== undefined) config.nudge.maxContextLimitPct = parsePercent(c.maxContextLimit);
   if (c.emergencyThresholdPercent !== undefined) {
