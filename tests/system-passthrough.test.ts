@@ -87,6 +87,22 @@ test("unpaired rebuilt system messages beyond the input count stay unchanged", (
   assert.equal(out[2].role === "user", true);
 });
 
+test("divergent host: excess input systems beyond the rebuilt count are carried back, not dropped", () => {
+  const r1 = { role: "system", content: "r1" };
+  const i1 = system("i1", { toolsAdded: [TOOL] });
+  const i2 = system("i2");
+  const u = user("q");
+  const out = carryHostSystemMessages(
+    [r1, u] as unknown as AgentMessage[],
+    [i1, i2, u] as AgentMessage[],
+  ) as object[];
+  assert.equal(out.length, 3);
+  assert.notEqual(out[0], r1);
+  assert.deepEqual((out[0] as Record<string, unknown>).toolsAdded, [TOOL]);
+  assert.equal(out[1], u);
+  assert.equal(out[2], i2);
+});
+
 test("non-system message order and identity are preserved when carrying", () => {
   const u1 = user("q1");
   const a1 = assistant("a1");
