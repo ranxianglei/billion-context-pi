@@ -48,7 +48,7 @@ import {
   throttleDelayMs,
 } from "./throttle-retry.js";
 import { defaultCountTokens } from "acp-kernel";
-import { formatSystemPromptForEvent, getSystemPromptText } from "./compat.js";
+import { getSystemPromptText, injectAcpSystemPrompt } from "./compat.js";
 import { applyOutputHeadroom, inspectOverflowMessage, isNoBody4xxError, resolveOutputHeadroomCap } from "./overflow-selfheal.js";
 import { FORK_HOST_WARNING_MESSAGE, UNSUPPORTED_HOST_MESSAGE } from "./omp.js";
 import { isDeclaredForkHost, isUnsupportedHost } from "./host.js";
@@ -981,7 +981,7 @@ function wireSystemPrompt(pi: ExtensionAPI, runtime: AcpRuntime): void {
     const acp = buildAcpSystemPrompt(runtime.prompts, merged.promptSections);
     const delegateText = merged.delegatePrompt !== undefined ? merged.delegatePrompt : ACP_DELEGATE_PROMPT;
     const prompt = delegate && delegateText !== null ? `${acp}\n${delegateText}` : acp;
-    return { systemPrompt: formatSystemPromptForEvent(event.systemPrompt, prompt) };
+    return injectAcpSystemPrompt(event, prompt);
   });
 }
 
