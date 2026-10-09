@@ -120,6 +120,15 @@ test("injectAcpSystemPrompt: legacy path returns the composed replacement and le
   assert.deepEqual(out, { systemPrompt: "B\n\nBLOCK_XYZ" });
 });
 
+test("injectAcpSystemPrompt: hostile frozen options degrade to the legacy return path without throwing", () => {
+  const event: any = Object.freeze({
+    systemPrompt: "B",
+    systemPromptOptions: Object.freeze({ appendSystemPrompt: "" }),
+  });
+  assert.equal(appendOptionFeedsRenderedPrompt(event), false, "frozen options must not throw");
+  assert.deepEqual(injectAcpSystemPrompt(event, "BLOCK_XYZ"), { systemPrompt: "B\n\nBLOCK_XYZ" });
+});
+
 test("appendOptionFeedsRenderedPrompt: distinguishes live render from snapshot/forced/no-options", () => {
   const live = makeLiveEvent({}).event;
   assert.equal(appendOptionFeedsRenderedPrompt(live), true, "live getter reflects the option");

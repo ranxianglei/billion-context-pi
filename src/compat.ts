@@ -57,6 +57,11 @@ export function appendOptionFeedsRenderedPrompt(
   const sentinel = "\u0000acp-append-probe\u0000";
   try {
     opts.appendSystemPrompt = prev + sentinel;
+  } catch {
+    // frozen/hostile options object: treat as non-live, fall back to the legacy return
+    return false;
+  }
+  try {
     return normalizeSystemPrompt(event.systemPrompt).includes(sentinel);
   } finally {
     opts.appendSystemPrompt = prev;
