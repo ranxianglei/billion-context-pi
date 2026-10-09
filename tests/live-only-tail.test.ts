@@ -35,6 +35,10 @@ function customEntry(id: string, customType: string, text: string): SessionEntry
 function customLive(customType: string, text: string): object {
   return { role: "custom", customType, content: [{ type: "text", text }], display: true, timestamp: Date.now() };
 }
+// An aborted/errored turn persists an assistant message with NO content blocks.
+function emptyAssistant(): object {
+  return { role: "assistant", content: [], timestamp: Date.now() };
+}
 
 function textOf(m: Record<string, unknown>): string {
   const c = m.content;
@@ -211,6 +215,65 @@ test("trap #1: a custom_message session stays aligned and still detects the appe
 test("empty live array returns null tail AND null miss", () => {
   const entries: SessionEntry[] = [msgEntry("a", user("hello"))];
   const r = liveOnlyTail(entries, []);
+  assert.equal(r.tail, null);
+  assert.equal(r.miss, null);
+});
+
+test("empty assistant pruned by host is ignored so the appended tail is recovered (#471 follow-up)", () => {
+  // An aborted turn leaves an empty assistant entry in the session file; pi-web's
+  // auto-name route drops it from the context array before sending. Without ignoring
+  // it, persisted/live diverge by one forever and the instruction is never injected.
+  const entries: SessionEntry[] = [msgEntry("a", user("q")), msgEntry("b", emptyAssistant()), msgEntry("c", user("next"))];
+  const live = [user("q"), user("next"), user("Create a concise title for this conversation.")];
+  const r = liveOnlyTail(entries, live);
+  assert.ok(r.tail);
+  assert.equal(r.miss, null);
+  assert.equal(r.tail!.length, 1);
+  assert.equal((r.tail![0] as Record<string, unknown>).role, "user");
+  assert.equal(textOf(r.tail![0] as Record<string, unknown>), "Create a concise title for this conversation.");
+});
+
+test("empty assistant kept by host stays aligned and still recovers the tail", () => {
+  const entries: SessionEntry[] = [msgEntry("a", user("q")), msgEntry("b", emptyAssistant()), msgEntry("c", user("next"))];
+  const live = [user("q"), emptyAssistant(), user("next"), user("Give it a title.")];
+  const r = liveOnlyTail(entries, live);
+  assert.ok(r.tail);
+  assert.equal(r.miss, null);
+  assert.equal(r.tail!.length, 1);
+  assert.equal(textOf(r.tail![0] as Record<string, unknown>), "Give it a title.");
+});
+
+test("multiple consecutive pruned empty entries are all ignored so alignment holds", () => {
+  const entries: SessionEntry[] = [
+    msgEntry("a", user("q")),
+    msgEntry("b", emptyAssistant()),
+    msgEntry("c", emptyAssistant()),
+    msgEntry("d", user("next")),
+  ];
+  const live = [user("q"), user("next"), user("Title please.")];
+  const r = liveOnlyTail(entries, live);
+  assert.ok(r.tail);
+  assert.equal(r.miss, null);
+  assert.equal(r.tail!.length, 1);
+  assert.equal(textOf(r.tail![0] as Record<string, unknown>), "Title please.");
+});
+
+test("ignoring empty entries does not mask a genuine content divergence (still a miss)", () => {
+  // A was rewritten AND the empty assistant was pruned: dropping empties must not
+  // paper over the real A != A' divergence.
+  const entries: SessionEntry[] = [msgEntry("a", user("A")), msgEntry("b", emptyAssistant()), msgEntry("c", user("B"))];
+  const live = [user("A was rewritten"), user("B")];
+  const r = liveOnlyTail(entries, live);
+  assert.equal(r.tail, null);
+  assert.ok(r.miss);
+  assert.equal(r.miss!.droppedPersisted, 1);
+  assert.equal(r.miss!.droppedLive, 0);
+});
+
+test("pruned empty entry but no injected instruction returns null tail AND null miss (no spurious tail)", () => {
+  const entries: SessionEntry[] = [msgEntry("a", user("q")), msgEntry("b", emptyAssistant()), msgEntry("c", user("next"))];
+  const live = [user("q"), user("next")];
+  const r = liveOnlyTail(entries, live);
   assert.equal(r.tail, null);
   assert.equal(r.miss, null);
 });

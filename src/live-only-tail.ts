@@ -50,13 +50,40 @@ function entryAsLiveShape(entry: SessionEntry): Record<string, unknown> | undefi
   return undefined;
 }
 
+// An aborted/errored turn can persist a message with NO content blocks
+// (content: []). Some hosts (pi-web's auto-name route) prune such messages from
+// the context array before sending, while entryAsLiveShape() keeps them verbatim —
+// so a single dropped entry shifts persisted/live out of alignment by one forever
+// and the prefix walk never reaches the extension (#565). Dropping these shapes
+// from BOTH sides before walking is symmetric (restores alignment whether or not
+// the host pruned them) and cannot mask a real divergence, since an empty message
+// carries no text to differ on.
+function isEmptyContent(content: unknown): boolean {
+  if (Array.isArray(content)) return content.length === 0;
+  if (typeof content === "string") return content.trim().length === 0;
+  return false;
+}
+function isIgnorableEmpty(message: unknown): boolean {
+  return isEmptyContent((message as Record<string, unknown> | undefined)?.content);
+}
+// Zero-allocation twin of isIgnorableEmpty(entryAsLiveShape(e)) for the cached
+// count/canary walks: reads the entry's content field directly so cache
+// bookkeeping stays allocation-free on 20k+ entry session files.
+function entryIsIgnorableEmpty(entry: SessionEntry): boolean {
+  if (entry.type === "message") return isEmptyContent((entry.message as unknown as Record<string, unknown>).content);
+  if (entry.type === "custom_message") return isEmptyContent(entry.content);
+  return false;
+}
+
 // Bounded, payload-free diagnostic for a "no tail recovered" verdict (#559): the
 // conservative contract is right, but it made undetected drops invisible (only the
 // ABSENCE of an appended line). These fields say WHERE the positional walk broke and
 // WHY, in one read. Computed only on a genuine miss, never on the aligned no-op.
 export interface LiveOnlyTailMiss {
-  persisted: number;      // message+custom_message entry count in the walked view
+  persisted: number;      // message+custom_message entries in the walked view
   live: number;           // live array length in the walked view
+  droppedPersisted: number; // ignorable-empty entries dropped from the persisted side (#565)
+  droppedLive: number;      // ignorable-empty messages dropped from the live side (#565)
   prefix: number;         // leading messages that aligned (front walk)
   suffix: number;         // trailing messages that aligned (back walk)
   gapPersisted: number;   // divergent middle-region size, persisted side
@@ -82,7 +109,7 @@ function snip(s: string): string {
   return flat.length > 24 ? flat.slice(0, 24) + "…" : flat;
 }
 
-function missDiag(persisted: Record<string, unknown>[], live: AgentMessage[], prefix: number): LiveOnlyTailMiss {
+function missDiag(persisted: Record<string, unknown>[], live: AgentMessage[], prefix: number, droppedPersisted: number, droppedLive: number): LiveOnlyTailMiss {
   const pLen = persisted.length;
   const lLen = live.length;
   const span = Math.min(pLen, lLen);
@@ -112,7 +139,7 @@ function missDiag(persisted: Record<string, unknown>[], live: AgentMessage[], pr
     }
   }
 
-  return { persisted: pLen, live: lLen, prefix, suffix, gapPersisted, gapLive, atRole, atCustom, atTool, sameSig, text };
+  return { persisted: pLen, live: lLen, droppedPersisted, droppedLive, prefix, suffix, gapPersisted, gapLive, atRole, atCustom, atTool, sameSig, text };
 }
 
 /** Messages a host put in the live array WITHOUT writing a session entry. pi-web's
@@ -123,23 +150,45 @@ function missDiag(persisted: Record<string, unknown>[], live: AgentMessage[], pr
  *  to re-append after the rebuild (`tail`), or a null tail when the live array is not
  *  a clean structural extension of the persisted branch — then the caller leaves
  *  behaviour unchanged and logs `miss` (a #559 diagnostic) unless the arrays simply
- *  align with nothing to add. Recognised shapes: (1) new trailing message(s); (2) a
- *  text suffix appended INTO the final user message (returned as one fresh user msg). */
+ *  align with nothing to add. Empty-content entries (aborted turns) are ignored on
+ *  both sides so a host that prunes them stays aligned (#565). Recognised shapes:
+ *  (1) new trailing message(s); (2) a text suffix appended INTO the final user
+ *  message (returned as one fresh user msg). */
 type PersistedShape = Record<string, unknown>;
+
+// Persisted entries projected to their live-array shape, dropping kinds that never
+// reach LLM context and (#565) ignorable-empty messages; reports how many empties
+// were dropped so a miss line can show whether normalization fired.
+function projectPersisted(entries: SessionEntry[]): { shapes: PersistedShape[]; dropped: number } {
+  const shapes: PersistedShape[] = [];
+  let dropped = 0;
+  for (const e of entries) {
+    const shape = entryAsLiveShape(e);
+    if (shape === undefined) continue;
+    if (isIgnorableEmpty(shape)) {
+      dropped++;
+      continue;
+    }
+    shapes.push(shape);
+  }
+  return { shapes, dropped };
+}
 
 function countPersisted(entries: SessionEntry[]): number {
   let n = 0;
-  for (const e of entries) if (e.type === "message" || e.type === "custom_message") n++;
+  for (const e of entries) {
+    if ((e.type === "message" || e.type === "custom_message") && !entryIsIgnorableEmpty(e)) n++;
+  }
   return n;
 }
 
-// Index of the n-th persisted (message|custom_message) entry WITHOUT building
+// Index of the n-th kept (non-empty message|custom_message) entry WITHOUT building
 // the intermediate shape array — used by the cached path to sig one boundary
 // entry in O(n) index walk with zero allocations.
 function persistedAt(entries: SessionEntry[], n: number): SessionEntry | undefined {
   let i = 0;
   for (const e of entries) {
-    if (e.type === "message" || e.type === "custom_message") {
+    if ((e.type === "message" || e.type === "custom_message") && !entryIsIgnorableEmpty(e)) {
       if (i === n) return e;
       i++;
     }
@@ -159,29 +208,27 @@ interface AlignmentResult extends LiveOnlyTailResult {
 }
 
 function alignAndExtract(entries: SessionEntry[], live: AgentMessage[]): AlignmentResult {
-  const persisted: PersistedShape[] = [];
-  for (const e of entries) {
-    const shape = entryAsLiveShape(e);
-    if (shape !== undefined) persisted.push(shape);
-  }
+  const { shapes: persisted, dropped: droppedPersisted } = projectPersisted(entries);
+  const seq = live.filter((m) => !isIgnorableEmpty(m));
+  const droppedLive = live.length - seq.length;
 
-  const max = Math.min(persisted.length, live.length);
+  const max = Math.min(persisted.length, seq.length);
   let i = 0;
-  while (i < max && weakMessageSig(persisted[i]) === weakMessageSig(live[i])) i++;
+  while (i < max && weakMessageSig(persisted[i]) === weakMessageSig(seq[i])) i++;
 
   if (i === max) {
     // Persisted is a prefix of live (or identical); the extension is the tail.
-    const tail = live.slice(max);
+    const tail = seq.slice(max);
     if (tail.length > 0 && tail.length <= MAX_LIVE_ONLY_TAIL) return { tail, miss: null, alignedFully: true, alignedPrefix: max };
     if (tail.length === 0) return { tail: null, miss: null, alignedFully: true, alignedPrefix: max }; // aligned, nothing to add: silent
-    return { tail: null, miss: missDiag(persisted, live, i), alignedFully: true, alignedPrefix: max }; // over-cap: surface it
+    return { tail: null, miss: missDiag(persisted, seq, i, droppedPersisted, droppedLive), alignedFully: true, alignedPrefix: max }; // over-cap: surface it
   }
 
   // Diverged before the end: recover only the safe case — equal-length arrays, all
   // aligned except the final element, which is a user message whose text grew by a
   // strict suffix. Anything else (middle divergence, removals, rewrites) → miss.
-  if (i === max - 1 && i === persisted.length - 1 && i === live.length - 1) {
-    const liveMsg = live[i] as Record<string, unknown> | undefined;
+  if (i === max - 1 && i === persisted.length - 1 && i === seq.length - 1) {
+    const liveMsg = seq[i] as Record<string, unknown> | undefined;
     if (liveMsg && typeof liveMsg.role === "string" && liveMsg.role === "user") {
       const before = sigText((persisted[i] as Record<string, unknown> | undefined)?.content);
       const after = sigText(liveMsg.content);
@@ -194,7 +241,7 @@ function alignAndExtract(entries: SessionEntry[], live: AgentMessage[]): Alignme
     }
   }
 
-  return { tail: null, miss: missDiag(persisted, live, i), alignedFully: false, alignedPrefix: i };
+  return { tail: null, miss: missDiag(persisted, seq, i, droppedPersisted, droppedLive), alignedFully: false, alignedPrefix: i };
 }
 
 export function liveOnlyTail(entries: SessionEntry[], live: AgentMessage[]): LiveOnlyTailResult {
@@ -208,7 +255,9 @@ export function liveOnlyTail(entries: SessionEntry[], live: AgentMessage[]): Liv
 // count drop → full rewalk), live positions below the persisted count map to
 // those same session messages, so an alignment proven last turn for
 // [0, alignedTo) carries over — re-verified with one canary sig at the last
-// boundary, then only the NEW pairs are walked (a handful per turn).
+// boundary, then only the NEW pairs are walked (a handful per turn). Counts and
+// the canary run over KEPT (non-empty) entries only, so appending an empty
+// aborted-turn entry leaves them unchanged and the proof carries over (#565).
 interface TailCacheEntry {
   persistedCount: number;
   liveCount: number;
@@ -222,27 +271,28 @@ const tailCache = new Map<string, TailCacheEntry>();
  *  (same tail/miss verdicts); only the prefix proof is memoized. Doubt always
  *  falls back to the full walk. */
 export function liveOnlyTailCached(sid: string, entries: SessionEntry[], live: AgentMessage[]): LiveOnlyTailResult {
+  const seq = live.filter((m) => !isIgnorableEmpty(m));
   const prev = tailCache.get(sid);
   const persistedCount = countPersisted(entries);
   if (
     prev &&
     prev.lastPersistedSig !== null &&
     persistedCount >= prev.persistedCount &&
-    live.length >= prev.liveCount &&
-    live.length - prev.liveCount <= MAX_LIVE_ONLY_TAIL * 4
+    seq.length >= prev.liveCount &&
+    seq.length - prev.liveCount <= MAX_LIVE_ONLY_TAIL * 4
   ) {
     const canaryEntry = persistedAt(entries, prev.persistedCount - 1);
     const canary = canaryEntry ? weakMessageSig(entryAsLiveShape(canaryEntry)) : null;
     if (canary === prev.lastPersistedSig) {
       // Prefix alignment [0, prev.alignedTo) carries over; one forward walk
       // checks only the new pairs [prev.alignedTo, min(persisted, live)).
-      const max = Math.min(persistedCount, live.length);
+      const max = Math.min(persistedCount, seq.length);
       let pIdx = 0;
       let aligned = true;
       for (const e of entries) {
         if (pIdx >= max) break;
-        if (e.type === "message" || e.type === "custom_message") {
-          if (pIdx >= prev.alignedTo && weakMessageSig(entryAsLiveShape(e)) !== weakMessageSig(live[pIdx])) {
+        if ((e.type === "message" || e.type === "custom_message") && !entryIsIgnorableEmpty(e)) {
+          if (pIdx >= prev.alignedTo && weakMessageSig(entryAsLiveShape(e)) !== weakMessageSig(seq[pIdx])) {
             aligned = false;
             break;
           }
@@ -253,21 +303,17 @@ export function liveOnlyTailCached(sid: string, entries: SessionEntry[], live: A
         const lastEntry = persistedAt(entries, persistedCount - 1);
         tailCache.set(sid, {
           persistedCount,
-          liveCount: live.length,
+          liveCount: seq.length,
           alignedTo: max,
           lastPersistedSig: lastEntry ? weakMessageSig(entryAsLiveShape(lastEntry)) : null,
         });
-        const tail = live.slice(max);
+        const tail = seq.slice(max);
         if (tail.length > 0 && tail.length <= MAX_LIVE_ONLY_TAIL) return { tail, miss: null };
         if (tail.length === 0) return { tail: null, miss: null };
         // Over-cap trailing extension: same verdict AND diagnostic as the full
         // walk (the shape list is built lazily — only misses pay for it).
-        const persisted: PersistedShape[] = [];
-        for (const e of entries) {
-          const shape = entryAsLiveShape(e);
-          if (shape !== undefined) persisted.push(shape);
-        }
-        return { tail: null, miss: missDiag(persisted, live, max) };
+        const { shapes: persisted, dropped } = projectPersisted(entries);
+        return { tail: null, miss: missDiag(persisted, seq, max, dropped, live.length - seq.length) };
       }
       // New pairs diverged (host rewrote history past the boundary): fall
       // through to the full walk so the mid-history recovery logic runs.
@@ -277,7 +323,7 @@ export function liveOnlyTailCached(sid: string, entries: SessionEntry[], live: A
   const lastEntry = persistedAt(entries, persistedCount - 1);
   tailCache.set(sid, {
     persistedCount,
-    liveCount: live.length,
+    liveCount: seq.length,
     alignedTo: result.alignedPrefix,
     lastPersistedSig: lastEntry ? weakMessageSig(entryAsLiveShape(lastEntry)) : null,
   });

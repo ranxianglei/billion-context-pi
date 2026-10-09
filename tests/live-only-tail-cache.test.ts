@@ -18,6 +18,10 @@ function user(text: string): object {
 function assistant(text: string): object {
   return { role: "assistant", content: text, timestamp: Date.now() };
 }
+// An aborted/errored turn persists an assistant message with NO content blocks.
+function emptyAssistant(): object {
+  return { role: "assistant", content: [], timestamp: Date.now() };
+}
 
 // Structural comparison: the plain function returns live-slice references, the
 // cached one returns a fresh slice — compare shapes, not identity.
@@ -139,4 +143,30 @@ test("sessions are isolated by sid", () => {
   assert.deepEqual(outcome(liveOnlyTailCached("s6", b.entries, b.live)), outcome(liveOnlyTail(b.entries, b.live)));
   // s5's cache must not have been clobbered: same inputs, same answer.
   assert.deepEqual(outcome(liveOnlyTailCached("s5", a.entries, a.live)), outcome(liveOnlyTail(a.entries, a.live)));
+});
+
+test("aborted-turn empty entry: host-pruned live stays aligned and the instruction is recovered via the fast path (#565)", () => {
+  dropLiveOnlyTailCache("s8");
+  // t0: one aligned turn primes the cache.
+  const t0 = grow(1);
+  assert.deepEqual(outcome(liveOnlyTailCached("s8", t0.entries, t0.live)), outcome(liveOnlyTail(t0.entries, t0.live)));
+  // t1: an aborted turn appends an EMPTY assistant entry; the host prunes it from
+  // its context array. Non-empty count and canary are unchanged -> fast path,
+  // which must skip the empty entry instead of desyncing by one forever.
+  const t1Entries = [...t0.entries, msgEntry("aborted", emptyAssistant())];
+  const t1Live = [...t0.live];
+  assert.deepEqual(outcome(liveOnlyTailCached("s8", t1Entries, t1Live)), outcome(liveOnlyTail(t1Entries, t1Live)));
+  // t2: the user continues; the empty entry persists, the host still prunes.
+  const t2Entries = [...t1Entries, msgEntry("u1", user("next"))];
+  const t2Live = [...t1Live, user("next")];
+  assert.deepEqual(outcome(liveOnlyTailCached("s8", t2Entries, t2Live)), outcome(liveOnlyTail(t2Entries, t2Live)));
+  // t3: pi-web auto-name fires — the instruction exists only in the live array.
+  // Pre-fix this returned null forever (off-by-one from the empty entry onward);
+  // now the fast path recovers it.
+  const t3Live = [...t2Live, user("Create a concise title for this conversation.")];
+  const r = liveOnlyTailCached("s8", t2Entries, t3Live);
+  assert.ok(r.tail);
+  assert.equal(r.miss, null);
+  assert.deepEqual(tailShape(r.tail), [{ role: "user", text: "Create a concise title for this conversation." }]);
+  assert.deepEqual(outcome(r), outcome(liveOnlyTail(t2Entries, t3Live)));
 });
