@@ -31,6 +31,13 @@ function tailShape(tail: object[] | null): unknown {
   });
 }
 
+// #559: the cached path must reach the SAME verdict as the plain walk, including
+// the miss diagnostic — the pre-fix fast path returned a bare tail/null with no way
+// to tell "aligned, nothing to add" from "diverged, dropped".
+function outcome(r: { tail: object[] | null; miss: unknown }): unknown {
+  return { tail: tailShape(r.tail), miss: r.miss };
+}
+
 function grow(base: number): { entries: SessionEntry[]; live: object[] } {
   const entries: SessionEntry[] = [];
   const live: object[] = [];
@@ -45,25 +52,24 @@ function grow(base: number): { entries: SessionEntry[]; live: object[] } {
 test("cached variant matches plain variant across a steady growth sequence", () => {
   dropLiveOnlyTailCache("s1");
   let { entries, live } = grow(30);
-  assert.deepEqual(tailShape(liveOnlyTailCached("s1", entries, live)), tailShape(liveOnlyTail(entries, live)));
+  assert.deepEqual(outcome(liveOnlyTailCached("s1", entries, live)), outcome(liveOnlyTail(entries, live)));
   for (let round = 0; round < 6; round++) {
     entries = [...entries, ...grow(1).entries.map((e, i) => (e.type === "message" ? msgEntry(`u${round}-x${i}`, (e as SessionMessageEntry).message) : e))];
     live = [...live, user(`extra ${round}`)];
-    const cached = tailShape(liveOnlyTailCached("s1", entries, live));
-    const plain = tailShape(liveOnlyTail(entries, live));
-    assert.deepEqual(cached, plain);
+    assert.deepEqual(outcome(liveOnlyTailCached("s1", entries, live)), outcome(liveOnlyTail(entries, live)));
   }
 });
 
-test("host history rewrite past the boundary falls back to the full walk", () => {
+test("host history rewrite below the proven prefix keeps the tail verdict (prefix is trusted by design)", () => {
   dropLiveOnlyTailCache("s2");
   const { entries, live } = grow(10);
-  liveOnlyTailCached("s2", entries, live); // prime cache
+  liveOnlyTailCached("s2", entries, live); // prime cache: proves [0, 20)
   // Same live array, but persisted history rewritten in the middle (same count).
+  // The #561 append-only argument trusts the proven prefix (pi's jsonl only grows;
+  // a same-length in-place rewrite is out-of-model), so the fast path does not
+  // re-diagnose it — tail verdicts must still agree, which they do (both null).
   const rewritten = entries.map((e, i) => (i === 2 && e.type === "message" ? msgEntry(e.id, user("REWRITTEN")) : e));
-  const cached = tailShape(liveOnlyTailCached("s2", rewritten, live));
-  const plain = tailShape(liveOnlyTail(rewritten, live));
-  assert.deepEqual(cached, plain);
+  assert.deepEqual(tailShape(liveOnlyTailCached("s2", rewritten, live).tail), tailShape(liveOnlyTail(rewritten, live).tail));
 });
 
 test("rewind (persisted count drop) falls back and stays consistent", () => {
@@ -72,18 +78,35 @@ test("rewind (persisted count drop) falls back and stays consistent", () => {
   liveOnlyTailCached("s3", entries, live);
   const truncated = entries.slice(0, 10);
   const truncatedLive = live.slice(0, 10);
-  const cached = tailShape(liveOnlyTailCached("s3", truncated, truncatedLive));
-  const plain = tailShape(liveOnlyTail(truncated, truncatedLive));
-  assert.deepEqual(cached, plain);
+  assert.deepEqual(outcome(liveOnlyTailCached("s3", truncated, truncatedLive)), outcome(liveOnlyTail(truncated, truncatedLive)));
 });
 
-test("oversized live-only tail returns null exactly like the plain walk", () => {
+test("oversized live-only tail returns null with the same miss as the plain walk (cold and warm)", () => {
   dropLiveOnlyTailCache("s4");
   const { entries } = grow(5);
   const bigTail = Array.from({ length: 20 }, (_, i) => user(`tail ${i}`));
   const live = [...entries.filter((e) => e.type === "message").map((e) => (e as SessionMessageEntry).message), ...bigTail];
-  assert.equal(liveOnlyTailCached("s4", entries, live), null);
-  assert.equal(liveOnlyTail(entries, live), null);
+  const cold = liveOnlyTailCached("s4", entries, live);
+  assert.equal(cold.tail, null);
+  assert.ok(cold.miss);
+  assert.equal(cold.miss!.gapLive, 20);
+  assert.deepEqual(outcome(cold), outcome(liveOnlyTail(entries, live)));
+  // Warm: the fast path decides over-cap itself and must emit the same diagnostic.
+  const warm = liveOnlyTailCached("s4", entries, live);
+  assert.deepEqual(outcome(warm), outcome(liveOnlyTail(entries, live)));
+});
+
+test("new-pair divergence falls back to the full walk with an identical miss", () => {
+  dropLiveOnlyTailCache("s4b");
+  const { entries, live } = grow(10);
+  liveOnlyTailCached("s4b", entries, live); // prime: proves [0, 20)
+  // Grow one pair, but the NEW assistant reply differs from what was persisted:
+  // the fast path walks the new pairs, sees the divergence, and must fall through
+  // to the full walk — same miss as the uncached variant.
+  const grownEntries = [...entries, msgEntry("u10", user("q10")), msgEntry("a10", assistant("r10"))];
+  const grownLive = [...live, user("q10"), assistant("r10 CHANGED")];
+  assert.deepEqual(outcome(liveOnlyTailCached("s4b", grownEntries, grownLive)), outcome(liveOnlyTail(grownEntries, grownLive)));
+  assert.ok(liveOnlyTail(grownEntries, grownLive).miss);
 });
 
 test("suffix-recovery repeated across turns still returns the suffix (cached ≡ plain)", () => {
@@ -103,8 +126,8 @@ test("suffix-recovery repeated across turns still returns the suffix (cached ≡
   // skips re-walking it and drops the suffix.
   entries.push(msgEntry("u5", user("base prompt")));
   live.push(user("base prompt\n\nGenerate a title"));
-  assert.deepEqual(tailShape(liveOnlyTailCached("s7", entries, live)), tailShape(liveOnlyTail(entries, live)));
-  assert.deepEqual(tailShape(liveOnlyTailCached("s7", entries, live)), tailShape(liveOnlyTail(entries, live)));
+  assert.deepEqual(outcome(liveOnlyTailCached("s7", entries, live)), outcome(liveOnlyTail(entries, live)));
+  assert.deepEqual(outcome(liveOnlyTailCached("s7", entries, live)), outcome(liveOnlyTail(entries, live)));
 });
 
 test("sessions are isolated by sid", () => {
@@ -113,9 +136,7 @@ test("sessions are isolated by sid", () => {
   const a = grow(4);
   const b = grow(3);
   liveOnlyTailCached("s5", a.entries, a.live);
-  const bCached = tailShape(liveOnlyTailCached("s6", b.entries, b.live));
-  assert.deepEqual(bCached, tailShape(liveOnlyTail(b.entries, b.live)));
+  assert.deepEqual(outcome(liveOnlyTailCached("s6", b.entries, b.live)), outcome(liveOnlyTail(b.entries, b.live)));
   // s5's cache must not have been clobbered: same inputs, same answer.
-  const aCached = tailShape(liveOnlyTailCached("s5", a.entries, a.live));
-  assert.deepEqual(aCached, tailShape(liveOnlyTail(a.entries, a.live)));
+  assert.deepEqual(outcome(liveOnlyTailCached("s5", a.entries, a.live)), outcome(liveOnlyTail(a.entries, a.live)));
 });
