@@ -205,7 +205,7 @@
 | `ACP_MODEL_CONTEXT_LIMIT` | 覆盖上下文窗口大小（优先级最高）。 |
 | `ACP_DEBUG` | 设为 `1` / `true` 开启调试日志。 |
 | `ACP_LOG_FILE` | 覆盖日志文件路径（默认 `~/.pi/acp.log`）。 |
-| `PI_ACP_FORK_HOST` | 设为 `1` / `true` 声明当前宿主是兼容 Pi 的 fork（无 `buildContextEntries()`），使其被识别为受支持宿主。OMP 默认仍被拒绝。见 [docs/host-adapter.md](./docs/host-adapter.md)。 |
+| `PI_ACP_FORK_HOST` | 声明非 Pi 形态宿主为受支持的兼容 Pi fork（无 `buildContextEntries()`）。`1` / `true` 指匿名 fork；`pi-desktop` 特指 PI-Desktop（#635）——走同一 fork 路径并给出宿主专属提示。OMP 默认仍被拒绝；无法识别的取值不视为声明。见 [docs/host-adapter.md](./docs/host-adapter.md)。 |
 | `PI_ACP_DELEGATE_MAX_DEPTH` | 覆盖 `delegate.maxDepth`。 |
 | `PI_ACP_DELEGATE_SYNC_TIMEOUT_MINUTES` | 覆盖 `delegate.syncTimeoutMinutes`；`0` 禁用同步硬超时。 |
 | `PI_ACP_DELEGATE_IDLE_TIMEOUT_MINUTES` | 覆盖 `delegate.idleTimeoutMinutes`；`0` 禁用闲置看门狗。 |

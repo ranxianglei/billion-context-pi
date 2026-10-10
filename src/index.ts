@@ -50,8 +50,8 @@ import {
 import { defaultCountTokens } from "acp-kernel";
 import { formatSystemPromptForEvent, getSystemPromptText } from "./compat.js";
 import { applyOutputHeadroom, inspectOverflowMessage, isNoBody4xxError, resolveOutputHeadroomCap } from "./overflow-selfheal.js";
-import { FORK_HOST_WARNING_MESSAGE, UNSUPPORTED_HOST_MESSAGE } from "./omp.js";
-import { isDeclaredForkHost, isUnsupportedHost } from "./host.js";
+import { FORK_HOST_WARNING_MESSAGE, PI_DESKTOP_WARNING_MESSAGE, UNSUPPORTED_HOST_MESSAGE } from "./omp.js";
+import { forkHostDeclaration, isUnsupportedHost } from "./host.js";
 import { isBiliProxyBaseUrl, PROXY_STAND_DOWN_MESSAGE, nativeStandDownMessage } from "./proxy-detect.js";
 import { findPiSubagentsInstalls, resolveAgentDir, DELEGATE_STAND_DOWN_MESSAGE } from "./setup-subagent-tools.js";
 
@@ -220,7 +220,8 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
   pi.on("session_start", async (_event, ctx) => {
     // Unsupported hosts stand down (#234 / #364): any host without Pi's
     // buildContextEntries() API is refused unless it declared itself a
-    // Pi-compatible fork via PI_ACP_FORK_HOST=1. OMP (oh-my-pi) stays blocked
+    // Pi-compatible fork via PI_ACP_FORK_HOST (1/true = anonymous fork;
+    // pi-desktop = PI-Desktop, #635). OMP (oh-my-pi) stays blocked
     // by default — its in-process live-entries integration diverges the nudge's
     // example refs from the session's real refs, so compress calls fail with
     // "does not exist in this session". Refuse service and point the user at
@@ -243,14 +244,17 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     // that rewrites in-flight messages can still drift them, so warn at
     // admission and point long sessions at the proxy. Log per session (support
     // logs need the attribution), notify once per process like the refusal
-    // path above.
-    if (isDeclaredForkHost() && !isPiHost(ctx.sessionManager)) {
+    // path above. PI-Desktop (#635) gets its own warning naming the known
+    // multi-turn limitation instead of the generic fork warning.
+    const forkDecl = forkHostDeclaration();
+    if (forkDecl.declared && !isPiHost(ctx.sessionManager)) {
       const sid = ctx.sessionManager.getSessionId();
-      logWarn("host", { event: "fork-host-admitted", sid, hardening: "#459", proxy: "billion-context" });
+      logWarn("host", { event: "fork-host-admitted", sid, hostClass: forkDecl.hostClass ?? "generic", hardening: "#459", proxy: "billion-context" });
       if (!forkWarned) {
         forkWarned = true;
-        if (ctx.hasUI) ctx.ui.notify(FORK_HOST_WARNING_MESSAGE, "warning");
-        else console.error(FORK_HOST_WARNING_MESSAGE);
+        const warning = forkDecl.hostClass === "pi-desktop" ? PI_DESKTOP_WARNING_MESSAGE : FORK_HOST_WARNING_MESSAGE;
+        if (ctx.hasUI) ctx.ui.notify(warning, "warning");
+        else console.error(warning);
       }
     }
     if (standDownIfProxied(ctx)) return;

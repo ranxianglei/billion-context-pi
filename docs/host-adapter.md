@@ -167,8 +167,10 @@ required.
 
 1. **Pi** — `sessionManager.buildContextEntries()` exists → fully supported, native path.
 2. **Declared Pi-compatible fork** — no `buildContextEntries()`, but the process declared
-   itself via the environment variable `PI_ACP_FORK_HOST=1` (or `true`) → supported, with
-   the entry-source semantics below.
+   itself via the environment variable `PI_ACP_FORK_HOST`: `1` / `true` name an anonymous
+   Pi-compatible fork, `pi-desktop` names PI-Desktop specifically (#635). Both are admitted
+   through the same fork path below (never treated as pi-native); `pi-desktop` is surfaced
+   under its own warning. Unrecognized values are not declarations.
 3. **Everything else** — refused: one warning per process (UI notification, or stderr in
    headless one-shot mode), all four ACP tools return guidance instead of acting, system-prompt
    injection is skipped, the context transform is a no-op, and the host's own compaction is
@@ -176,7 +178,7 @@ required.
 
 ### Why shape alone cannot decide
 
-OMP and Prime are both **Pi forks**, and both expose only `getBranch()` (no
+OMP, Prime and PI-Desktop are all **Pi forks**, and all expose only `getBranch()` (no
 `buildContextEntries()`). The SessionManager shape therefore cannot distinguish an
 unsupported host from a supported one — which is why step 2 is an explicit declaration
 rather than a fingerprint list. Setting `PI_ACP_FORK_HOST` is the operator's assertion that
@@ -189,7 +191,7 @@ the live-message merge and reintroduce the branch-lag bug.
 | Host | Entry source | Live-message merge | Delegate CLI flags |
 |---|---|---|---|
 | Pi | `buildContextEntries()` — the effective context, always current including the in-flight message | not needed | pi flags (`--mode json`, `--session`) |
-| Declared fork (Prime…) | `getBranch()` — raw branch chronology, **lags one message** (the current user message persists only after transform) | adapter merges each context event's `event.messages` into state building (`runtime.stateFor` live merge) | disabled — spawned children get no pi-only flags |
+| Declared fork (Prime… / PI-Desktop) | `getBranch()` — raw branch chronology, **lags one message** (the current user message persists only after transform) | adapter merges each context event's `event.messages` into state building (`runtime.stateFor` live merge) | disabled — spawned children get no pi-only flags |
 
 Consequences for hosts:
 
@@ -198,8 +200,11 @@ Consequences for hosts:
   *any* non-Pi-shaped session manager (`!isPiHost`), which is what makes declared forks work.
 - Delegation (`acp_delegate`) spawns real pi CLI processes. On non-Pi hosts the delegate
   tool refuses to spawn with pi-only flags, regardless of the declaration. Hosts that run
-  sub-agents natively (e.g. Prime RLM) should set `"delegate": false` in acp.json so the
-  model is not offered a tool whose children cannot run.
+   sub-agents natively (e.g. Prime RLM) should set `"delegate": false` in acp.json so the
+   model is not offered a tool whose children cannot run.
+- **PI-Desktop (#635)** rewrites its in-flight view between turns, so compressed blocks can
+  be dropped after several turns even though single-turn compress works. It is admitted via
+  `PI_ACP_FORK_HOST=pi-desktop` under its own warning, which points long sessions at the proxy.
 
 Fixtures: `tests/host-detection.test.ts` (Prime-shaped host = `{ getBranch }` only) and
 `tests/omp-refuse.test.ts` (refusal behavior + the opt-in test).
