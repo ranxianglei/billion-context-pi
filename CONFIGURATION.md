@@ -202,7 +202,7 @@ All keys below are currently **ACTIVE**.
 | `ACP_MODEL_CONTEXT_LIMIT` | Override the context limit (takes highest precedence). |
 | `ACP_DEBUG` | Set to `1` / `true` to enable debug logging. |
 | `ACP_LOG_FILE` | Override the log file path (default `~/.pi/acp.log`). |
-| `PI_ACP_FORK_HOST` | Set to `1` / `true` to declare a Pi-compatible fork host (no `buildContextEntries()`) as supported. OMP stays refused by default. See [docs/host-adapter.md](./docs/host-adapter.md). |
+| `PI_ACP_FORK_HOST` | Declare a non-Pi-shaped host as a supported Pi-compatible fork (no `buildContextEntries()`). `1` / `true` names an anonymous fork; `pi-desktop` names PI-Desktop specifically (#635) — admitted through the same fork path with host-specific guidance. OMP stays refused by default; unrecognized values are not declarations. See [docs/host-adapter.md](./docs/host-adapter.md). |
 | `PI_ACP_DELEGATE_MAX_DEPTH` | Override `delegate.maxDepth`. |
 | `PI_ACP_DELEGATE_SYNC_TIMEOUT_MINUTES` | Override `delegate.syncTimeoutMinutes`; `0` disables the sync hard timeout. |
 | `PI_ACP_DELEGATE_IDLE_TIMEOUT_MINUTES` | Override `delegate.idleTimeoutMinutes`; `0` disables the idle watchdog. |

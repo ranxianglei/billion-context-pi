@@ -1,7 +1,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { createAcpExtension } from "../src/index.js";
-import { UNSUPPORTED_HOST_MESSAGE } from "../src/omp.js";
+import { PI_DESKTOP_WARNING_MESSAGE, UNSUPPORTED_HOST_MESSAGE } from "../src/omp.js";
 import { setRunNpmForTest } from "../src/update.js";
 
 // Hermetic session_start: the pi (non-OMP) path runs the auto-update check, so
@@ -176,5 +176,26 @@ describe("Unsupported-host refusal (issue #234 / #364)", () => {
 
     assert.equal(notes.filter((m) => m === UNSUPPORTED_HOST_MESSAGE).length, 0, "no refusal when fork declared");
     assert.deepEqual(handlers.get("session_before_compact")![0]!({}, {}), { cancel: true });
+  });
+
+  test("PI-Desktop declaration (PI_ACP_FORK_HOST=pi-desktop) is admitted with its own warning (#635)", async () => {
+    const { api, handlers } = captureApi();
+    createAcpExtension()(api as any);
+    const notes: Array<{ msg: string; type?: string }> = [];
+    const notify: Notify = (msg, type) => notes.push({ msg, type });
+    const ctx = ompCtx(notify, true);
+
+    process.env.PI_ACP_FORK_HOST = "pi-desktop";
+    try {
+      await startSession(handlers, ctx);
+    } finally {
+      delete process.env.PI_ACP_FORK_HOST;
+    }
+
+    assert.equal(notes.filter((n) => n.msg === UNSUPPORTED_HOST_MESSAGE).length, 0, "no refusal when PI-Desktop declared");
+    assert.deepEqual(handlers.get("session_before_compact")![0]!({}, {}), { cancel: true }, "ACP active (cancels host compaction)");
+    const desktop = notes.find((n) => n.msg === PI_DESKTOP_WARNING_MESSAGE);
+    assert.ok(desktop, "shows the PI-Desktop-specific warning (not the generic fork warning)");
+    assert.equal(desktop!.type, "warning");
   });
 });

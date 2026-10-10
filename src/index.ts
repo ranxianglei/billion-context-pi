@@ -50,8 +50,8 @@ import {
 import { defaultCountTokens } from "acp-kernel";
 import { formatSystemPromptForEvent, getSystemPromptText } from "./compat.js";
 import { applyOutputHeadroom, inspectOverflowMessage, isNoBody4xxError, resolveOutputHeadroomCap } from "./overflow-selfheal.js";
-import { FORK_HOST_WARNING_MESSAGE, UNSUPPORTED_HOST_MESSAGE } from "./omp.js";
-import { isDeclaredForkHost, isUnsupportedHost } from "./host.js";
+import { FORK_HOST_WARNING_MESSAGE, PI_DESKTOP_WARNING_MESSAGE, UNSUPPORTED_HOST_MESSAGE } from "./omp.js";
+import { forkHostDeclaration, isUnsupportedHost } from "./host.js";
 import { isBiliProxyBaseUrl, PROXY_STAND_DOWN_MESSAGE, nativeStandDownMessage } from "./proxy-detect.js";
 import { findPiSubagentsInstalls, resolveAgentDir, DELEGATE_STAND_DOWN_MESSAGE } from "./setup-subagent-tools.js";
 
@@ -243,14 +243,17 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     // that rewrites in-flight messages can still drift them, so warn at
     // admission and point long sessions at the proxy. Log per session (support
     // logs need the attribution), notify once per process like the refusal
-    // path above.
-    if (isDeclaredForkHost() && !isPiHost(ctx.sessionManager)) {
+    // path above. PI-Desktop (#635) gets its own warning naming the known
+    // multi-turn limitation instead of the generic fork warning.
+    const forkDecl = forkHostDeclaration();
+    if (forkDecl.declared && !isPiHost(ctx.sessionManager)) {
       const sid = ctx.sessionManager.getSessionId();
-      logWarn("host", { event: "fork-host-admitted", sid, hardening: "#459", proxy: "billion-context" });
+      logWarn("host", { event: "fork-host-admitted", sid, hostClass: forkDecl.hostClass ?? "generic", hardening: "#459", proxy: "billion-context" });
       if (!forkWarned) {
         forkWarned = true;
-        if (ctx.hasUI) ctx.ui.notify(FORK_HOST_WARNING_MESSAGE, "warning");
-        else console.error(FORK_HOST_WARNING_MESSAGE);
+        const warning = forkDecl.hostClass === "pi-desktop" ? PI_DESKTOP_WARNING_MESSAGE : FORK_HOST_WARNING_MESSAGE;
+        if (ctx.hasUI) ctx.ui.notify(warning, "warning");
+        else console.error(warning);
       }
     }
     if (standDownIfProxied(ctx)) return;
