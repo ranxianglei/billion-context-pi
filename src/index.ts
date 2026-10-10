@@ -220,7 +220,8 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
   pi.on("session_start", async (_event, ctx) => {
     // Unsupported hosts stand down (#234 / #364): any host without Pi's
     // buildContextEntries() API is refused unless it declared itself a
-    // Pi-compatible fork via PI_ACP_FORK_HOST=1. OMP (oh-my-pi) stays blocked
+    // Pi-compatible fork via PI_ACP_FORK_HOST (1/true = anonymous fork;
+    // pi-desktop = PI-Desktop, #635). OMP (oh-my-pi) stays blocked
     // by default — its in-process live-entries integration diverges the nudge's
     // example refs from the session's real refs, so compress calls fail with
     // "does not exist in this session". Refuse service and point the user at
