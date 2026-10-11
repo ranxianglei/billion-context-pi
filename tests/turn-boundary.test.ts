@@ -45,10 +45,11 @@ test("isCustomMessageEntry: matches the context-projection condition exactly", (
   assert.equal(isCustomMessageEntry(user("c")), false);
 });
 
-test("isCustomMessageEntry: empty content never enters context, so never counts (#364 c)", () => {
-  assert.equal(isCustomMessageEntry(custom("e1", "")), false);
-  assert.equal(isCustomMessageEntry(custom("e2", [{ type: "image" }])), false);
+test("isCustomMessageEntry: only truly-empty content never enters context (#364 c); image is a payload (#637)", () => {
+  assert.equal(isCustomMessageEntry(custom("e1", "")), false, "no text, no image → excluded");
+  assert.equal(isCustomMessageEntry(custom("e2", [{ type: "image" }])), true, "image-only attachment carries payload → admitted (#637)");
   assert.equal(isTurnBoundary(custom("e1", ""), { countCustomMessages: true }), false, "empty control signal starts no turn even under policy");
+  assert.equal(isTurnBoundary(custom("e2", [{ type: "image" }]), { countCustomMessages: true }), true, "image attachment is a user action under policy (#637)");
 });
 
 // Interleaved battery covering every entry kind, used for the cross-view

@@ -197,13 +197,29 @@ test("entriesToCoreMessages extracts only text blocks from array content", () =>
   assert.equal(core[0]!.text, "visible text\nmore text", "only text blocks extracted, joined with newline");
 });
 
-test("entriesToCoreMessages drops custom_message with non-text-only array content", () => {
+test("entriesToCoreMessages projects image-only custom_message with a placeholder (#637)", () => {
   const entries: SessionEntry[] = [
-    customEntry("a", "subagent_result", [{ type: "image", url: "https://example.com/img.png" }]),
+    customEntry("a", "file", [{ type: "image", data: "aW1n", mimeType: "image/png" }]),
   ];
   const core = entriesToCoreMessages(entries);
 
-  assert.equal(core.length, 0, "non-text array content yields empty text → skipped");
+  assert.equal(core.length, 1, "image-only attachment is admitted so its image block reaches the model");
+  assert.equal(core[0]!.id, "a");
+  assert.equal(core[0]!.role, "user");
+  assert.equal(core[0]!.contentType, "text");
+  assert.equal(core[0]!.text, "[Image attachment]", "no text part → placeholder text, not dropped");
+});
+
+test("entriesToCoreMessages keeps extracted text (not the placeholder) when an image has accompanying text", () => {
+  const entries: SessionEntry[] = [
+    customEntry("a", "file", [
+      { type: "image", data: "aW1n", mimeType: "image/png" },
+      { type: "text", text: "see the screenshot" },
+    ]),
+  ];
+  const core = entriesToCoreMessages(entries);
+  assert.equal(core.length, 1);
+  assert.equal(core[0]!.text, "see the screenshot", "real text wins over the placeholder");
 });
 
 test("entriesToCoreMessages drops acp-status panels, acp-export docs and acp-rule reports (UI-only, never sent to model)", () => {
@@ -259,6 +275,40 @@ test("custom_message round-trip: entriesToCoreMessages → collectOriginals → 
   // Ensure no role:"custom" in output (that would be silently dropped by Pi)
   const customs = out.filter((m) => (m as { role?: string }).role === "custom");
   assert.equal(customs.length, 0, "no role:custom messages in output");
+});
+
+test("image-only custom_message round-trips to a user message keeping the image block + ref tag (#637)", () => {
+  const img = { type: "image", data: "aW1hZ2UtZGF0YQ==", mimeType: "image/png" };
+  const entries: SessionEntry[] = [customEntry("att1", "file", [img])];
+
+  const coreMessages = entriesToCoreMessages(entries);
+  assert.equal(coreMessages.length, 1, "attachment projected to exactly one core");
+  assert.equal(coreMessages[0]!.text, "[Image attachment]");
+
+  // Mirror src/index.ts collectOriginals: custom_message → { role:"user", content }.
+  const originalById = new Map<string, SessionMessageEntry["message"]>();
+  originalById.set("att1", { role: "user", content: [img] } as SessionMessageEntry["message"]);
+
+  // Simulate the kernel having assigned a ref tag to the placeholder core.
+  const tagged: CoreMessage[] = [{ id: "att1", role: "user", contentType: "text", text: acpRef("m00042") + "\n[Image attachment]" }];
+  const out = coreOutToAgentMessages(tagged, originalById);
+
+  assert.equal(out.length, 1);
+  const m = out[0] as { role: string; content: Array<{ type?: string; data?: string; mimeType?: string; text?: string }> };
+  assert.equal(m.role, "user", "restored as a user message Pi forwards to the LLM");
+  const imageBlocks = m.content.filter((b) => b.type === "image");
+  assert.equal(imageBlocks.length, 1, "the image block survives projection");
+  assert.equal(imageBlocks[0]!.data, "aW1hZ2UtZGF0YQ==", "image payload byte-identical");
+  assert.equal(imageBlocks[0]!.mimeType, "image/png");
+  const textBlock = m.content.find((b) => b.type === "text")!;
+  assert.ok(textBlock.text!.includes("m00042"), "ref tag rides alongside the image");
+});
+
+test("image-only custom_message still delimits a turn under countCustomMessages policy (#637/#364)", () => {
+  const imgOnly = customEntry("a", "file", [{ type: "image", data: "aW1n", mimeType: "image/png" }]);
+  assert.equal(isCustomMessageEntry(imgOnly), true, "image-only attachment is a context entry");
+  assert.equal(isTurnBoundary(imgOnly, { countCustomMessages: true }), true, "a pasted screenshot is a user action");
+  assert.equal(isTurnBoundary(imgOnly, {}), false, "default pi-native: only role:user starts a turn");
 });
 
 test("entriesToCoreMessages still skips compaction and model_change", () => {

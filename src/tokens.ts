@@ -22,13 +22,13 @@ export function modelSupportsImages(model: unknown): boolean {
   return Array.isArray(input) && input.includes("image");
 }
 
-// Keyed by entry id — the core id of user/toolResult messages (assistant tool-call cores split as `${id}#callId` and never carry images).
-export function collectImageTokens(entries: { id: string; type?: string; message?: AgentMessage }[], visionCapable: boolean): Map<string, number> {
+// Keyed by entry id — the core id of user/toolResult messages (assistant tool-call cores split as `${id}#callId` and never carry images). Images ride two shapes: nested under a message entry's content (user/toolResult) or directly on a custom_message entry (pi-web-ui pasted attachments, #637). Both must be counted or image-heavy sessions under-report and nudge/truncate late (#200).
+export function collectImageTokens(entries: { id: string; type?: string; message?: AgentMessage; content?: unknown }[], visionCapable: boolean): Map<string, number> {
   const out = new Map<string, number>();
   if (!visionCapable) return out;
   for (const e of entries) {
-    if (e.type !== "message") continue;
-    const n = countImageBlocks((e.message as { content?: unknown } | undefined)?.content);
+    const content = e.type === "custom_message" ? e.content : (e.message as { content?: unknown } | undefined)?.content;
+    const n = countImageBlocks(content);
     if (n > 0) out.set(e.id, n * IMAGE_TOKEN_COST);
   }
   return out;

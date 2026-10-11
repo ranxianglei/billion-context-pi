@@ -47,21 +47,44 @@ export interface AcpNudgeRecord {
  *  src/turn-boundary.ts so both views can never drift apart. */
 const CONTEXT_EXCLUDED_CUSTOM_TYPES = new Set<string>([ACP_STATUS_CUSTOM_TYPE, ACP_EXPORT_CUSTOM_TYPE, ACP_RULE_CUSTOM_TYPE]);
 
+/** Short stand-in text for image-bearing custom messages that carry no text
+ *  block — pi-web-ui pastes/uploads each attachment as its own custom_message
+ *  (customType:"file") holding only an image part (#637). It gives the entry a
+ *  core id + ref tag + a stable metering anchor so its image block survives
+ *  projection and reaches the model via collectOriginals/coreOutToAgentMessages. */
+const IMAGE_PLACEHOLDER = "[Image attachment]";
+
+/** A custom_message carries model-relevant payload iff it has a text OR an
+ *  image block. extractText alone misses image-only attachments (#637). */
+function customContentHasPayload(content: unknown): boolean {
+  return extractText(content).length > 0 || countImageBlocks(content) > 0;
+}
+
+/** Core projection of a custom_message entry (#637): null when the entry
+ *  carries neither text nor image content (empty control signals project no
+ *  message and start no turn — #364 acceptance c); otherwise a user core with
+ *  its extracted text, or IMAGE_PLACEHOLDER when only images are present. */
+function customEntryToCore(id: string, content: unknown): CoreMessage | null {
+  if (!customContentHasPayload(content)) return null;
+  const text = extractText(content) || IMAGE_PLACEHOLDER;
+  return { id, role: "user", contentType: "text", text };
+}
+
 /** True for host-injected custom_message entries that participate in LLM
- *  context: non-empty custom_message except the UI-only types in
- *  CONTEXT_EXCLUDED_CUSTOM_TYPES (acp-status panels, acp-export docs,
- *  acp-rule reports)
- *  (Pi-native projection semantics, session-manager.d.ts). The non-empty gate
- *  uses the exact same extractText check as the projection below, so an entry
+ *  context: any custom_message carrying a text OR image payload except the
+ *  UI-only types in CONTEXT_EXCLUDED_CUSTOM_TYPES (acp-status panels,
+ *  acp-export docs, acp-rule reports) (Pi-native projection semantics,
+ *  session-manager.d.ts). The payload gate uses the exact same check as the
+ *  projection below (customEntryToCore / customContentHasPayload), so an entry
  *  either enters context or it doesn't — and only entries that enter context
  *  can delimit a turn (#364 acceptance c: empty control signals start none).
  *  Shared by the turn-boundary predicate in src/turn-boundary.ts so the two
  *  views can never drift apart; defined here (not there) because it needs
- *  extractText — importing that back would create a cycle. */
+ *  extractText/countImageBlocks — importing those back would create a cycle. */
 export function isCustomMessageEntry(entry: TurnBoundaryEntry): entry is TurnBoundaryEntry & { type: "custom_message" } {
   if (entry.type !== "custom_message") return false;
   if (entry.customType !== undefined && CONTEXT_EXCLUDED_CUSTOM_TYPES.has(entry.customType)) return false;
-  return extractText(entry.content).length > 0;
+  return customContentHasPayload(entry.content);
 }
 
 export function entriesToCoreMessages(entries: SessionEntry[]): CoreMessage[] {
@@ -69,12 +92,12 @@ export function entriesToCoreMessages(entries: SessionEntry[]): CoreMessage[] {
   for (const entry of entries) {
     if (entry.type !== "message") {
       // custom_message participates in LLM context per Pi native semantics
-      // (session-manager.d.ts) — project it as a user message.
+      // (session-manager.d.ts) — project it as a user message. Image-only
+      // attachments get a placeholder core so their image block reaches the
+      // model via collectOriginals/coreOutToAgentMessages (#637).
       if (isCustomMessageEntry(entry)) {
-        const text = extractText(entry.content);
-        if (text.length > 0) {
-          out.push({ id: entry.id, role: "user", contentType: "text", text });
-        }
+        const core = customEntryToCore(entry.id, entry.content);
+        if (core) out.push(core);
       }
       continue;
     }
@@ -128,8 +151,8 @@ export class EntryProjectionCache {
         if (entry.type === "message") {
           this.cores.push(...projectMessage(entry.message, entry.id));
         } else if (isCustomMessageEntry(entry)) {
-          const text = extractText(entry.content);
-          if (text.length > 0) this.cores.push({ id: entry.id, role: "user", contentType: "text", text });
+          const core = customEntryToCore(entry.id, entry.content);
+          if (core) this.cores.push(core);
         }
       }
       this.count = entries.length;

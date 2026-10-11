@@ -96,6 +96,19 @@ test("collectImageTokens is empty for non-vision models", () => {
   assert.equal(collectImageTokens(entries, false).size, 0);
 });
 
+test("collectImageTokens counts images on custom_message entries (pi-web-ui attachments, #637)", () => {
+  const entries = [
+    { id: "c1", type: "custom_message", customType: "file", content: [{ type: "image", data: "x", mimeType: "image/png" }, { type: "image", data: "y", mimeType: "image/png" }] },
+    { id: "c2", type: "custom_message", customType: "file", content: [{ type: "text", text: "no image here" }] },
+    { id: "c3", type: "model_change" },
+  ];
+  const map = collectImageTokens(entries as Parameters<typeof collectImageTokens>[0], true);
+  assert.equal(map.get("c1"), IMAGE_TOKEN_COST * 2, "two image blocks on one attachment counted");
+  assert.ok(!map.has("c2"), "text-only custom_message not counted");
+  assert.ok(!map.has("c3"), "non-message entry not counted");
+  assert.equal(collectImageTokens(entries as Parameters<typeof collectImageTokens>[0], false).size, 0, "non-vision model counts nothing");
+});
+
 test("estimateTokens adds image tokens and skips covered ids", () => {
   const msgs = [
     { id: "m1", role: "user", contentType: "text", text: "" },
