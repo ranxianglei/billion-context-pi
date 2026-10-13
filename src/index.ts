@@ -12,7 +12,7 @@ import type { CoreMessage, NudgeDecision, CompressionBlock, Prompts } from "acp-
 import { renderNudgeText, resolvePrompts, defaultPrompts, viableRanges } from "acp-kernel";
 import { type AdapterConfig, resolveDelegate, resolveHostSession, DEFAULT_DELEGATE_POLICY } from "./config.js";
 import { createRuntime, isPiHost, retryBreakerKey, type AcpRuntime } from "./runtime.js";
-import { makeCompressTool, isCompressSuccessText, isCompressNoopText } from "./compress-tool.js";
+import { makeCompressTool, classifyCompressOutcome } from "./compress-tool.js";
 import { makeDecompressTool } from "./decompress-tool.js";
 import { makeSearchTool } from "./search-tool.js";
 import { makeStatusTool } from "./status-tool.js";
@@ -1158,7 +1158,7 @@ function collectCompressOutcomes(entries: Array<{ type: string; id: string; mess
     const m = entry.message as { role?: string; toolName?: string; toolCallId?: string; isError?: boolean; content?: unknown };
     if (m.role !== "toolResult" || m.toolName !== "compress" || !m.toolCallId) continue;
     const text = extractText(m.content);
-    out.push({ toolCallId: m.toolCallId, isError: m.isError === true, success: m.isError !== true && isCompressSuccessText(text), noop: m.isError !== true && isCompressNoopText(text), text });
+    out.push({ toolCallId: m.toolCallId, ...classifyCompressOutcome(m.isError === true, text), text });
   }
   return out;
 }

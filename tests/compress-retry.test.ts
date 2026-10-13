@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { rm } from "node:fs/promises";
 import { createAcpExtension } from "../src/index.js";
 import { createRuntime, MAX_COMPRESS_ATTEMPTS } from "../src/runtime.js";
-import { isCompressSuccessText, isCompressNoopText } from "../src/compress-tool.js";
+import { classifyCompressOutcome, isCompressSuccessText, isCompressNoopText } from "../src/compress-tool.js";
 import { tmpPath } from "./tmp-path.js";
 
 // Compress-failure handling (session 01a00a38 post-mortem + issue #223):
@@ -64,6 +64,10 @@ const SUCCESS_PANEL = "▣ ACP | 58.5K → 5.7K tokens (~52.8K reclaimed, 4 bloc
 const PARTIAL_PANEL = "▣ ACP | 58.5K → 30K tokens (~28.5K reclaimed, 3 blocks)\nErrors: range m00009..m00012: Summary too long";
 const NOOP_PANEL = "▣ ACP | 58.5K → 58.5K tokens (~0 reclaimed, 0 blocks)\nErrors: range m00001..m00002: Requested range(s) already compressed; nothing to compress";
 const NEUTRAL_TEXT = "No ranges provided.";
+// #644: the two cap short-circuit panels, mirroring cappedRejectionText /
+// deadRepeatRejectionText in src/compress-tool.ts.
+const PAUSED_PANEL = "▣ ACP | 0 → 0 tokens (~0 reclaimed, 0 blocks)\n[ACP] PAUSED — 3 compress attempts already failed this turn; further compress calls are rejected until the next user message.\n\nCurrent compressible ranges (use these refs exactly as listed):\nNo compressible ranges remain — the context is already at its minimum; continue the task without compressing.\n\nContinue the task; compress becomes available again on the next user message.";
+const REJECTED_PANEL = "▣ ACP | 0 → 0 tokens (~0 reclaimed, 0 blocks)\n[ACP] REJECTED — this exact compress call has now failed 2× (ranges m00001..m00002). Those refs are stale: they point at content already compressed into an active block, or at refs that no longer exist. Repeating this call cannot succeed — do not retry it.\n\nCurrent compressible ranges (use these refs exactly as listed):\nNo compressible ranges remain — the context is already at its minimum; continue the task without compressing.\n\nIf none of these fit, call acp_status for the full picture — or continue the task without compressing.";
 
 function fakeCtx(getEntries: () => any[], stateFile: string) {
   return {
@@ -277,6 +281,21 @@ test("classification: 0-block panels are no-ops, not successes; >=1 block is suc
   assert.equal(isCompressNoopText(NEUTRAL_TEXT), false, "non-panels stay neutral");
 });
 
+test("classifyCompressOutcome: PAUSED panels are neutral regardless of the stored error flag (#644)", () => {
+  assert.deepEqual(classifyCompressOutcome(false, PAUSED_PANEL), { isError: false, success: false, noop: false }, "no error flag → neutral");
+  assert.deepEqual(classifyCompressOutcome(true, PAUSED_PANEL), { isError: false, success: false, noop: false }, "host-stored error flag → still neutral");
+});
+
+test("classifyCompressOutcome: REJECTED panels and every other outcome keep their old class (#644)", () => {
+  assert.deepEqual(classifyCompressOutcome(false, REJECTED_PANEL), { isError: false, success: false, noop: true }, "REJECTED stays a 0-block noop → still counts as an attempt");
+  assert.deepEqual(classifyCompressOutcome(true, REJECTED_PANEL), { isError: true, success: false, noop: false }, "REJECTED + error flag → failure");
+  assert.deepEqual(classifyCompressOutcome(true, VALIDATION_ERR), { isError: true, success: false, noop: false });
+  assert.deepEqual(classifyCompressOutcome(false, SUCCESS_PANEL), { isError: false, success: true, noop: false });
+  assert.deepEqual(classifyCompressOutcome(false, PARTIAL_PANEL), { isError: false, success: true, noop: false });
+  assert.deepEqual(classifyCompressOutcome(false, NOOP_PANEL), { isError: false, success: false, noop: true });
+  assert.deepEqual(classifyCompressOutcome(false, NEUTRAL_TEXT), { isError: false, success: false, noop: false });
+});
+
 test("noteCompressOutcomes: no-op panels advance the counter toward the cap", () => {
   const rt = createRuntime({});
   const noop = (id: string) => ({ toolCallId: id, isError: false, success: false, noop: true });
@@ -297,6 +316,25 @@ test("noteCompressOutcomes: no-op panels advance the counter toward the cap", ()
   r = rt.noteCompressOutcomes("s", "u1", [noop("t0"), noop("t1"), noop("t2"), success("ts")]);
   assert.equal(r.count, 0, "genuine success lifts the cap");
   assert.equal(rt.compressRetryCappedFor("s", "u1"), false);
+});
+
+test("verification target: three failures then a PAUSED outcome keep the count at 3, cappedNow false (#644)", () => {
+  const rt = createRuntime({});
+  const fail = (id: string) => ({ toolCallId: id, isError: true, success: false, noop: false });
+  const base = [fail("t0"), fail("t1"), fail("t2")];
+
+  let r = rt.noteCompressOutcomes("s", "u1", base);
+  assert.equal(r.count, 3);
+  assert.equal(r.cappedNow, true);
+
+  r = rt.noteCompressOutcomes("s", "u1", [...base, { toolCallId: "tp", ...classifyCompressOutcome(false, PAUSED_PANEL) }]);
+  assert.equal(r.count, 3, "paused outcome does not advance the counter");
+  assert.equal(r.cappedNow, false, "no fresh cap notification on the pause");
+
+  r = rt.noteCompressOutcomes("s", "u1", [...base, { toolCallId: "tp2", ...classifyCompressOutcome(true, PAUSED_PANEL) }]);
+  assert.equal(r.count, 3, "error-flagged paused panel also neutral");
+  assert.equal(r.cappedNow, false);
+  assert.equal(rt.compressRetryCappedFor("s", "u1"), true, "the cap itself is untouched");
 });
 
 test("emergency nudge stops re-injecting once the turn's cap is burned (issue #6 loop breaker)", async () => {
@@ -335,6 +373,47 @@ test("emergency nudge stops re-injecting once the turn's cap is burned (issue #6
   entries = [...entries, toolResultMsg("ec4", "call_4", SUCCESS_PANEL, false)];
   const rRe = await fire(handlers, ctx);
   assert.ok(nudgeCount(rRe) >= 1, "after a successful compress the emergency nudge may resume");
+  await rm(`${stateFile}.acp.json`, { force: true });
+});
+
+test("end-to-end: the REAL PAUSED panel from a capped turn classifies neutral (#644)", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+  const stateFile = tmpPath("pai-acp-retry-paused.session.json");
+  await rm(`${stateFile}.acp.json`, { force: true });
+
+  let entries: any[] = [userMsg("e1", ZH)];
+  const ctx = fakeCtx(() => entries, stateFile);
+  await fire(handlers, ctx); // assigns refs
+
+  // burn the whole attempt budget with three stored failures
+  for (let i = 1; i <= 3; i++) {
+    entries = [...entries, toolResultMsg(`ef${i}`, `call_f${i}`, VALIDATION_ERR, true)];
+    await fire(handlers, ctx);
+  }
+
+  // the next real compress call short-circuits with the PAUSED panel
+  const compressTool = api.tools.find((t: any) => t.name === "compress")!;
+  const out = await compressTool.execute(
+    "tc_paused",
+    { content: [{ startId: "m00001", endId: "m00001", summary: "still here" }] },
+    undefined, undefined, ctx,
+  );
+  const pausedText = typeof out === "string" ? out : out.content?.[0]?.text ?? String(out);
+  assert.ok(pausedText.includes("[ACP] PAUSED —"), `expected the real PAUSED panel: ${pausedText}`);
+
+  // feed that exact panel back through classifier + counter, both storage shapes
+  const rt = createRuntime({});
+  const fail = (id: string) => ({ toolCallId: id, isError: true, success: false, noop: false });
+  const base = [fail("t0"), fail("t1"), fail("t2")];
+  let r = rt.noteCompressOutcomes("s", "u1", base);
+  assert.equal(r.count, 3);
+  assert.equal(r.cappedNow, true);
+  r = rt.noteCompressOutcomes("s", "u1", [...base, { toolCallId: "tp", ...classifyCompressOutcome(false, pausedText) }]);
+  assert.equal(r.count, 3, "real paused panel (no error flag) freezes the counter at 3");
+  assert.equal(r.cappedNow, false);
+  r = rt.noteCompressOutcomes("s", "u1", [...base, { toolCallId: "tp2", ...classifyCompressOutcome(true, pausedText) }]);
+  assert.equal(r.count, 3, "real paused panel with stored error flag also neutral");
   await rm(`${stateFile}.acp.json`, { force: true });
 });
 

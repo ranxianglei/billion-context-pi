@@ -270,6 +270,19 @@ export function isCompressNoopText(text: string): boolean {
   return compressPanelBlocks(text) === 0;
 }
 
+// #644: classify ONE stored compress toolResult into the noteCompressOutcomes
+// classes (failure / success / neutral). A [ACP] PAUSED — panel (the #6 cap
+// short-circuit, cappedRejectionText) is NEUTRAL regardless of the stored
+// isError flag: it is returned BEFORE applyCompression runs, so no attempt was
+// made — counting it would push the failure counter past MAX_COMPRESS_ATTEMPTS
+// (3→4→5, once per extra paused call) without any new attempt. REJECTED panels
+// (#250 loop breaker) deliberately stay failures: those calls DID run the
+// kernel and consumed the attempt budget.
+export function classifyCompressOutcome(isError: boolean, text: string): { isError: boolean; success: boolean; noop: boolean } {
+  if (text.includes("[ACP] PAUSED —")) return { isError: false, success: false, noop: false };
+  return { isError, success: !isError && isCompressSuccessText(text), noop: !isError && isCompressNoopText(text) };
+}
+
 // Issue #250 loop breaker: small models repeat an identical compress call with
 // refs that can NEVER resolve (stale/consumed/unknown) — the kernel rejects
 // every time and the model just retries the same dead refs for minutes. A
