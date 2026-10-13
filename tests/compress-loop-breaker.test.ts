@@ -136,18 +136,25 @@ test("issue #250: dead-range repeat breaker + turn cap + reset on new turn", asy
   const t4 = await run("tc4", S("m00001", "m00008"));
   assert.ok(t4.includes("REJECTED"), "t4 still rejected");
 
-  // t2..t4 burned the turn's 3-attempt cap → every compress call is paused
+  // t2..t4 burned the cap. A span that has not failed is still measured;
+  // only a verbatim retry of an already-failed span is paused.
   const t5 = await run("tc5", S("m00099", "m00100"));
-  assert.ok(t5.includes("PAUSED"), `t5 paused by the turn cap: ${t5}`);
+  assert.ok(!t5.includes("PAUSED"), `a new span is measured after the cap: ${t5}`);
+  assert.ok(isCompressNoopText(t5), `t5 is measured and creates no block: ${t5}`);
+
+  const t5b = await run("tc5b", S("m00099", "m00100"));
+  assert.ok(t5b.includes("PAUSED"), `verbatim retry of the failed span stays paused: ${t5b}`);
+  assert.ok(t5b.includes("5000"), `pause panel states the admission floor: ${t5b}`);
 
   const t6 = await run("tc6", S("m00009", "m00010"));
-  assert.ok(t6.includes("PAUSED"), "even a LIVE range is paused until the next user message");
+  assert.ok(isCompressSuccessText(t6), `a disjoint live span is measured once: ${t6}`);
 
   entries = [...entries, roleMsg("e17", "user", "next question")];
   await fire(handlers, ctx);
 
-  const t7 = await run("tc7", S("m00009", "m00010"));
-  assert.ok(isCompressSuccessText(t7), `t7 succeeds after the new turn: ${t7}`);
+  const t7 = await run("tc7", S("m00099", "m00100"));
+  assert.ok(!t7.includes("PAUSED"), `cap released on the new turn: ${t7}`);
+  assert.ok(isCompressNoopText(t7), `the previously failed span is measured again: ${t7}`);
 
   const t8 = await run("tc8", S("m00001", "m00008"));
   assert.ok(isCompressNoopText(t8), `t8 is a fresh kernel panel: ${t8}`);

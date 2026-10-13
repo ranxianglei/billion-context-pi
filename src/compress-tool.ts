@@ -389,10 +389,15 @@ function compressibleSnapshotText(nudge: NudgeDecision | undefined): string {
   return formatRanges(ranges, []);
 }
 
-function deadRepeatRejectionText(spans: string[], count: number, snapshot: string): string {
+function admissionFloorLine(minChars: number): string {
+  return `Admission floor: a message-ref batch is admitted only when its message text totals at least ${minChars} characters. Block ranges (bN) are exempt. This result does not say which later ref would clear the floor.`;
+}
+
+function deadRepeatRejectionText(spans: string[], count: number, snapshot: string, minChars: number): string {
   return [
     "▣ ACP | 0 → 0 tokens (~0 reclaimed, 0 blocks)",
     `[ACP] REJECTED — this exact compress call has now failed ${count}× (ranges ${spans.join(", ")}). Those refs are stale: they point at content already compressed into an active block, or at refs that no longer exist. Repeating this call cannot succeed — do not retry it.`,
+    admissionFloorLine(minChars),
     "",
     "Current compressible ranges (use these refs exactly as listed):",
     snapshot,
@@ -401,10 +406,11 @@ function deadRepeatRejectionText(spans: string[], count: number, snapshot: strin
   ].join("\n");
 }
 
-function cappedRejectionText(snapshot: string): string {
+function cappedRejectionText(snapshot: string, minChars: number): string {
   return [
     "▣ ACP | 0 → 0 tokens (~0 reclaimed, 0 blocks)",
-    `[ACP] PAUSED — ${MAX_COMPRESS_ATTEMPTS} compress attempts already failed this turn; further compress calls are rejected until the next user message.`,
+    `[ACP] PAUSED — ${MAX_COMPRESS_ATTEMPTS} compress attempts already failed this turn; further retries of those same spans are rejected until the next user message. A span that was not part of those failures is still measured once.`,
+    admissionFloorLine(minChars),
     "",
     "Current compressible ranges (use these refs exactly as listed):",
     snapshot,
@@ -505,9 +511,10 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
   // churns under fork hosts and would never see the latched cap.
   const turnKey = retryBreakerKey(ctx.sessionManager, resolveHostSession(runtime.adapter)) ?? sid;
   const snapshot = compressibleSnapshotText(turn.nudge);
-  if (runtime.compressRetryCappedFor(sid, turnKey)) {
-    logWarn("compress", { sid, event: "capped-reject", turnKey });
-    return cappedRejectionText(snapshot);
+  const spanKeys = ranges.map((r) => `${r.startId}..${r.endId}`);
+  if (runtime.compressRetryCappedFor(sid, turnKey) && runtime.failedCompressSpansCover(sid, turnKey, spanKeys)) {
+    logWarn("compress", { sid, event: "capped-reject", turnKey, spans: spanKeys });
+    return cappedRejectionText(snapshot, config.compress.minCompressRange);
   }
   const visibleIds = new Set(messages.map((m) => m.id));
   const deadSpans = ranges
@@ -565,11 +572,14 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
   const { blocksCreated, tokensCompressed, errors, warnings } = applied.result;
   if (blocksCreated > 0) {
     runtime.clearDeadCompress(sid);
-  } else if (allDead) {
-    const count = runtime.noteDeadCompress(sid, ranges.map((r) => `${r.startId}..${r.endId}`).join("|"));
-    if (count >= DEAD_REPEAT_REJECT) {
-      logWarn("compress", { sid, event: "dead-range-reject", count, spans: deadSpans });
-      return deadRepeatRejectionText(deadSpans, count, snapshot);
+  } else {
+    runtime.noteFailedCompressSpans(sid, turnKey, spanKeys);
+    if (allDead) {
+      const count = runtime.noteDeadCompress(sid, spanKeys.join("|"));
+      if (count >= DEAD_REPEAT_REJECT) {
+        logWarn("compress", { sid, event: "dead-range-reject", count, spans: deadSpans });
+        return deadRepeatRejectionText(deadSpans, count, snapshot, config.compress.minCompressRange);
+      }
     }
   }
 
