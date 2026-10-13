@@ -112,7 +112,7 @@ test("issue #453: cap latches through fork-host live-id churn; new persisted use
     const rawOf = (e: any) => ({ ...e.message });
     const U3_BASE = "u3 " + ZH;
     const rawU3 = (drift: number) => ({ role: "user", content: drift === 0 ? U3_BASE : `${U3_BASE} (resend ${drift})`, timestamp: 0 });
-    const rawResult = (toolCallId: string, text: string) => ({ role: "toolResult", toolCallId, toolName: "compress", content: [{ type: "text", text }], isError: false, timestamp: 0 });
+    const rawResult = (toolCallId: string, text: string, isError: boolean) => ({ role: "toolResult", toolCallId, toolName: "compress", content: [{ type: "text", text }], isError, timestamp: 0 });
     const ctx = forkCtx(() => persisted, stateFile);
 
     await handlers.get("session_start")![0]!({ type: "session_start", reason: "startup" }, ctx);
@@ -132,22 +132,27 @@ test("issue #453: cap latches through fork-host live-id churn; new persisted use
     const compressTool = api.tools.find((t: any) => t.name === "compress")!;
     const S = () => [{ startId: "m00999", endId: "m00100", summary: "dead refs" }];
     const run = async (id: string) => {
-      const text = textOf(await (compressTool as any).execute(id, { content: S() }, undefined, undefined, ctx));
+      const out = await (compressTool as any).execute(id, { content: S() }, undefined, undefined, ctx);
+      const text = textOf(out);
+      const isError = out.isError === true;
       if (!persisted.some((e) => e.id === "p-u3")) {
         drift += 1;
         live = [live[0]!, live[1]!, rawU3(drift), ...live.slice(3)];
       }
-      live = [...live, rawResult(id, text)];
+      live = [...live, rawResult(id, text, isError)];
       await fire();
-      return text;
+      return { text, isError };
     };
 
     const f1 = await run("fc1");
-    assert.ok(isCompressNoopText(f1) && f1.includes("does not exist"), `f1 is the kernel unknown-ref panel: ${f1}`);
+    assert.ok(isCompressNoopText(f1.text) && f1.text.includes("does not exist"), `f1 is the kernel unknown-ref panel: ${f1.text}`);
+    assert.equal(f1.isError, true, "#642: 0-block kernel panel is a tool error");
     const f2 = await run("fc2");
-    assert.ok(f2.includes("REJECTED"), `f2 is the dead-range hard rejection: ${f2}`);
+    assert.ok(f2.text.includes("REJECTED"), `f2 is the dead-range hard rejection: ${f2.text}`);
+    assert.equal(f2.isError, true, "#642: REJECTED panel is a tool error");
     const f3 = await run("fc3");
-    assert.ok(f3.includes("REJECTED"), `f3 still rejected: ${f3}`);
+    assert.ok(f3.text.includes("REJECTED"), `f3 still rejected: ${f3.text}`);
+    assert.equal(f3.isError, true, "#642: repeated REJECTED panel is a tool error");
 
     // Three failures burned the cap while u3 stayed unpersisted and its
     // merged-view boundary id churned between fires. Pre-fix the counter was
@@ -155,22 +160,24 @@ test("issue #453: cap latches through fork-host live-id churn; new persisted use
     // per-session seen-set then blocked re-counting, so the cap never latched
     // and f4 executed instead of pausing.
     const f4 = await run("fc4");
-    assert.ok(f4.includes("PAUSED"), `f4 must be paused by the latched cap despite live-id churn: ${f4}`);
+    assert.ok(f4.text.includes("PAUSED"), `f4 must be paused by the latched cap despite live-id churn: ${f4.text}`);
+    assert.equal(f4.isError, true, "#642: PAUSED panel is a tool error");
 
     // The host finally persists the stuck turn's tail, including the current
     // user message — a genuine new user boundary reaches the log → release.
     persisted.push(
       roleMsg("p-u3", "user", U3_BASE),
-      { type: "message", id: "p-r1", parentId: null, timestamp: "", message: rawResult("fc1", f1) },
-      { type: "message", id: "p-r2", parentId: null, timestamp: "", message: rawResult("fc2", f2) },
-      { type: "message", id: "p-r3", parentId: null, timestamp: "", message: rawResult("fc3", f3) },
+      { type: "message", id: "p-r1", parentId: null, timestamp: "", message: rawResult("fc1", f1.text, f1.isError) },
+      { type: "message", id: "p-r2", parentId: null, timestamp: "", message: rawResult("fc2", f2.text, f2.isError) },
+      { type: "message", id: "p-r3", parentId: null, timestamp: "", message: rawResult("fc3", f3.text, f3.isError) },
     );
     live = persisted.map(rawOf);
     await fire();
     assert.equal(retryBreakerKey(ctx.sessionManager), "p-u3", "key advances only when the user message persists");
 
     const f5 = await run("fc5");
-    assert.ok(f5.includes("REJECTED") && !f5.includes("PAUSED"), `cap released by the new user message (dead-range guard still applies): ${f5}`);
+    assert.ok(f5.text.includes("REJECTED") && !f5.text.includes("PAUSED"), `cap released by the new user message (dead-range guard still applies): ${f5.text}`);
+    assert.equal(f5.isError, true, "#642: REJECTED panel after cap release is a tool error");
     await rm(`${stateFile}.acp.json`, { force: true });
   } finally {
     if (prevForkHost === undefined) delete process.env.PI_ACP_FORK_HOST;

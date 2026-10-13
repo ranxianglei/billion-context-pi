@@ -45,6 +45,12 @@ const CompressParams = Type.Object({
 
 type CompressArgs = Static<typeof CompressParams>;
 
+// Host-facing result type: current Pi (pi-agent-core >=1.x) marks
+// AgentToolResult.isError when the tool RETURNS it, not only when it throws,
+// so a 0-block panel can be surfaced to host and model as a failed call while
+// keeping its text. Older hosts (pi-coding-agent <1.x) ignore the extra field.
+type CompressToolResult = AgentToolResult<unknown> & { isError?: boolean };
+
 export function makeCompressTool(runtime: AcpRuntime, overrides?: ToolPromptOverrides): ToolDefinition<typeof CompressParams> {
   return applyToolPromptOverrides({
     name: "compress",
@@ -59,7 +65,7 @@ export function makeCompressTool(runtime: AcpRuntime, overrides?: ToolPromptOver
       "Never compress content the current step is actively using.",
     ],
     parameters: CompressParams,
-    async execute(toolCallId, params, signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {
+    async execute(toolCallId, params, signal, _onUpdate, ctx): Promise<CompressToolResult> {
       if (runtime.refused) return { details: undefined, content: [{ type: "text", text: runtime.refusalMessage ?? UNSUPPORTED_HOST_MESSAGE }] };
       let result: string;
       try {
@@ -68,7 +74,12 @@ export function makeCompressTool(runtime: AcpRuntime, overrides?: ToolPromptOver
         logThrow("compress", e, { sid: ctx.sessionManager.getSessionId(), ranges: typeof (params as CompressArgs).content === "string" ? "string" : ((params as CompressArgs).content?.length ?? 0) });
         throw e;
       }
-      return { details: undefined, content: [{ type: "text", text: result }] };
+      const out: CompressToolResult = { details: undefined, content: [{ type: "text", text: result }] };
+      // compressPanelBlocks: -1 = non-panel ("No ranges provided.", refusal)
+      // stays neutral; 0 = kernel skip / PAUSED / REJECTED panel → tool error;
+      // >0 = blocks created → normal result even when warnings/errors are listed.
+      if (compressPanelBlocks(result) === 0) out.isError = true;
+      return out;
     },
   }, overrides);
 }
