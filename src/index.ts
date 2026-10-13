@@ -12,7 +12,7 @@ import type { CoreMessage, NudgeDecision, CompressionBlock, Prompts } from "acp-
 import { renderNudgeText, resolvePrompts, defaultPrompts, viableRanges } from "acp-kernel";
 import { type AdapterConfig, resolveDelegate, resolveHostSession, DEFAULT_DELEGATE_POLICY } from "./config.js";
 import { createRuntime, isPiHost, retryBreakerKey, type AcpRuntime } from "./runtime.js";
-import { makeCompressTool, isCompressSuccessText, isCompressNoopText } from "./compress-tool.js";
+import { makeCompressTool, isCompressSuccessText, isCompressNoopText, isCompressMetaRejectText } from "./compress-tool.js";
 import { makeDecompressTool } from "./decompress-tool.js";
 import { makeSearchTool } from "./search-tool.js";
 import { makeStatusTool } from "./status-tool.js";
@@ -1150,15 +1150,20 @@ function collectOriginals(entries: Array<{ type: string; id: string; message?: A
 // the nudge circuit breaker above. Scoping matters: feeding the whole session
 // would keep an old failure counting against the current turn's budget
 // forever (review finding on 7ddd2c6).
-function collectCompressOutcomes(entries: Array<{ type: string; id: string; message?: AgentMessage }>, startIndex: number): Array<{ toolCallId: string; isError: boolean; success: boolean; noop: boolean; text: string }> {
-  const out: Array<{ toolCallId: string; isError: boolean; success: boolean; noop: boolean; text: string }> = [];
+function collectCompressOutcomes(entries: Array<{ type: string; id: string; message?: AgentMessage }>, startIndex: number): Array<{ toolCallId: string; isError: boolean; success: boolean; noop: boolean; metaReject: boolean; text: string }> {
+  const out: Array<{ toolCallId: string; isError: boolean; success: boolean; noop: boolean; metaReject: boolean; text: string }> = [];
   for (let i = Math.max(startIndex, -1) + 1; i < entries.length; i++) {
     const entry = entries[i]!;
     if (entry.type !== "message" || !entry.message) continue;
     const m = entry.message as { role?: string; toolName?: string; toolCallId?: string; isError?: boolean; content?: unknown };
     if (m.role !== "toolResult" || m.toolName !== "compress" || !m.toolCallId) continue;
     const text = extractText(m.content);
-    out.push({ toolCallId: m.toolCallId, isError: m.isError === true, success: m.isError !== true && isCompressSuccessText(text), noop: m.isError !== true && isCompressNoopText(text), text });
+    // #646: PAUSED/REJECTED panels are system notices, not attempts — classify
+    // them neutral so they cannot consume a retry-cap slot. Deliberately NOT
+    // gated on isError: after #643 the host flags 0-block panels isError, and
+    // the skip must survive both merge orders.
+    const metaReject = isCompressMetaRejectText(text);
+    out.push({ toolCallId: m.toolCallId, isError: m.isError === true, success: !metaReject && m.isError !== true && isCompressSuccessText(text), noop: !metaReject && m.isError !== true && isCompressNoopText(text), metaReject, text });
   }
   return out;
 }

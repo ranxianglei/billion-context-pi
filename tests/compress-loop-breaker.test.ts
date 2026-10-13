@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAcpExtension } from "../src/index.js";
 import { createRuntime } from "../src/runtime.js";
-import { isCompressSuccessText, isCompressNoopText } from "../src/compress-tool.js";
+import { isCompressSuccessText, isCompressNoopText, isCompressMetaRejectText } from "../src/compress-tool.js";
 import { tmpPath } from "./tmp-path.js";
 
 // Issue #250 loop breaker (small local models, e.g. quantized 27B):
@@ -21,12 +21,15 @@ import { tmpPath } from "./tmp-path.js";
 //  1. noteDeadCompress/clearDeadCompress: per-session, per-fingerprint
 //     dead-range counter; cleared on the next successful compress.
 //  2. After 2 identical all-dead failures the tool returns a hard rejection
-//     (still a 0-block panel, so the per-turn failure counter keeps
-//     advancing) that lists the LIVE compressible ranges — no acp_status
-//     round-trip needed.
-//  3. Once the turn's MAX_COMPRESS_ATTEMPTS cap is burned, EVERY compress
-//     call is rejected until the next user message — even calls with live
-//     refs (the turn is paused, not just the dead range).
+//     that lists the LIVE compressible ranges — no acp_status round-trip
+//     needed. The rejection is a META panel (#646): it stops the kernel from
+//     running (loop breaker) but does NOT consume a retry-cap slot.
+//  3. Only REAL failures (kernel rejects / 0-block panels) burn the turn's
+//     MAX_COMPRESS_ATTEMPTS cap. Meta-rejection panels never advance it, so
+//     a live range switched to mid-turn still succeeds after REJECTEDs. Once
+//     3 REAL failures land, EVERY compress call is rejected until the next
+//     user message — even calls with live refs (the turn is paused, not just
+//     the dead range).
 //  4. A new user message resets the cap; a successful compress clears the
 //     dead-range fingerprint (the same range can fail fresh again later).
 //  5. enabled:false (adapter config or acp.json) registers nothing: no
@@ -130,28 +133,45 @@ test("issue #250: dead-range repeat breaker + turn cap + reset on new turn", asy
 
   const t3 = await run("tc3", S("m00001", "m00008"));
   assert.ok(t3.includes("REJECTED"), `t3 is the hard rejection: ${t3}`);
-  assert.ok(isCompressNoopText(t3), "rejection stays a 0-block panel (counts toward the cap)");
+  assert.ok(isCompressNoopText(t3), "rejection renders as a 0-block panel");
+  assert.ok(isCompressMetaRejectText(t3), "rejection is classified meta (#646)");
   assert.ok(t3.includes("m00009"), `rejection lists the live compressible range: ${t3}`);
 
   const t4 = await run("tc4", S("m00001", "m00008"));
   assert.ok(t4.includes("REJECTED"), "t4 still rejected");
 
-  // t2..t4 burned the turn's 3-attempt cap → every compress call is paused
-  const t5 = await run("tc5", S("m00099", "m00100"));
-  assert.ok(t5.includes("PAUSED"), `t5 paused by the turn cap: ${t5}`);
+  // #646 regression: only t2 was a REAL failure (t3/t4 are meta notices), so
+  // the cap is far from burned — switching to a LIVE range mid-turn MUST
+  // succeed instead of being paused.
+  const t5 = await run("tc5", S("m00009", "m00010"));
+  assert.ok(isCompressSuccessText(t5), `t5: live range succeeds after REJECTEDs (no early lock): ${t5}`);
+  assert.ok(!t5.includes("PAUSED"), "t5 must not be paused");
 
+  // genuine-cap path: three REAL failures still burn the cap…
   const t6 = await run("tc6", S("m00009", "m00010"));
-  assert.ok(t6.includes("PAUSED"), "even a LIVE range is paused until the next user message");
+  assert.ok(isCompressNoopText(t6), `t6 is a real kernel failure now that t5 consumed the range: ${t6}`);
+  assert.ok(!t6.includes("REJECTED") && !t6.includes("PAUSED"), "first repeat of this fingerprint: kernel error, not meta");
+
+  const t7 = await run("tc7", S("m00099", "m00100"));
+  assert.ok(isCompressNoopText(t7), `t7 unknown refs → real kernel failure: ${t7}`);
+
+  const t8 = await run("tc8", S("m00101", "m00102"));
+  assert.ok(isCompressNoopText(t8), `t8 another dead fingerprint → third REAL failure: ${t8}`);
+
+  // …and once 3 real failures land, even a LIVE range is paused
+  const t9 = await run("tc9", S("m00011", "m00011"));
+  assert.ok(t9.includes("PAUSED"), `t9 paused by the turn cap: ${t9}`);
+  assert.ok(isCompressMetaRejectText(t9), "the PAUSED notice itself is classified meta");
 
   entries = [...entries, roleMsg("e17", "user", "next question")];
   await fire(handlers, ctx);
 
-  const t7 = await run("tc7", S("m00009", "m00010"));
-  assert.ok(isCompressSuccessText(t7), `t7 succeeds after the new turn: ${t7}`);
+  const t10 = await run("tc10", S("m00011", "m00011"));
+  assert.ok(isCompressSuccessText(t10), `t10 succeeds after the new turn: ${t10}`);
 
-  const t8 = await run("tc8", S("m00001", "m00008"));
-  assert.ok(isCompressNoopText(t8), `t8 is a fresh kernel panel: ${t8}`);
-  assert.ok(!t8.includes("REJECTED"), "fingerprint cleared by t7's success — no hard rejection yet");
+  const t11 = await run("tc11", S("m00001", "m00008"));
+  assert.ok(isCompressNoopText(t11), `t11 is a fresh kernel panel: ${t11}`);
+  assert.ok(!t11.includes("REJECTED"), "fingerprint cleared by t10's success — no hard rejection yet");
   await rm(`${stateFile}.acp.json`, { force: true });
 });
 

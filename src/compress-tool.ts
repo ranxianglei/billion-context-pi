@@ -270,6 +270,17 @@ export function isCompressNoopText(text: string): boolean {
   return compressPanelBlocks(text) === 0;
 }
 
+/** Meta-rejection panel = the system's "stop retrying" notice (`[ACP] PAUSED`
+ *  / `[ACP] REJECTED`), NOT a compression attempt. It renders as a 0-block
+ *  panel, but noteCompressOutcomes must treat it as neutral: counting it
+ *  consumes a retry-cap slot — e.g. the REJECTED after two dead attempts
+ *  burns slot 3 and pauses an otherwise-valid range until the next user
+ *  message (issue #646). The 0-block requirement keeps a success panel that
+ *  merely quotes such text from being misclassified. */
+export function isCompressMetaRejectText(text: string): boolean {
+  return compressPanelBlocks(text) === 0 && /\[ACP\] (?:PAUSED|REJECTED) —/.test(text);
+}
+
 // Issue #250 loop breaker: small models repeat an identical compress call with
 // refs that can NEVER resolve (stale/consumed/unknown) — the kernel rejects
 // every time and the model just retries the same dead refs for minutes. A

@@ -22,7 +22,9 @@ import { tmpPath } from "./tmp-path.js";
 // Contract under test: the breaker keys off PERSISTED boundaries only
 // (retryBreakerKey — immutable ids), so the cap latches through live-id
 // churn and releases only when a genuine new user message reaches the session
-// log (or a compress succeeds).
+// log (or a compress succeeds). Since #646 only REAL failures burn slots —
+// the cap here is built from three distinct dead fingerprints, with one meta
+// REJECTED mixed in to prove it neither blocks nor advances the latch.
 
 setRunNpmForTest(async (args) => ({ code: 0, stdout: args[0] === "view" ? "0.0.1\n" : "", stderr: "" }));
 process.env.ACP_AUTO_UPDATE = "false";
@@ -130,9 +132,8 @@ test("issue #453: cap latches through fork-host live-id churn; new persisted use
     assert.equal(retryBreakerKey(ctx.sessionManager), "p-u1", "breaker key is the persisted boundary, not the live tail");
 
     const compressTool = api.tools.find((t: any) => t.name === "compress")!;
-    const S = () => [{ startId: "m00999", endId: "m00100", summary: "dead refs" }];
-    const run = async (id: string) => {
-      const text = textOf(await (compressTool as any).execute(id, { content: S() }, undefined, undefined, ctx));
+    const runRange = async (id: string, lo: string, hi: string) => {
+      const text = textOf(await (compressTool as any).execute(id, { content: [{ startId: lo, endId: hi, summary: "dead refs" }] }, undefined, undefined, ctx));
       if (!persisted.some((e) => e.id === "p-u3")) {
         drift += 1;
         live = [live[0]!, live[1]!, rawU3(drift), ...live.slice(3)];
@@ -142,20 +143,23 @@ test("issue #453: cap latches through fork-host live-id churn; new persisted use
       return text;
     };
 
-    const f1 = await run("fc1");
+    const f1 = await runRange("fc1", "m00999", "m00100");
     assert.ok(isCompressNoopText(f1) && f1.includes("does not exist"), `f1 is the kernel unknown-ref panel: ${f1}`);
-    const f2 = await run("fc2");
-    assert.ok(f2.includes("REJECTED"), `f2 is the dead-range hard rejection: ${f2}`);
-    const f3 = await run("fc3");
-    assert.ok(f3.includes("REJECTED"), `f3 still rejected: ${f3}`);
+    const f2 = await runRange("fc2", "m00999", "m00100");
+    assert.ok(f2.includes("REJECTED"), `f2 is the dead-range hard rejection (meta — no cap slot, #646): ${f2}`);
+    const f3 = await runRange("fc3", "m00997", "m00998");
+    assert.ok(isCompressNoopText(f3) && f3.includes("does not exist"), `f3 is a real kernel failure (distinct fingerprint): ${f3}`);
+    const f4 = await runRange("fc4", "m00995", "m00996");
+    assert.ok(isCompressNoopText(f4) && f4.includes("does not exist"), `f4 is the third REAL failure: ${f4}`);
 
-    // Three failures burned the cap while u3 stayed unpersisted and its
-    // merged-view boundary id churned between fires. Pre-fix the counter was
-    // keyed on those volatile ids: the key flip reset failCount, and the
-    // per-session seen-set then blocked re-counting, so the cap never latched
-    // and f4 executed instead of pausing.
-    const f4 = await run("fc4");
-    assert.ok(f4.includes("PAUSED"), `f4 must be paused by the latched cap despite live-id churn: ${f4}`);
+    // Three REAL failures burned the cap while u3 stayed unpersisted and its
+    // merged-view boundary id churned between fires (the meta REJECTED among
+    // them neither advanced nor blocked the count — #646). Pre-#453 the
+    // counter was keyed on those volatile ids: the key flip reset failCount,
+    // and the per-session seen-set then blocked re-counting, so the cap never
+    // latched and the next call executed instead of pausing.
+    const f5 = await runRange("fc5", "m00999", "m00100");
+    assert.ok(f5.includes("PAUSED"), `f5 must be paused by the latched cap despite live-id churn: ${f5}`);
 
     // The host finally persists the stuck turn's tail, including the current
     // user message — a genuine new user boundary reaches the log → release.
@@ -169,8 +173,8 @@ test("issue #453: cap latches through fork-host live-id churn; new persisted use
     await fire();
     assert.equal(retryBreakerKey(ctx.sessionManager), "p-u3", "key advances only when the user message persists");
 
-    const f5 = await run("fc5");
-    assert.ok(f5.includes("REJECTED") && !f5.includes("PAUSED"), `cap released by the new user message (dead-range guard still applies): ${f5}`);
+    const f6 = await runRange("fc6", "m00999", "m00100");
+    assert.ok(f6.includes("REJECTED") && !f6.includes("PAUSED"), `cap released by the new user message (dead-range guard still applies): ${f6}`);
     await rm(`${stateFile}.acp.json`, { force: true });
   } finally {
     if (prevForkHost === undefined) delete process.env.PI_ACP_FORK_HOST;

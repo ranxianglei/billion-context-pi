@@ -129,11 +129,13 @@ export interface AcpRuntime {
    *  scopes the list — see collectCompressOutcomes in src/index.ts); idempotent
    *  per toolCallId. turnKey MUST be the stable persisted-boundary key
    *  (retryBreakerKey) — a key derived from live-merged entries churns under
-   *  fork hosts and resets the counter mid-episode (#453). Outcome classes:
-   *  isError or noop (0-block panel) → failure (count++), success panel
-   *  (>= 1 block) → reset, other non-error text → neutral (count unchanged).
-   *  Returns the failure count and whether the cap was just reached. */
-  noteCompressOutcomes(sid: string, turnKey: string, outcomes: ReadonlyArray<{ toolCallId: string; isError: boolean; success: boolean; noop?: boolean }>): { count: number; cappedNow: boolean };
+    *  fork hosts and resets the counter mid-episode (#453). Outcome classes:
+    *  metaReject ([ACP] PAUSED/REJECTED panel) → neutral, checked first — it
+    *  is a system notice, not an attempt (#646); isError or noop (0-block
+    *  panel) → failure (count++), success panel (>= 1 block) → reset, other
+    *  non-error text → neutral (count unchanged).
+    *  Returns the failure count and whether the cap was just reached. */
+  noteCompressOutcomes(sid: string, turnKey: string, outcomes: ReadonlyArray<{ toolCallId: string; isError: boolean; success: boolean; noop?: boolean; metaReject?: boolean }>): { count: number; cappedNow: boolean };
   /** True when this turn already burned MAX_COMPRESS_ATTEMPTS failed/no-op
    *  compress calls — used to stop re-injecting the (dedup-exempt) emergency
    *  nudge that would otherwise keep looping no-op compressions (issue #6). */
@@ -695,7 +697,9 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   // (transient re-injection per LLM call caused the #223 infinite loop). The
   // caller feeds only CURRENT-turn outcomes; success resets the counter,
   // neutral outcomes (non-error text that is not a success panel) leave it
-  // frozen so mixed failure modes cannot bypass the cap.
+  // frozen so mixed failure modes cannot bypass the cap. Meta-rejection
+  // panels ([ACP] PAUSED/REJECTED, metaReject:true) are system notices, not
+  // attempts — they never advance or reset the counter (#646).
   interface CompressOutcomeTracker {
     seen: Set<string>;
     failTurnKey: string | null;
@@ -708,7 +712,7 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     return t;
   }
 
-  function noteCompressOutcomes(sid: string, turnKey: string, outcomes: ReadonlyArray<{ toolCallId: string; isError: boolean; success: boolean; noop?: boolean }>): { count: number; cappedNow: boolean } {
+  function noteCompressOutcomes(sid: string, turnKey: string, outcomes: ReadonlyArray<{ toolCallId: string; isError: boolean; success: boolean; noop?: boolean; metaReject?: boolean }>): { count: number; cappedNow: boolean } {
     const t = compressTrackerFor(sid);
     if (t.failTurnKey !== turnKey) {
       t.failTurnKey = turnKey;
@@ -718,6 +722,10 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     for (const o of outcomes) {
       if (t.seen.has(o.toolCallId)) continue;
       t.seen.add(o.toolCallId);
+      // #646: meta-rejection panels are system notices, not attempts — never
+      // consume a retry-cap slot. Checked BEFORE isError: after #643 the host
+      // flags 0-block panels isError, and meta panels carry that flag too.
+      if (o.metaReject === true) continue;
       if (o.isError || o.noop === true) {
         t.failCount += 1;
       } else if (o.success) {

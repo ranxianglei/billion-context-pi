@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { rm } from "node:fs/promises";
 import { createAcpExtension } from "../src/index.js";
 import { createRuntime, MAX_COMPRESS_ATTEMPTS } from "../src/runtime.js";
-import { isCompressSuccessText, isCompressNoopText } from "../src/compress-tool.js";
+import { isCompressSuccessText, isCompressNoopText, isCompressMetaRejectText } from "../src/compress-tool.js";
 import { tmpPath } from "./tmp-path.js";
 
 // Compress-failure handling (session 01a00a38 post-mortem + issue #223):
@@ -63,6 +63,8 @@ const VALIDATION_ERR = 'Validation failed for tool "compress":\n  - content.0: m
 const SUCCESS_PANEL = "▣ ACP | 58.5K → 5.7K tokens (~52.8K reclaimed, 4 blocks)";
 const PARTIAL_PANEL = "▣ ACP | 58.5K → 30K tokens (~28.5K reclaimed, 3 blocks)\nErrors: range m00009..m00012: Summary too long";
 const NOOP_PANEL = "▣ ACP | 58.5K → 58.5K tokens (~0 reclaimed, 0 blocks)\nErrors: range m00001..m00002: Requested range(s) already compressed; nothing to compress";
+const PAUSED_PANEL = "▣ ACP | 0 → 0 tokens (~0 reclaimed, 0 blocks)\n[ACP] PAUSED — 3 compress attempts already failed this turn; further compress calls are rejected until the next user message.";
+const REJECTED_PANEL = "▣ ACP | 0 → 0 tokens (~0 reclaimed, 0 blocks)\n[ACP] REJECTED — this exact compress call has now failed 2× (ranges m00001..m00008). Those refs are stale: they point at content already compressed into an active block, or at refs that no longer exist. Repeating this call cannot succeed — do not retry it.";
 const NEUTRAL_TEXT = "No ranges provided.";
 
 function fakeCtx(getEntries: () => any[], stateFile: string) {
@@ -275,6 +277,19 @@ test("classification: 0-block panels are no-ops, not successes; >=1 block is suc
   assert.equal(isCompressNoopText(SUCCESS_PANEL), false);
   assert.equal(isCompressNoopText(PARTIAL_PANEL), false);
   assert.equal(isCompressNoopText(NEUTRAL_TEXT), false, "non-panels stay neutral");
+  // #646: meta-rejection panels are 0-block panels on the surface…
+  assert.equal(isCompressNoopText(PAUSED_PANEL), true);
+  assert.equal(isCompressNoopText(REJECTED_PANEL), true);
+  // …but classified as meta (neutral for the retry cap), never success
+  assert.equal(isCompressSuccessText(PAUSED_PANEL), false);
+  assert.equal(isCompressSuccessText(REJECTED_PANEL), false);
+  assert.equal(isCompressMetaRejectText(PAUSED_PANEL), true);
+  assert.equal(isCompressMetaRejectText(REJECTED_PANEL), true);
+  assert.equal(isCompressMetaRejectText(NOOP_PANEL), false, "a real kernel failure is not a meta notice");
+  assert.equal(isCompressMetaRejectText(SUCCESS_PANEL), false);
+  assert.equal(isCompressMetaRejectText(NEUTRAL_TEXT), false);
+  // a success panel that merely QUOTES the marker text must not be misread
+  assert.equal(isCompressMetaRejectText("▣ ACP | 58.5K → 5.7K tokens (~52.8K reclaimed, 2 blocks)\n[ACP] REJECTED — quoted from an earlier panel"), false);
 });
 
 test("noteCompressOutcomes: no-op panels advance the counter toward the cap", () => {
@@ -297,6 +312,32 @@ test("noteCompressOutcomes: no-op panels advance the counter toward the cap", ()
   r = rt.noteCompressOutcomes("s", "u1", [noop("t0"), noop("t1"), noop("t2"), success("ts")]);
   assert.equal(r.count, 0, "genuine success lifts the cap");
   assert.equal(rt.compressRetryCappedFor("s", "u1"), false);
+});
+
+test("noteCompressOutcomes: meta-reject panels (PAUSED/REJECTED) never consume cap slots (#646)", () => {
+  const rt = createRuntime({});
+  const noop = (id: string) => ({ toolCallId: id, isError: false, success: false, noop: true });
+  // neutral shape: what collectCompressOutcomes produces today (isError:false)
+  const meta = (id: string) => ({ toolCallId: id, isError: false, success: false, noop: false, metaReject: true });
+  // host-flagged shape: what collectCompressOutcomes produces after #643
+  // (0-block panels carry isError:true) — the skip must survive both orders
+  const metaErr = (id: string) => ({ toolCallId: id, isError: true, success: false, noop: false, metaReject: true });
+
+  let r = rt.noteCompressOutcomes("s", "u1", [noop("a"), meta("r1"), noop("b")]);
+  assert.equal(r.count, 2, "meta panel between two real failures does not advance");
+  assert.equal(r.cappedNow, false);
+
+  r = rt.noteCompressOutcomes("s", "u1", [noop("a"), meta("r1"), noop("b"), metaErr("r2")]);
+  assert.equal(r.count, 2, "host-flagged meta panel is skipped too (post-#643 order safe)");
+  assert.equal(r.cappedNow, false);
+
+  // repeated meta notices cannot stack toward the cap either
+  r = rt.noteCompressOutcomes("s", "u1", [noop("a"), meta("r1"), noop("b"), metaErr("r2"), meta("r3"), metaErr("r4")]);
+  assert.equal(r.count, 2, "unbounded meta notices still cost nothing");
+
+  r = rt.noteCompressOutcomes("s", "u1", [noop("a"), meta("r1"), noop("b"), metaErr("r2"), meta("r3"), metaErr("r4"), noop("c")]);
+  assert.equal(r.count, 3, "three REAL failures still cap");
+  assert.equal(r.cappedNow, true);
 });
 
 test("emergency nudge stops re-injecting once the turn's cap is burned (issue #6 loop breaker)", async () => {
