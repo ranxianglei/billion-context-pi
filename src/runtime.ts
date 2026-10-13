@@ -138,6 +138,10 @@ export interface AcpRuntime {
    *  compress calls — used to stop re-injecting the (dedup-exempt) emergency
    *  nudge that would otherwise keep looping no-op compressions (issue #6). */
   compressRetryCappedFor(sid: string, turnKey: string): boolean;
+  /** Remember spans whose apply created no block, so a later capped turn can still measure a span that has not failed yet. */
+  noteFailedCompressSpans(sid: string, turnKey: string, spans: readonly string[]): void;
+  /** True when every requested span already failed during this turn. */
+  failedCompressSpansCover(sid: string, turnKey: string, spans: readonly string[]): boolean;
   clearNudgeTracking(sid: string): void;
   clearCompressRetryTracking(sid: string): void;
   liveContextLimit(ctx: ExtensionContext): number;
@@ -700,11 +704,12 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     seen: Set<string>;
     failTurnKey: string | null;
     failCount: number;
+    failedSpans: Set<string>;
   }
   const compressOutcomes = new Map<string, CompressOutcomeTracker>();
   function compressTrackerFor(sid: string): CompressOutcomeTracker {
     let t = compressOutcomes.get(sid);
-    if (!t) { t = { seen: new Set(), failTurnKey: null, failCount: 0 }; compressOutcomes.set(sid, t); }
+    if (!t) { t = { seen: new Set(), failTurnKey: null, failCount: 0, failedSpans: new Set() }; compressOutcomes.set(sid, t); }
     return t;
   }
 
@@ -713,6 +718,7 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     if (t.failTurnKey !== turnKey) {
       t.failTurnKey = turnKey;
       t.failCount = 0;
+      t.failedSpans = new Set();
     }
     const prevCount = t.failCount;
     for (const o of outcomes) {
@@ -732,6 +738,22 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   function compressRetryCappedFor(sid: string, turnKey: string): boolean {
     const t = compressOutcomes.get(sid);
     return t !== undefined && t.failTurnKey === turnKey && t.failCount >= MAX_COMPRESS_ATTEMPTS;
+  }
+
+  function noteFailedCompressSpans(sid: string, turnKey: string, spans: readonly string[]): void {
+    const t = compressTrackerFor(sid);
+    if (t.failTurnKey !== turnKey) {
+      t.failTurnKey = turnKey;
+      t.failCount = 0;
+      t.failedSpans = new Set();
+    }
+    for (const span of spans) t.failedSpans.add(span);
+  }
+
+  function failedCompressSpansCover(sid: string, turnKey: string, spans: readonly string[]): boolean {
+    if (spans.length === 0) return true;
+    const t = compressOutcomes.get(sid);
+    return t !== undefined && t.failTurnKey === turnKey && spans.every((span) => t.failedSpans.has(span));
   }
 
   function clearCompressRetryTracking(sid: string): void {
@@ -918,4 +940,4 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   let refused = false;
   let refusalMessage: string | null = null;
   let delegateStoodDown = false;
-  return { core, store, get refused() { return refused; }, set refused(v: boolean) { refused = v; }, get refusalMessage() { return refusalMessage; }, set refusalMessage(v: string | null) { refusalMessage = v; }, get delegateStoodDown() { return delegateStoodDown; }, set delegateStoodDown(v: boolean) { delegateStoodDown = v; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown, nudgeShownFor, nudgeShownTokensFor, clearNudgeTracking, clearNudgeTokenStamps, markNudgeRecorded, nudgeRecordedFor, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reasoningDropFor, reloadConfig, stateFor, save, deriveChildState: deriveChild, acquireLock, overflowFor, overflowDrop, noteSentViewCount, peekSentViewCount, dropSentViewCount, dropProjectionCache, noteDeadCompress, clearDeadCompress, throttleFor, throttleDrop , noteTokenScale, dropTokenScale, noteKhatUsage, khatFor, setKhatPending, dropKhat, noteHostUsage, dropHostUsageSamples, noteSizeDivergence, dropSizeDivergence, noteTerminalEscape, dropTerminalEscape, noteTruncationSkipped, dropTruncationSkipped, stripImagesFor };}
+  return { core, store, get refused() { return refused; }, set refused(v: boolean) { refused = v; }, get refusalMessage() { return refusalMessage; }, set refusalMessage(v: string | null) { refusalMessage = v; }, get delegateStoodDown() { return delegateStoodDown; }, set delegateStoodDown(v: boolean) { delegateStoodDown = v; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown, nudgeShownFor, nudgeShownTokensFor, clearNudgeTracking, clearNudgeTokenStamps, markNudgeRecorded, nudgeRecordedFor, noteCompressOutcomes, compressRetryCappedFor, noteFailedCompressSpans, failedCompressSpansCover, clearCompressRetryTracking, liveContextLimit, configFor, reasoningDropFor, reloadConfig, stateFor, save, deriveChildState: deriveChild, acquireLock, overflowFor, overflowDrop, noteSentViewCount, peekSentViewCount, dropSentViewCount, dropProjectionCache, noteDeadCompress, clearDeadCompress, throttleFor, throttleDrop , noteTokenScale, dropTokenScale, noteKhatUsage, khatFor, setKhatPending, dropKhat, noteHostUsage, dropHostUsageSamples, noteSizeDivergence, dropSizeDivergence, noteTerminalEscape, dropTerminalEscape, noteTruncationSkipped, dropTruncationSkipped, stripImagesFor };}
