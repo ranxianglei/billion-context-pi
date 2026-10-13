@@ -265,9 +265,30 @@ export function isCompressSuccessText(text: string): boolean {
 
 /** No-op = completed run that compressed nothing (0-block panel: every
  *  range skipped). Counted as a FAILED attempt by noteCompressOutcomes so
- *  the retry cap applies. Non-panels ("No ranges provided.") stay neutral. */
+ *  the retry cap applies. Non-panels ("No ranges provided.") stay neutral.
+ *  A PAUSED panel is also 0 blocks, but it is the cap short-circuit itself
+ *  and must not be counted again — see classifyCompressOutcome. */
 export function isCompressNoopText(text: string): boolean {
   return compressPanelBlocks(text) === 0;
+}
+
+/** Cap short-circuit. Returned before applyCompression, so it is not a new
+ *  failed attempt. REJECTED is not included: that panel is produced after
+ *  apply and still consumes one attempt. */
+export function isCompressPausePanel(text: string): boolean {
+  return text.split("\n").some((line) => line.startsWith("[ACP] PAUSED —"));
+}
+
+/** Flags for noteCompressOutcomes. A pause is neutral even when the host
+ *  stored isError, so the cap cannot be pushed past MAX_COMPRESS_ATTEMPTS
+ *  by the rejection panels that enforce it. */
+export function classifyCompressOutcome(text: string, isError: boolean): { isError: boolean; success: boolean; noop: boolean } {
+  const pause = isCompressPausePanel(text);
+  return {
+    isError: isError && !pause,
+    success: !isError && isCompressSuccessText(text),
+    noop: !pause && !isError && isCompressNoopText(text),
+  };
 }
 
 // Issue #250 loop breaker: small models repeat an identical compress call with

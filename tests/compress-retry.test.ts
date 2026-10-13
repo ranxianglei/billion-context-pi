@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { rm } from "node:fs/promises";
 import { createAcpExtension } from "../src/index.js";
 import { createRuntime, MAX_COMPRESS_ATTEMPTS } from "../src/runtime.js";
-import { isCompressSuccessText, isCompressNoopText } from "../src/compress-tool.js";
+import { isCompressSuccessText, isCompressNoopText, classifyCompressOutcome } from "../src/compress-tool.js";
 import { tmpPath } from "./tmp-path.js";
 
 // Compress-failure handling (session 01a00a38 post-mortem + issue #223):
@@ -275,6 +275,29 @@ test("classification: 0-block panels are no-ops, not successes; >=1 block is suc
   assert.equal(isCompressNoopText(SUCCESS_PANEL), false);
   assert.equal(isCompressNoopText(PARTIAL_PANEL), false);
   assert.equal(isCompressNoopText(NEUTRAL_TEXT), false, "non-panels stay neutral");
+});
+
+test("classifyCompressOutcome: PAUSED is neutral, REJECTED still counts", () => {
+  const header = "\u25a3 ACP | 0 \u2192 0 tokens (~0 reclaimed, 0 blocks)";
+  const paused = `${header}\n[ACP] PAUSED \u2014 3 compress attempts already failed this turn;`;
+  const rejected = `${header}\n[ACP] REJECTED \u2014 this exact compress call has now failed 2\u00d7`;
+  const pauseFromHost = classifyCompressOutcome(paused, true);
+  assert.deepEqual(pauseFromHost, { isError: false, success: false, noop: false });
+  const pauseLegacy = classifyCompressOutcome(paused, false);
+  assert.deepEqual(pauseLegacy, { isError: false, success: false, noop: false });
+  const rejectedHost = classifyCompressOutcome(rejected, true);
+  assert.equal(rejectedHost.isError, true);
+  assert.equal(rejectedHost.noop, false);
+  const rejectedLegacy = classifyCompressOutcome(rejected, false);
+  assert.equal(rejectedLegacy.noop, true, "REJECTED still follows apply, so it remains a failed attempt");
+
+  const rt = createRuntime({});
+  const fail = (id: string) => ({ toolCallId: id, isError: true, success: false, noop: false });
+  let r = rt.noteCompressOutcomes("s", "u1", [fail("t0"), fail("t1"), fail("t2")]);
+  assert.equal(r.count, MAX_COMPRESS_ATTEMPTS);
+  r = rt.noteCompressOutcomes("s", "u1", [fail("t0"), fail("t1"), fail("t2"), pauseFromHost]);
+  assert.equal(r.count, MAX_COMPRESS_ATTEMPTS, "a PAUSED panel does not push the counter past the cap");
+  assert.equal(r.cappedNow, false);
 });
 
 test("noteCompressOutcomes: no-op panels advance the counter toward the cap", () => {
