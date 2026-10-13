@@ -114,18 +114,23 @@ test("issue #250: dead-range repeat breaker + turn cap + reset on new turn", asy
 
   const compressTool = api.tools.find((t: any) => t.name === "compress")!;
   const S = (a: string, b: string) => [{ startId: a, endId: b, summary: "Loop breaker integration test summary covering the compressed range content." }];
+  let lastIsError = false;
   const run = async (id: string, ranges: any[]) => {
-    const text = textOf(await compressTool.execute(id, { content: ranges }, undefined, undefined, ctx));
-    entries = [...entries, toolResultMsg(`r${id}`, id, text, false)];
+    const out = await compressTool.execute(id, { content: ranges }, undefined, undefined, ctx);
+    const text = textOf(out);
+    lastIsError = out.isError === true;
+    entries = [...entries, toolResultMsg(`r${id}`, id, text, lastIsError)];
     await fire(handlers, ctx);
     return text;
   };
 
   const t1 = await run("tc1", S("m00001", "m00008"));
   assert.ok(isCompressSuccessText(t1), `t1 should succeed: ${t1}`);
+  assert.equal(lastIsError, false, "a block-creating panel is not an error result");
 
   const t2 = await run("tc2", S("m00001", "m00008"));
   assert.ok(isCompressNoopText(t2), `t2 is a 0-block kernel panel: ${t2}`);
+  assert.equal(lastIsError, true, "a 0-block panel is an error result and still counts once");
   assert.ok(!t2.includes("REJECTED"), "first dead failure shows the kernel's canonical error");
 
   const t3 = await run("tc3", S("m00001", "m00008"));
@@ -139,6 +144,7 @@ test("issue #250: dead-range repeat breaker + turn cap + reset on new turn", asy
   // t2..t4 burned the turn's 3-attempt cap → every compress call is paused
   const t5 = await run("tc5", S("m00099", "m00100"));
   assert.ok(t5.includes("PAUSED"), `t5 paused by the turn cap: ${t5}`);
+  assert.equal(lastIsError, true, "a PAUSED panel is an error result");
 
   const t6 = await run("tc6", S("m00009", "m00010"));
   assert.ok(t6.includes("PAUSED"), "even a LIVE range is paused until the next user message");

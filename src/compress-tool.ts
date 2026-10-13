@@ -68,7 +68,15 @@ export function makeCompressTool(runtime: AcpRuntime, overrides?: ToolPromptOver
         logThrow("compress", e, { sid: ctx.sessionManager.getSessionId(), ranges: typeof (params as CompressArgs).content === "string" ? "string" : ((params as CompressArgs).content?.length ?? 0) });
         throw e;
       }
-      return { details: undefined, content: [{ type: "text", text: result }] };
+      // 0-block panels (kernel skip, PAUSED, REJECTED) are failures. Return
+      // isError so the host shows an error result; do not only describe the
+      // failure in content. Argument errors still throw above. A panel that
+      // created blocks stays a normal result even if it also lists warnings.
+      return {
+        details: undefined,
+        content: [{ type: "text", text: result }],
+        ...(isCompressNoopText(result) ? { isError: true } : {}),
+      };
     },
   }, overrides);
 }
