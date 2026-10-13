@@ -153,7 +153,7 @@ export interface AcpRuntime {
    *  config when the contents change. Cheap no-op when unchanged. Called at
    *  session_start and on every context event so config edits apply live. */
   reloadConfig(cwd: string): Promise<void>;
-  stateFor(ctx: ExtensionContext, liveMessages?: AgentMessage[]): Promise<{ state: CompressionState; coreMessages: ReturnType<typeof entriesToCoreMessages>; entries: SessionEntry[] }>;
+  stateFor(ctx: ExtensionContext, liveMessages?: AgentMessage[], readOnly?: boolean): Promise<{ state: CompressionState; coreMessages: ReturnType<typeof entriesToCoreMessages>; entries: SessionEntry[] }>;
   /** Record the EXACT sent view measured off the real processTurn output for
    *  this turn (issue #561): `viewTokens` counts turn.messages (the pruned,
    *  summary-injected projection that actually went on the wire), and `usable`
@@ -824,14 +824,20 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     projectionCaches.delete(sid);
   }
 
-  async function stateFor(ctx: ExtensionContext, liveMessages?: AgentMessage[]) {
+  // `readOnly` is for callers that only want the projection and must not touch
+  // the session: it skips the state-rebuild save, the live-tail cache write and
+  // the live-ref-origin write, and deep-copies the loaded state before
+  // `pruneOrphanRefs` rewrites it in place — `store.load` hands back the object
+  // the live path is still using.
+  async function stateFor(ctx: ExtensionContext, liveMessages?: AgentMessage[], readOnly = false) {
     const sm = ctx.sessionManager;
     const sessionFile = sm.getSessionFile() ?? undefined;
     const sessionId = sm.getSessionId();
     const piHost = isPiHost(sm);
-    if (!piHost && liveMessages && liveMessages.length > 0) lastLiveBySession.set(sessionId, [...liveMessages]);
+    if (!piHost && liveMessages && liveMessages.length > 0 && !readOnly) lastLiveBySession.set(sessionId, [...liveMessages]);
     const live = piHost ? undefined : (liveMessages ?? lastLiveBySession.get(sessionId));
-    let state = await store.load(sessionFile, sessionId);
+    const loaded = await store.load(sessionFile, sessionId);
+    let state = readOnly ? structuredClone(loaded) : loaded;
     const entries = readContextEntries(sm);
     // Issue #299 (ranxianglei/billion-context-pi#299): pi's importFromJsonl
     // copies only the .jsonl, so the `${sessionFile}.acp.json` sidecar never
@@ -844,14 +850,18 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
       const rebuilt = rebuildStateFromLog({ entries, state, config: configFor(ctx), core });
       if (rebuilt.report.blocks > 0) {
         state = rebuilt.state;
-        await store.save(state, sessionFile, sessionId);
-        logInfo("state", {
-          sid: sessionId,
-          event: "state-rebuilt",
-          blocks: rebuilt.report.blocks,
-          callsApplied: rebuilt.report.callsApplied,
-          callsSkipped: rebuilt.report.callsSkipped,
-        });
+        // A read-only caller gets the rebuilt state for this projection only;
+        // persisting it is the live path's job.
+        if (!readOnly) {
+          await store.save(state, sessionFile, sessionId);
+          logInfo("state", {
+            sid: sessionId,
+            event: "state-rebuilt",
+            blocks: rebuilt.report.blocks,
+            callsApplied: rebuilt.report.callsApplied,
+            callsSkipped: rebuilt.report.callsSkipped,
+          });
+        }
       }
     }
     // omp fires the context event BEFORE the current user message is persisted
@@ -865,7 +875,7 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     if (!piHost && live && live.length > 0) {
       const origins = store.getLiveRefOrigins(sessionFile, sessionId);
       const merged = mergeLiveEntries(entries, live, state, origins);
-      store.setLiveRefOrigins(sessionFile, sessionId, origins);
+      if (!readOnly) store.setLiveRefOrigins(sessionFile, sessionId, origins);
       const coreMessages = entriesToCoreMessages(merged);
       // #459: enforce byRaw ⊆ view-ids ∪ block-ids on the merged view too —
       // without it, stale live-* refs from a shrunken/rewound host view linger

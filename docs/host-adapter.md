@@ -249,3 +249,79 @@ previously broke `path.join()` outright. The adapter therefore imports the pi pa
 **namespace** in `src/config-dir.ts` (safe under both resolvers) and feature-detects the
 property; it is the only value import from the pi package — every other import is type-only
 and erased at build time. All config/log/session paths are resolved in that module.
+
+---
+
+## 5. Cross-extension context view (protocol v1)
+
+Another extension that needs "the context the executor's model actually saw" cannot get it
+from session entries: this adapter's projection (summary injection, ref tags, pairing
+sanitization, reasoning drop) happens inside its own context transform and never lands in
+the entries. Rebuilding from entries therefore yields Pi's raw, uncompressed history —
+which overflows a consumer's own window on a compressed session. Image stripping is not
+part of the view: it runs later, at Pi's `before_provider_request` hook.
+
+The adapter answers requests for that projection over Pi's extension event bus.
+
+| | |
+|---|---|
+| Channel | `billion-context-pi:context-view:v1` (version in the name, so both halves move independently) |
+| Provider name | `billion-context-pi` |
+| Request | `{ version: 1, sessionId, ctx, claim }` |
+| Answer | `{ status: "available", provider, sessionId, builtAt, messages }` or `{ status: "inactive", provider, reason }` |
+
+**`claim` must be called synchronously** — the event bus runs handlers before `emit()`
+returns, which is what lets a consumer read "no `claim` was made" as *no provider
+installed* rather than *a slow provider*. The provider is only registered when the host
+exposes `pi.events.on`; a host (or test double) without an event bus gets no provider
+instead of a load failure.
+
+**Built per request, not captured.** The consumer runs in the middle of a turn: the
+assistant message carrying its own call is already persisted, and a sibling tool result may
+have completed before it. A projection recorded during the previous LLM request predates
+all of that, so it would hand the consumer a stale view of exactly the evidence it is being
+asked to review. The provider therefore re-runs the adapter's own pipeline
+(`stateFor` → `processTurn` → `coreOutToAgentMessages` → `dropCompressReasoning`)
+against the branch as it stands. The [#336] reasoning drop counts as view shaping rather
+than a side effect, so it is applied to the view too; the degeneration collapse (#351) is
+internal recovery machinery like image stripping, so it is not.
+
+**Fidelity bound.** The view re-runs the pipeline, not the live turn's metering: its token
+count is the raw estimate (no image tokens, system-prompt measurement, host floor, k̂
+calibration or sent-view recount) and its config carries no output-headroom or overflow
+re-centering. While usage sits far below every band the two agree exactly — a test pins the
+view to a fresh transform of the same branch. Near the pressure/truncate bands they can
+legitimately differ: the kernel's emergency truncation and nudge decisions key off token
+counts the view does not compute, and the live transform additionally appends the injected
+nudge message and applies the degeneration collapse. Treat the answer as "this adapter's
+projection of the caller's branch", not a byte copy of the executor's last wire request.
+
+**Read-only and isolated.** The compression state is deep-copied before the kernel runs,
+and the result is never saved, counted against the session's sent-view accounting, allowed
+to inject a nudge, or allowed to fire an update check. `stateFor`'s own normalizations
+(sidecar rebuild, orphan-ref pruning) are shared verbatim with the existing read-only tools
+(`acp_status`, `search_context`, …), so asking for a view does nothing those do not already
+do. The answer is `structuredClone`d on the way out, because `coreOutToAgentMessages`
+returns the session's own message objects for anything it did not have to patch.
+
+**Failures are not swallowed.** A builder that throws rejects the claim, so a consumer can
+tell "no provider installed" from "the hand-off broke" — a distinction it needs, because
+falling back on a broken hand-off silently reverts to the uncompressed history this module
+exists to avoid.
+
+`inactive` is reserved for answers that are legitimately not a view, and only some of them
+mean "use your own history":
+
+| Reason | Meaning | Consumer should |
+|---|---|---|
+| `refused` | host unsupported (e.g. OMP) | fall back |
+| `stood-down` | proxy/native mode | fall back |
+| `empty` | the projection came back with nothing | fall back |
+| `session-mismatch` | the request named a different session | treat as broken |
+| `branch-moved` | a rewind or fork landed while the view was building | treat as broken |
+
+The last two are not absences: the adapter answered, and what it answered is not a view of
+the caller's branch. Surface them rather than reviewing the wrong context. The same goes for
+a malformed answer — never for a missing provider, which is a plain absence. Note that
+ordinary turn progress is not `branch-moved`: the branch growing while the view is built is
+fine, since the caller asked for the branch as it stood when it asked.
