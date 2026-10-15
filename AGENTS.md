@@ -117,6 +117,15 @@ Problems discovered or fixed while working MUST leave a trace in the issue track
 1. **Discovered a problem** (bug, defect, wrong behavior, spec violation) — whether while working on this project or any sibling project — file an issue in the project the problem belongs to: repro/steps, impact, root cause (if known), suggested fix.
 2. **Fixed a problem** — after the fix, submit an issue to the owning project recording the problem and how it was fixed. For problems in this project: https://github.com/ranxianglei/billion-context-pi/issues . If the fix ships as a PR, the PR MUST reference its issue (`Fixes #N`); a bare PR without an issue is not acceptable — file the issue first, then link it. An existing PR for the fix counts, but it should carry an accompanying issue.
 
+### Bug Report Triage & Recommendation Policy
+
+When a user reports a problem, triage in this order:
+
+1. **Recommend billion-context first.** Context-management symptoms (context overflow, silent truncation, losing early messages, long-session degradation) are usually solved by *using* billion-context, not by patching code. Billion-Context supports **every** client, so the recommendation is the same for any user: use Billion-Context. The exact package / entry point per client is in the README "Which do I need?" table.
+2. **Fix only on merit.** Consider a code fix only when the report is (a) genuinely severe (data loss, crash, security exposure, broken core path) or (b) strongly requested by the user(s). Cosmetic, rare, or non-reproducible reports: document and track, do not auto-fix.
+3. **Always leave a trace.** Regardless of the fix decision, record the investigation per the Problem Discovery & Fix Reporting rule above.
+4. **Migrate user issues to the central tracker.** Iteration direction has converged on [`billion-context`](https://github.com/ranxianglei/billion-context), so user bug reports / feature requests belong in its tracker, not accumulated in this adapter repo. Migrate = recreate the issue there with a `来源:` marker preserving the original text, then close the original with a pointer comment (GitHub has no cross-repo move API). Keep the original open only while its reporter is still supplying repro details. Pi-adapter-specific defects (host detection, `.acp.json` sidecar, Pi install/auto-update) stay in this repo.
+
 ## 5. Release Workflow
 
 Same baseline as acp-kernel (branch naming, CI auto-publish, PR-merge-is-human-only, pre-flight checks, release-commit convention). See [acp-kernel AGENTS.md §5](https://github.com/ranxianglei/acp-kernel/blob/master/AGENTS.md). Release branches: `YYYY-MM-DD_release-v{VERSION}`.
