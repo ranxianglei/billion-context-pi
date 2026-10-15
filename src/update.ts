@@ -1,5 +1,6 @@
-import { readFile, writeFile, mkdir, access } from "node:fs/promises";
-import { join, dirname } from "node:path";
+import { readFile, writeFile, mkdir, access, readdir, stat, rm } from "node:fs/promises";
+import type { Dirent } from "node:fs";
+import { join, dirname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
 import { homedir } from "node:os";
@@ -39,6 +40,67 @@ const throttleFileFor = (extDir?: string): string => {
 // retrying is a pure infinite loop (issue #267). The user must `npm i -g`.
 export const readOnlyMarkerFile = (extDir: string): string =>
   join(homedir(), CONFIG_DIR_NAME, "agent", `.billion-context-pi-readonly-${locationKey(extDir)}`);
+
+// --- Stale per-location throttle-marker cleanup (#658) ---
+// #267 keyed the throttle file by install location so copies stop sharing it,
+// but never removed old ones: each new install path leaked a marker into
+// ~/.pi/agent. locationKey is sha256 hex sliced to 12 → 12 lowercase hex chars.
+const THROTTLE_MARKER_RE = /^\.billion-context-pi-update-check-[0-9a-f]{12}$/;
+// Active installs refresh their marker at most once per CHECK_INTERVAL_MS
+// (3 min), so anything older than this is from a dormant/abandoned location;
+// the margin keeps an idle-for-days machine away from its name-protected file.
+const STALE_MARKER_MS = 7 * 24 * 60 * 60 * 1000;
+// Safety valve against key churn: caps how many NON-active markers coexist,
+// bounding worst-case file count independently of the age rule above.
+const MAX_STALE_MARKERS = 50;
+
+// Best-effort removal of stale per-location throttle markers. Never throws (a
+// failed scan/delete must not break startup or update checking); only touches
+// names matching THROTTLE_MARKER_RE, never deletes the live marker named by
+// activePath. Returns the number of files removed.
+export async function cleanupStaleMarkers(
+  agentDir: string,
+  activePath: string,
+): Promise<number> {
+  let entries: Dirent[];
+  try {
+    entries = await readdir(agentDir, { withFileTypes: true });
+  } catch {
+    return 0; // dir missing/unreadable → nothing to clean
+  }
+  const activeBase = basename(activePath);
+  const now = Date.now();
+  const candidates: { path: string; mtimeMs: number }[] = [];
+  for (const ent of entries) {
+    if (!ent.isFile()) continue;
+    if (!THROTTLE_MARKER_RE.test(ent.name)) continue;
+    if (ent.name === activeBase) continue; // never delete the live file
+    const fullPath = join(agentDir, ent.name);
+    try {
+      const st = await stat(fullPath);
+      candidates.push({ path: fullPath, mtimeMs: st.mtimeMs });
+    } catch {
+      // vanished between readdir and stat → skip
+    }
+  }
+  if (candidates.length === 0) return 0;
+  candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  let removed = 0;
+  for (let i = 0; i < candidates.length; i++) {
+    const c = candidates[i];
+    if (!c) continue;
+    const staleByAge = now - c.mtimeMs >= STALE_MARKER_MS;
+    const overCap = i >= MAX_STALE_MARKERS;
+    if (!staleByAge && !overCap) continue;
+    try {
+      await rm(c.path);
+      removed += 1;
+    } catch {
+      // best-effort: swallow individual delete failures
+    }
+  }
+  return removed;
+}
 
 // Guards against concurrent checks: the context event fires on every LLM call,
 // so several can race past the throttle read before any writes the timestamp.
@@ -470,6 +532,9 @@ export async function checkForUpdate(
     if (now - lastCheck < CHECK_INTERVAL_MS) return;
 
     await writeLastCheck(now, throttle);
+    // GC stale per-location markers from old installs (#658). Placed post-throttle
+    // so it runs at most once per CHECK_INTERVAL_MS window, never per LLM call.
+    await cleanupStaleMarkers(dirname(throttle), throttle);
 
     const runtimeVersion = await getRuntimeVersion();
     // Follow the channel the user installed from (dist-tag), not the global

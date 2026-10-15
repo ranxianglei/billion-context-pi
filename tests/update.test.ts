@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { join, dirname } from "node:path";
 import { homedir, tmpdir } from "node:os";
-import { mkdtempSync, readFileSync, rmSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, mkdirSync, writeFileSync, existsSync, utimesSync, readdirSync } from "node:fs";
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 import type { NpmRunner } from "../src/update.js";
 
@@ -38,6 +38,7 @@ const {
   findExtensionDir,
   readOnlyMarkerFile,
   resetUpdateStateForTest,
+  cleanupStaleMarkers,
 } = await import("../src/update.js");
 
 const THROTTLE = join(
@@ -502,4 +503,93 @@ test("checkForUpdate: read-only marker present → skips npm view entirely + not
   assert.equal(npmCalls, 0, "no npm view when the install location is read-only");
   assert.equal(notes.length, 1, "notify emitted once per process, not once per check");
   assert.match(notes[0], /npm i -g billion-context-pi/);
+});
+
+// --- stale per-location throttle-marker cleanup (#658) ---
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+const MARKER_RE_LOCAL = /^\.billion-context-pi-update-check-[0-9a-f]{12}$/;
+
+function writeFileAtMtime(path: string, mtimeMs: number): void {
+  writeFileSync(path, String(Date.now()));
+  utimesSync(path, mtimeMs / 1000, mtimeMs / 1000);
+}
+
+test("cleanupStaleMarkers removes stale (>7d) markers, keeps recent, always keeps active, ignores non-markers", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "acp-marker-cleanup-"));
+  const now = Date.now();
+  const activeName = ".billion-context-pi-update-check-aaaaaaaaaaaa";
+  writeFileAtMtime(join(dir, activeName), now - 8 * DAY_MS); // active but ancient → must survive
+  writeFileAtMtime(join(dir, ".billion-context-pi-update-check-bbbbbbbbbbbb"), now - 8 * DAY_MS); // stale → removed
+  writeFileAtMtime(join(dir, ".billion-context-pi-update-check-cccccccccccc"), now - 1 * DAY_MS); // recent → kept
+  writeFileAtMtime(join(dir, ".billion-context-pi-update-check"), now - 30 * DAY_MS); // unsuffixed base → not a marker
+  writeFileAtMtime(join(dir, ".billion-context-pi-readonly-dddddddddddd"), now - 30 * DAY_MS); // readonly → untouched
+  writeFileAtMtime(join(dir, "unrelated.txt"), now - 30 * DAY_MS); // unrelated → untouched
+
+  const removed = await cleanupStaleMarkers(dir, join(dir, activeName));
+  assert.equal(removed, 1);
+  assert.ok(existsSync(join(dir, activeName)), "active marker survives even when older than the threshold");
+  assert.ok(!existsSync(join(dir, ".billion-context-pi-update-check-bbbbbbbbbbbb")), "stale marker removed");
+  assert.ok(existsSync(join(dir, ".billion-context-pi-update-check-cccccccccccc")), "recent marker kept");
+  assert.ok(existsSync(join(dir, ".billion-context-pi-update-check")), "unsuffixed base file untouched");
+  assert.ok(existsSync(join(dir, ".billion-context-pi-readonly-dddddddddddd")), "readonly marker untouched");
+  assert.ok(existsSync(join(dir, "unrelated.txt")), "unrelated file untouched");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("cleanupStaleMarkers leaves near-miss names alone (strict 12-lowercase-hex match)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "acp-marker-cleanup-"));
+  const nearMisses = [
+    ".billion-context-pi-update-check-abc", // too short
+    ".billion-context-pi-update-check-ABCDEF123456", // uppercase hex
+    ".billion-context-pi-update-check-1234567890123", // 13 chars
+    ".billion-context-pi-update-check-gggggggggggg", // non-hex chars
+    ".billion-context-pi-update-check-", // empty suffix
+  ];
+  for (const n of nearMisses) writeFileAtMtime(join(dir, n), 0); // epoch → maximally old
+  const removed = await cleanupStaleMarkers(dir, join(dir, ".billion-context-pi-update-check-zzzzzzzzzzzz"));
+  assert.equal(removed, 0);
+  for (const n of nearMisses) assert.ok(existsSync(join(dir, n)), `${n} must survive`);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("cleanupStaleMarkers caps non-active markers at MAX_STALE_MARKERS (safety valve)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "acp-marker-cleanup-"));
+  const now = Date.now();
+  const activeName = ".billion-context-pi-update-check-a1a1a1a1a1a1";
+  writeFileAtMtime(join(dir, activeName), now); // active, fresh
+  for (let i = 0; i < 60; i++) {
+    const name = `.billion-context-pi-update-check-${i.toString(16).padStart(12, "0")}`;
+    writeFileAtMtime(join(dir, name), now); // all fresh → age rule alone would keep them all
+  }
+  const removed = await cleanupStaleMarkers(dir, join(dir, activeName));
+  assert.equal(removed, 10, "60 non-active − 50 kept = 10 over-cap removed");
+  const remaining = readdirSync(dir).filter((n) => MARKER_RE_LOCAL.test(n));
+  assert.equal(remaining.length, 51, "50 non-active + 1 active remain");
+  assert.ok(existsSync(join(dir, activeName)));
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("checkForUpdate cleans stale markers as part of its lifecycle (wiring)", async () => {
+  delete process.env.ACP_AUTO_UPDATE;
+  resetThrottle();
+  const agentDir = join(FAKE_HOME, CONFIG_DIR_NAME, "agent");
+  mkdirSync(agentDir, { recursive: true });
+  const staleA = join(agentDir, ".billion-context-pi-update-check-deaddeaddead");
+  const staleB = join(agentDir, ".billion-context-pi-update-check-cafebabecafe");
+  const recent = join(agentDir, ".billion-context-pi-update-check-0badc0de1234");
+  writeFileAtMtime(staleA, 0); // epoch → stale
+  writeFileAtMtime(staleB, 0); // epoch → stale
+  writeFileAtMtime(recent, Date.now()); // fresh → kept
+  setRunNpmForTest(
+    makeFakeNpm({ code: 0, stdout: `${REPO_VERSION}\n`, stderr: "" }, { code: 0, stdout: "", stderr: "" }).impl,
+  );
+  try {
+    await checkForUpdate(true);
+    assert.ok(!existsSync(staleA), "stale marker cleaned during update check");
+    assert.ok(!existsSync(staleB), "stale marker cleaned during update check");
+    assert.ok(existsSync(recent), "recent marker preserved");
+  } finally {
+    for (const p of [staleA, staleB, recent]) rmSync(p, { force: true });
+  }
 });
