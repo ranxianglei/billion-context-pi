@@ -37,6 +37,7 @@ import { debug, logError, logInfo, logWarn, logThrow, closeLogStream } from "./l
 import { collectCoveredMessageIds, estimateTokens, collectImageTokens, modelSupportsImages, sentViewTokenCount, sentViewMeterMatches } from "./tokens.js";
 import { lastTurnBoundaryId, lastTurnBoundaryIndex } from "./turn-boundary.js";
 import { compressionAnchorStaleness } from "./floor-stale.js";
+import { BlockLossSentinel, classifyLoss } from "./block-loss-sentinel.js";
 import { checkForUpdate } from "./update.js";
 import {
   THROTTLE_RETRY_ERROR_MESSAGE,
@@ -407,6 +408,7 @@ function wireBeforeProviderRequest(pi: ExtensionAPI, runtime: AcpRuntime, standD
 // messages about to be sent. We run acp-kernel's processTurn (prune + ref-tag +
 // nudge decision) and return the transformed AgentMessage[].
 function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIfProxied: (ctx: ExtensionContext) => boolean): void {
+  const sentinel = new BlockLossSentinel();
   pi.on("context", async (event, ctx) => {
     // Refused host (OMP / proxied baseUrl): leave the context completely
     // untouched — no ref tags, no compression, no nudge. Returning undefined
@@ -619,8 +621,17 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
         activeBefore: state.blocks.filter((b) => b.active).length,
       });
 
+      // #635 D2: attribute silent kernel block deactivation (see block-loss-sentinel.ts).
+      const sentReport = sentinel.beginTurn(sid, coreMessages, state.blocks.filter((b) => b.active).map((b) => b.blockId));
+      if (sentReport.resetSuspected) {
+        logWarn("diagnostics", { sid, event: "state-reset-suspected", prevActive: sentReport.prevActive, issue: "#635-D2" });
+      }
       const turn = runtime.core.processTurn({ messages: coreMessages, state, config, tokenCount });
       await runtime.save(turn.state, ctx);
+      const lostBlocks = sentinel.settledLosses(sid, turn.state.blocks.filter((b) => b.active).map((b) => b.blockId));
+      if (lostBlocks.length > 0) {
+        logWarn("diagnostics", { sid, event: "block-loss", lostBlocks, hint: classifyLoss(sentReport.churn), churn: sentReport.churn, activeAfter: turn.state.blocks.filter((b) => b.active).length, issue: "#635-D2" });
+      }
 
       // Issue #561: measure the EXACT view that just went out (turn.messages is
       // the pruned, summary-injected projection the provider receives) and
