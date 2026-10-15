@@ -121,6 +121,8 @@ billion-context-pi 面向 **Pi** 编码代理(`@earendil-works/pi-coding-agent`)
 
   完整说明:[docs/omp.zh-CN.md](./docs/omp.zh-CN.md)。
 
+- **PI-Desktop** —— 通过显式 opt-in 支持。它内嵌 pi SDK 但只暴露 `getBranch()`(无 `buildContextEntries()`),因此是「已声明的 fork 宿主」而非 pi-native。用 `PI_ACP_FORK_HOST=pi-desktop <启动命令>`(或通用的 `PI_ACP_FORK_HOST=1`)opt-in。单轮 / 手动 `compress` 可用;已知限制(#635):PI-Desktop 会在轮次之间重写在途视图,因此压缩块可能在数轮后丢失——长会话请改用 [billion-context](https://github.com/ranxianglei/billion-context) 代理。
+
 - **与 [billion-context](https://github.com/ranxianglei/billion-context) 线代理共存** —— 两者同时作用于同一会话会对每个请求双重压缩(token 浪费、嵌套摘要、两套 ref 坐标系)。这会被自动防止:launcher 路径(`bili pi` 等)导出 `BILLION_CONTEXT_PROXY`;模型 `baseUrl` 经代理路由(`…/bili/https://upstream…`)时在会话开始即被检测到 —— 两种情况下 billion-context-pi 都会带警告让位,由代理独占压缩。一个例外:透明模式(流量经 `HTTPS_PROXY` 到达代理、URL 无 `/bili/` 前缀)无法从 URL 识别 —— 此时请在启动 pi 前导出 `BILLION_CONTEXT_PROXY=1`。
 
 - **反向冲突 —— `billion-context` 薄插件抢占 `/acp`。** 如果 [`billion-context`](https://github.com/ranxianglei/billion-context) 内置的 pi 插件也被安装了(`~/.pi/agent/settings.json` 的 `"packages"` 里存在指向某个 `billion-context` 安装目录的条目,例如来自 `bili plugin install pi`),它会注册自己的 `/acp` 命令,而 Pi 没有重复命令防护 —— 哪个生效取决于加载顺序。典型症状:在普通 `pi` 启动下输入 `/acp` 显示 ``bili: no proxy detected (run via `bili <client>` or set a /bili/ baseURL)`` —— 这行字符串由薄插件发出,**不是** billion-context-pi 发出的,而且 pi 并不需要运行 `bili`。修复:该冲突只在你用普通 `pi` 启动时才有实际影响 —— 移除薄插件(`bili plugin remove pi`,或从该设置文件中删除除 `npm:billion-context-pi` 之外的条目),让 `/acp` 由 billion-context-pi 接管;若改用 `bili pi` 启动则无需移除任何东西:launcher 会导出 `BILLION_CONTEXT_PROXY`,billion-context-pi 整体让位(见上一条),两个插件可以并存。注意:`bili plugin install pi` 会静默删除该文件中已有的 `npm:billion-context-pi` 条目且不提示([billion-context#788](https://github.com/ranxianglei/billion-context/issues/788))。
