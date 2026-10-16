@@ -1581,11 +1581,44 @@ async function runDelegate(
   return formatSyncResult(args.agent, runId, taskText, result, file);
 }
 
+/** Mirror the parent's explicit extension-loading flags into the delegate
+ *  child so the child sees exactly the extensions the parent loaded (#660).
+ *  Tokens are copied verbatim in original order - the child runs the same pi
+ *  binary, so identical tokens parse identically; normalizing forms could
+ *  change semantics (pi 0.83 does not parse `--extension=x` as an extension
+ *  flag at all). Returns [] unless the parent process IS the pi CLI: embedded
+ *  hosts run the SDK in their own node process, whose argv belongs to the
+ *  embedding app, not pi. A nested delegate re-extracts from its own argv and
+ *  passes the flags through again, so chains stay consistent. */
+export function parentExtensionFlags(argv: readonly string[]): string[] {
+  if (!PI_CLI_ENTRY_RE.test(argv[1] ?? "")) return [];
+  const flags: string[] = [];
+  const rest = argv.slice(2);
+  for (let i = 0; i < rest.length; i++) {
+    const arg = rest[i];
+    if (arg === undefined) continue;
+    if (arg === "-e" || arg === "--extension") {
+      // pi takes the next token unconditionally when present; mirror that.
+      const value = rest[i + 1];
+      if (value !== undefined) {
+        flags.push(arg, value);
+        i++;
+      }
+    } else if (arg === "--no-extensions" || arg === "-ne") {
+      flags.push(arg);
+    } else if (arg.startsWith("--extension=")) {
+      flags.push(arg);
+    }
+  }
+  return flags;
+}
+
 export async function buildChildArgs(
   args: DelegateArgs,
   rolePrompt: string,
   ctx: ExtensionContext,
   runId: string,
+  parentArgv: readonly string[] = process.argv,
 ): Promise<{ cliArgs: string[]; tmpDir: string; isAsync: boolean; useJsonStream: boolean; sessionFile: string | null }> {
   const tmpDir = await mkdtemp(join(tmpdir(), "acp-delegate-"));
   // Combine the role prompt with a small framing instruction so the child
@@ -1618,6 +1651,9 @@ export async function buildChildArgs(
   const cliArgs = useJsonStream
     ? ["--mode", "json", ...sessionArgs, "--append-system-prompt", promptFile]
     : ["-p", ...sessionArgs, "--append-system-prompt", promptFile];
+  // Extension flags: mirror the parent's explicit loads so the delegate sees
+  // the same extensions (#660). Empty unless the parent process is the pi CLI.
+  cliArgs.push(...parentExtensionFlags(parentArgv));
 
   // Restricted roles receive a tailored --tools allowlist. Worker and
   // unknown agents are left on Pi's full default toolset (all extension/
