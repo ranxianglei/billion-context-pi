@@ -4,7 +4,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildChildArgs, delegateSpawnOptions, injectedWaitMessage, buildWaitResult, buildCancelResult, getDelegateUsage, resetDelegateUsage, injectResult, effectiveExitCode, formatRunResult, resolveWaitTimeoutMs, findUndeliveredRuns, undeliveredNoticeFrom, buildRecoveryNotice, makeDelegateTool, exitLabel, cancelledFileNote, delegateStdinText, readActivityTail, scheduleRunNotification, flushDelegateNotifications, formatBatchRunSection, setDelegatePolicy, delegateChildEnv, asyncWatchdogDescription, ConcurrencyGate, setDelegateDefaults, resetDelegateDefaults, isValidThinkingLevel, resolvePerCallTimeoutMs } from "../src/delegate-tool.js";
+import { buildChildArgs, delegateSpawnOptions, injectedWaitMessage, buildWaitResult, buildCancelResult, getDelegateUsage, resetDelegateUsage, injectResult, effectiveExitCode, formatRunResult, resolveWaitTimeoutMs, findUndeliveredRuns, undeliveredNoticeFrom, buildRecoveryNotice, makeDelegateTool, exitLabel, cancelledFileNote, delegateStdinText, readActivityTail, scheduleRunNotification, flushDelegateNotifications, formatBatchRunSection, setDelegatePolicy, delegateChildEnv, asyncWatchdogDescription, ConcurrencyGate, setDelegateDefaults, resetDelegateDefaults, isValidThinkingLevel, resolvePerCallTimeoutMs, parentExtensionFlags } from "../src/delegate-tool.js";
 import { DEFAULT_DELEGATE_POLICY } from "../src/config.js";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
@@ -1121,5 +1121,88 @@ test("ConcurrencyGate: cancelling a queued run skips it without leaking a slot",
   assert.deepEqual(order, ["a", "c"], "cancelled b never launched");
   assert.equal(gate.activeCount, 1);
   assert.equal(gate.queuedCount, 0);
+});
+
+// ─── Parent extension flag mirroring (#660) ────────────────────────────────
+
+const PI_CLI_ARGV1 = "/opt/node_modules/@earendil-works/pi-coding-agent/dist/cli.js";
+
+test("parentExtensionFlags mirrors -e/--extension/--no-extensions verbatim in original order", () => {
+  const argv = ["/usr/bin/node", PI_CLI_ARGV1, "-e", "./ext-a.ts", "--model", "anthropic/claude-sonnet-4-6", "--extension", "./ext-b.ts", "-ne"];
+  assert.deepEqual(parentExtensionFlags(argv), ["-e", "./ext-a.ts", "--extension", "./ext-b.ts", "-ne"]);
+});
+
+test("parentExtensionFlags mirrors equals-form --extension= verbatim (no normalization)", () => {
+  const argv = ["/usr/bin/node", PI_CLI_ARGV1, "--extension=./ext-a.ts", "-p", "hello"];
+  assert.deepEqual(parentExtensionFlags(argv), ["--extension=./ext-a.ts"]);
+});
+
+test("parentExtensionFlags returns [] when the parent process is not the pi CLI", () => {
+  assert.deepEqual(parentExtensionFlags(["/usr/bin/node", "/srv/pi-web/index.js", "-e", "./x.ts"]), [], "embedded host argv is not pi's");
+  assert.deepEqual(parentExtensionFlags([]), [], "empty argv");
+});
+
+test("parentExtensionFlags drops a trailing -e without a value (pi ignores it too)", () => {
+  assert.deepEqual(parentExtensionFlags(["/usr/bin/node", PI_CLI_ARGV1, "-e"]), []);
+});
+
+test("parentExtensionFlags takes the next token even when flag-shaped (mirrors pi's parser)", () => {
+  const argv = ["/usr/bin/node", PI_CLI_ARGV1, "-p", "task", "-e", "--weird"];
+  assert.deepEqual(parentExtensionFlags(argv), ["-e", "--weird"]);
+});
+
+test("parentExtensionFlags re-mirrors already-passed-through flags (nested delegate chain)", () => {
+  const top = parentExtensionFlags(["/usr/bin/node", PI_CLI_ARGV1, "-e", "./ext-a.ts"]);
+  const childArgv = ["/usr/bin/node", PI_CLI_ARGV1, "--mode", "json", "-e", "./ext-a.ts", "--append-system-prompt", "/tmp/p.md"];
+  assert.deepEqual(parentExtensionFlags(childArgv), top);
+});
+
+test("buildChildArgs passes parent extension flags through into cliArgs in parent order", async () => {
+  const parentArgv = ["/usr/bin/node", PI_CLI_ARGV1, "-e", "./ext-a.ts", "--extension", "./ext-b.ts"];
+  const { cliArgs } = await buildChildArgs(
+    { agent: "worker", task: "t" },
+    "prompt",
+    mockCtx(),
+    "del_test",
+    parentArgv,
+  );
+  const eIdx = cliArgs.indexOf("-e");
+  const extIdx = cliArgs.indexOf("--extension");
+  assert.ok(eIdx >= 0 && eIdx + 1 < cliArgs.length, "-e pair present");
+  assert.equal(cliArgs[eIdx + 1], "./ext-a.ts");
+  assert.ok(extIdx >= 0 && extIdx + 1 < cliArgs.length, "--extension pair present");
+  assert.equal(cliArgs[extIdx + 1], "./ext-b.ts");
+  assert.ok(eIdx < extIdx, "parent order preserved");
+});
+
+test("buildChildArgs adds no extension flags when the parent is not the pi CLI", async () => {
+  const parentArgv = ["/usr/bin/node", "/srv/pi-web/index.js", "-e", "./x.ts"];
+  const { cliArgs } = await buildChildArgs(
+    { agent: "worker", task: "t" },
+    "prompt",
+    mockCtx(),
+    "del_test",
+    parentArgv,
+  );
+  assert.ok(!cliArgs.includes("-e"), "no -e mirrored from non-pi parent");
+  assert.ok(!cliArgs.includes("--extension"), "no --extension mirrored from non-pi parent");
+});
+
+test("buildChildArgs still works with default argv (process.argv) for a pi CLI parent", async () => {
+  const saved = process.argv;
+  process.argv = ["/usr/bin/node", PI_CLI_ARGV1, "-e", "./ext-default.ts"];
+  try {
+    const { cliArgs } = await buildChildArgs(
+      { agent: "worker", task: "t" },
+      "prompt",
+      mockCtx(),
+      "del_test",
+    );
+    const eIdx = cliArgs.indexOf("-e");
+    assert.ok(eIdx >= 0 && eIdx + 1 < cliArgs.length, "default argv read: -e present");
+    assert.equal(cliArgs[eIdx + 1], "./ext-default.ts");
+  } finally {
+    process.argv = saved;
+  }
 });
 
