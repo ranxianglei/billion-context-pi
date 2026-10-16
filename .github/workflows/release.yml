@@ -25,11 +25,18 @@ jobs:
         run: |
           COMMIT_MSG=$(git log -1 --pretty=%B)
           MERGE_BRANCH=$(echo "$COMMIT_MSG" | sed -n 's/^Merge pull request #[0-9]* from [^/]*\/\(.*\)$/\1/p' || echo "")
-          if echo "$MERGE_BRANCH" | grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}_release-v'; then
+          # Accept both `YYYY-MM-DD_release-vX.Y.Z` (documented) and the
+          # common `YYYY-MM-DD_release-X.Y.Z` variant (missing `v`).
+          if echo "$MERGE_BRANCH" | grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}_release-(v)?[0-9]'; then
             echo "is_release=true" >> $GITHUB_OUTPUT
-          elif echo "$COMMIT_MSG" | grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}_release-v'; then
+          elif echo "$COMMIT_MSG" | grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}_release-(v)?[0-9]'; then
             echo "is_release=true" >> $GITHUB_OUTPUT
           else
+            # A release-looking branch that does not match must not skip the
+            # publish silently (that is how v0.1.44 was lost on 2026-08-21).
+            if echo "$MERGE_BRANCH" | grep -qi 'release'; then
+              echo "::warning::Merge from release-looking branch '$MERGE_BRANCH' does not match the release pattern; publish skipped. Rename to YYYY-MM-DD_release-vX.Y.Z and re-merge."
+            fi
             echo "is_release=false" >> $GITHUB_OUTPUT
           fi
 
@@ -73,6 +80,15 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
+      - name: Compute compare base
+        if: steps.check.outputs.is_release == 'true'
+        id: cmp
+        run: |
+          VER="${{ steps.version.outputs.version }}"
+          LAST="$(git describe --match 'v[0-9]*' --tags --abbrev=0 "v$VER"^ 2>/dev/null || true)"
+          if [ -z "$LAST" ]; then LAST="$(git rev-list --max-parents=0 HEAD)"; fi
+          echo "base=$LAST" >> "$GITHUB_OUTPUT"
+
       - name: Create GitHub Release
         if: steps.check.outputs.is_release == 'true'
         uses: actions/create-release@v1
@@ -85,4 +101,4 @@ jobs:
           body: |
             ## Release v${{ steps.version.outputs.version }}
 
-            See [commits since last tag](https://github.com/${{ github.repository }}/compare/$(git describe --tags --abbrev=0 v${{ steps.version.outputs.version }}^ 2>/dev/null || echo HEAD~10)...v${{ steps.version.outputs.version }})
+            See [commits since last tag](https://github.com/${{ github.repository }}/compare/${{ steps.cmp.outputs.base }}...v${{ steps.version.outputs.version }})

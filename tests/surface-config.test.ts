@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { defaultPrompts } from "acp-kernel";
-import { buildAcpSystemPrompt, ACP_DELEGATE_PROMPT, sanitizePromptSections } from "../src/system-prompt.js";
+import { buildAcpSystemPrompt, ACP_DELEGATE_PROMPT, sanitizePromptSections, SECTION_KEYS } from "../src/system-prompt.js";
 import { sanitizeToolPrompts, sanitizeNudgeSections, applyToolPromptOverrides, readToolSurfaceSync, sanitizeSurfaceConfig } from "../src/surface.js";
 import { loadUserConfig } from "../src/user-config.js";
 
@@ -33,9 +33,19 @@ test("promptSections: string replaces, null removes, unknown keys ignored", () =
   assert.equal(ignored, base);
 });
 
-test("promptSections: rule slots take string (replace) or null (remove), junk dropped", () => {
+test("promptSections: one kernel tri-state contract for every section key — string replaces, null removes, junk dropped", () => {
   const s = sanitizePromptSections({ philosophy: "PHILO", howToCompress: "HOWTO", tier2: null, tier3: 7, compressPhilosophy: null });
   assert.deepEqual(s, { philosophy: "PHILO", howToCompress: "HOWTO", tier2: null });
+  const raw: Record<string, unknown> = {};
+  const expected: Record<string, string | null> = {};
+  let i = 0;
+  for (const key of SECTION_KEYS) {
+    const v = i++ % 2 === 0 ? `S${key}` : null;
+    raw[key] = v;
+    expected[key] = v;
+  }
+  raw["bogusKey"] = "x";
+  assert.deepEqual(sanitizePromptSections(raw), expected, "no per-slot type rules: identical tri-state for all keys");
   const defaultHead = defaultPrompts.howToCompressRules.slice(0, 40);
   const replaced = buildAcpSystemPrompt(defaultPrompts, { howToCompress: "CUSTOM HOW TO COMPRESS BODY" });
   assert.ok(replaced.includes("CUSTOM HOW TO COMPRESS BODY"));

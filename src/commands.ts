@@ -1,9 +1,9 @@
 import type { ExtensionAPI, ExtensionCommandContext, RegisteredCommand, SessionEntry } from "@earendil-works/pi-coding-agent";
 import * as path from "node:path";
 import type { AcpRuntime } from "./runtime.js";
-import { ACP_STATUS_CUSTOM_TYPE, ACP_EXPORT_CUSTOM_TYPE } from "./messages.js";
+import { ACP_STATUS_CUSTOM_TYPE, ACP_EXPORT_CUSTOM_TYPE, ACP_RULE_CUSTOM_TYPE } from "./messages.js";
 import { exportSession, parseExportArgs } from "./export.js";
-import { defaultCountTokens, parseBlockIdArg, collectBlockContent } from "acp-kernel";
+import { defaultCountTokens, parseBlockIdArg, collectBlockContent, listRules, addRule, removeRule, clearRules, formatRulesList, resolveRuleLimits } from "acp-kernel";
 import { getSystemPromptText } from "./compat.js";
 import { collectCoveredMessageIds, estimateTokens, collectImageTokens, modelSupportsImages, adjustedTokenCount } from "./tokens.js";
 import { usageAnchorPredatesCompression } from "./floor-stale.js";
@@ -33,6 +33,41 @@ function cacheUsageSamples(entries: SessionEntry[]): Array<{ input: number; cach
     out.push({ input: m.usage.input ?? 0, cacheRead: m.usage.cacheRead ?? 0, cacheWrite: m.usage.cacheWrite ?? 0 });
   }
   return out;
+}
+
+type RuleCommandOp =
+  | { kind: "list" }
+  | { kind: "record"; text: string }
+  | { kind: "remove"; id: string }
+  | { kind: "clear" }
+  | { kind: "conflict"; reason: string };
+
+const RULE_ID_RE = /^rule\d+$/;
+
+const RULE_OP_CONFLICT = 'One operation per call — use "/acp-rule remove <id>" or "/acp-rule clear" separately.';
+
+/** /acp-rule arg parsing (#537): exact "clear" clears all; exactly two tokens
+ *  "remove ruleN" removes by id; anything else records verbatim — so plain
+ *  rule texts that merely start with remove/clear-like words stay recordable.
+ *  Mixed operations in one call are rejected without mutating state. */
+function parseRuleCommand(raw: string): RuleCommandOp {
+  const arg = raw.trim();
+  if (arg === "") return { kind: "list" };
+  const tokens = arg.split(/\s+/);
+  let clearTokens = 0;
+  let removePairs = 0;
+  for (let i = 0; i < tokens.length; i++) {
+    if (tokens[i] === "clear") clearTokens++;
+    if (tokens[i] === "remove" && RULE_ID_RE.test(tokens[i + 1] ?? "")) removePairs++;
+  }
+  if (clearTokens > 0 && removePairs > 0 || clearTokens > 1 || removePairs > 1) {
+    return { kind: "conflict", reason: RULE_OP_CONFLICT };
+  }
+  if (arg === "clear") return { kind: "clear" };
+  if (tokens.length === 2 && tokens[0] === "remove" && RULE_ID_RE.test(tokens[1]!)) {
+    return { kind: "remove", id: tokens[1]! };
+  }
+  return { kind: "record", text: arg };
 }
 
 export function makeCommands(runtime: AcpRuntime, pi?: ExtensionAPI): Array<{ name: string; options: CommandOptions }> {
@@ -78,6 +113,64 @@ export function makeCommands(runtime: AcpRuntime, pi?: ExtensionAPI): Array<{ na
           }
           if (typeof pi?.sendMessage === "function") {
             pi.sendMessage({ customType: ACP_STATUS_CUSTOM_TYPE, content: text, display: true });
+            return;
+          }
+          ctx.ui.notify(text);
+        },
+      },
+    },
+    {
+      name: "acp-rule",
+      options: {
+        description:
+          "Manage persistent session rules (same rules the acp_rule feature keeps): list, record, remove by id, or clear all. " +
+          'Usage: /acp-rule [text to record] | /acp-rule remove <id> | /acp-rule clear',
+        handler: async (args, ctx) => {
+          if (runtime.adapter.rules !== true) {
+            ctx.ui.notify(
+              'Rules are not enabled — set "rules": true in acp.json (~/.pi/acp.json or project .pi/acp.json) to turn on persistent rules.',
+              "warning",
+            );
+            return;
+          }
+          const op = parseRuleCommand(args ?? "");
+          if (op.kind === "conflict") {
+            ctx.ui.notify(op.reason, "error");
+            return;
+          }
+          let text: string;
+          try {
+            const { state } = await runtime.stateFor(ctx);
+            if (op.kind === "list") {
+              const rules = listRules(state);
+              text = rules.length === 0 ? "No rules recorded." : formatRulesList(rules);
+            } else if (op.kind === "remove") {
+              const result = removeRule(state, op.id);
+              if (!result.ok) {
+                ctx.ui.notify(result.error, "error");
+                return;
+              }
+              await runtime.save(state, ctx);
+              text = `Removed ${result.rule.id}: ${result.rule.text}`;
+            } else if (op.kind === "clear") {
+              const result = clearRules(state);
+              await runtime.save(state, ctx);
+              text = result.count === 0 ? "No rules to clear." : `Cleared ${result.count} rule(s).`;
+            } else {
+              const result = addRule(state, op.text, resolveRuleLimits(runtime.configFor(ctx)));
+              if (!result.ok) {
+                ctx.ui.notify(result.error, "error");
+                return;
+              }
+              await runtime.save(state, ctx);
+              text = `Recorded ${result.rule.id}: ${result.rule.text}`;
+            }
+          } catch (e) {
+            ctx.ui.notify(e instanceof Error ? e.message : String(e), "error");
+            return;
+          }
+          if (typeof pi?.sendMessage === "function") {
+            pi.sendMessage({ customType: ACP_RULE_CUSTOM_TYPE, content: text, display: true });
             return;
           }
           ctx.ui.notify(text);

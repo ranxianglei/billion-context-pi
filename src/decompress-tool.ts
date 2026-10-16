@@ -3,8 +3,10 @@ import type { AgentToolResult, ExtensionContext, ToolDefinition } from "@earendi
 import type { AcpRuntime } from "./runtime.js";
 import { applyToolPromptOverrides, type ToolPromptOverrides } from "./surface.js";
 import { debug, logError, logInfo, logThrow } from "./log.js";
-import { parseBlockIdArg, collectBlockContent, type CompressionBlock } from "acp-kernel";
+import { parseBlockIdArg, collectBlockContent, markBlockRestoredInline, type CompressionBlock, type InlineRestoreResult } from "acp-kernel";
 import { entriesToCoreMessages } from "./messages.js";
+import { assertNotAborted } from "./abort.js";
+import { loadAncestorEntries, loadLiveRefEntries } from "./session-log.js";
 import { UNSUPPORTED_HOST_MESSAGE } from "./omp.js";
 import { writeFile, mkdir } from "node:fs/promises";
 import { existsSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
@@ -46,11 +48,11 @@ export function makeDecompressTool(runtime: AcpRuntime, overrides?: ToolPromptOv
       "Use full:true to recurse through all nested tiers to original messages.",
     ],
     parameters: DecompressParams,
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {
+    async execute(_toolCallId, params, signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {
       if (runtime.refused) return { details: undefined, content: [{ type: "text", text: runtime.refusalMessage ?? UNSUPPORTED_HOST_MESSAGE }] };
       let result: string;
       try {
-        result = await handleDecompress(params as DecompressArgs, runtime, ctx);
+        result = await handleDecompress(params as DecompressArgs, runtime, ctx, signal);
       } catch (e) {
         logThrow("decompress", e, { sid: ctx.sessionManager.getSessionId(), blockId: (params as DecompressArgs).blockId });
         throw e;
@@ -58,6 +60,17 @@ export function makeDecompressTool(runtime: AcpRuntime, overrides?: ToolPromptOv
       return { details: undefined, content: [{ type: "text", text: result }] };
     },
   }, overrides);
+}
+
+// #535 P2: close the loop on an inline restore — kernel K2 updates the
+// inline-restored block IN PLACE when re-compressed (same id, replaced
+// summary) instead of rejecting "already compressed". Degrades to a generic
+// hint when the kernel could not derive exact refs (e.g. multi-segment).
+function refoldHint(blockId: string, result: InlineRestoreResult | null): string {
+  if (result !== null && result.restoredStartRef && result.restoredEndRef) {
+    return `Re-fold: call compress("${result.restoredStartRef}–${result.restoredEndRef}", <fresh summary>) → updates block ${blockId} in place (same id, new summary).`;
+  }
+  return `Re-fold: call compress over the restored messages with a fresh summary → updates block ${blockId} in place (same id, new summary).`;
 }
 
 /** Allowed roots for toFile paths. Keeps user-supplied paths from escaping to
@@ -154,12 +167,19 @@ function findMessageContent(ref: string, ctx: ExtensionContext): { text: string;
  *  (no suffix), so both sides normalize to the base id before comparing.
  *  Re-projecting a fetched entry re-splits multi tool-call assistants back
  *  into `${entryId}#${callId}` CoreMessages, which match
- *  block.effectiveMessageIds verbatim in collectBlockContent's targetIds set. */
-function resolveBlockMessages(
+ *  block.effectiveMessageIds verbatim in collectBlockContent's targetIds set.
+ *  Third fallback (issue #531): a derived child session (Prime RLM inline)
+ *  inherits blocks whose message ids exist only in ANCESTOR session logs —
+ *  walk the parentSession header chain read-only for whatever is still missing.
+ *  Fourth fallback (issue #579): fork-host `live-*` refs are content aliases
+ *  that appear in NO jsonl as entry ids, so they are bridged through the
+ *  declaring session's sidecar (liveRefOrigins rawId→identity) back to the
+ *  log entry whose message identity matches, re-projected under the alias. */
+async function resolveBlockMessages(
   block: CompressionBlock,
   coreMessages: ReturnType<typeof entriesToCoreMessages>,
   ctx: ExtensionContext,
-): ReturnType<typeof entriesToCoreMessages> {
+): Promise<ReturnType<typeof entriesToCoreMessages>> {
   const neededBaseIds = new Set(block.effectiveMessageIds.map((id) => id.split("#")[0]!));
   const presentBaseIds = new Set(coreMessages.map((m) => m.id.split("#")[0]!));
   const missingBaseIds = [...neededBaseIds].filter((id) => !presentBaseIds.has(id));
@@ -170,7 +190,67 @@ function resolveBlockMessages(
     const entry = ctx.sessionManager.getEntry(baseId);
     if (entry) extra.push(...entriesToCoreMessages([entry]));
   }
+
+  const coveredBaseIds = new Set([...coreMessages, ...extra].map((m) => m.id.split("#")[0]!));
+  const stillMissing = [...neededBaseIds].filter((id) => !coveredBaseIds.has(id));
+  if (stillMissing.length > 0) {
+    // #579: live-* base ids are content aliases absent from every jsonl by
+    // construction — never feed them to the entry-id ancestor scan.
+    const ancestorMissing = stillMissing.filter((id) => !id.startsWith("live-"));
+    if (ancestorMissing.length > 0) {
+      const ancestors = await loadAncestorEntries(ctx.sessionManager.getSessionFile(), new Set(ancestorMissing));
+      if (ancestors.length > 0) {
+        logInfo("decompress", { sid: ctx.sessionManager.getSessionId(), event: "ancestor-fallback", missing: ancestorMissing.length, found: ancestors.length });
+        for (const entry of ancestors) extra.push(...entriesToCoreMessages([entry]));
+      }
+    }
+    const liveMissing = stillMissing.filter((id) => id.startsWith("live-"));
+    if (liveMissing.length > 0) {
+      const recovered = await loadLiveRefEntries(ctx.sessionManager.getSessionFile(), new Set(liveMissing));
+      if (recovered.size > 0) {
+        logInfo("decompress", { sid: ctx.sessionManager.getSessionId(), event: "live-ref-recovery", missing: liveMissing.length, found: recovered.size });
+        for (const [rawId, entry] of recovered) {
+          // Re-key onto the alias (preserving any #callId suffix) so
+          // collectBlockContent's target-id selection matches verbatim.
+          for (const cm of entriesToCoreMessages([entry])) {
+            extra.push({ ...cm, id: rawId + cm.id.slice(entry.id.length) });
+          }
+        }
+      }
+    }
+  }
   return [...coreMessages, ...extra];
+}
+
+/** Derived-child fallback for a single message ref (issue #531): the entry may
+ *  live only in an ancestor session's log (inherited block) — scan the
+ *  parentSession chain read-only. */
+async function findAncestorMessage(ref: string, ctx: ExtensionContext): Promise<{ text: string; role: string } | null> {
+  const baseId = ref.split("#")[0]!;
+  const ancestors = await loadAncestorEntries(ctx.sessionManager.getSessionFile(), new Set([baseId]));
+  for (const entry of ancestors) {
+    for (const cm of entriesToCoreMessages([entry])) {
+      if (cm.id === ref) return { text: cm.text ?? "", role: cm.role };
+    }
+  }
+  return null;
+}
+
+/** Fork-host live-ref fallback for a single message ref (issue #579): the ref
+ *  is a content alias whose real entry lives in the current or an ancestor
+ *  log under a stable id — bridge through the declaring sidecar's
+ *  liveRefOrigins (rawId→identity), then match the projected core carrying
+ *  the same #suffix as the requested ref. */
+async function findLiveRefMessage(ref: string, ctx: ExtensionContext): Promise<{ text: string; role: string } | null> {
+  const baseId = ref.split("#")[0]!;
+  const recovered = await loadLiveRefEntries(ctx.sessionManager.getSessionFile(), new Set([baseId]));
+  const entry = recovered.get(baseId);
+  if (!entry) return null;
+  const suffix = ref.slice(baseId.length);
+  for (const cm of entriesToCoreMessages([entry])) {
+    if (cm.id === entry.id + suffix) return { text: cm.text ?? "", role: cm.role };
+  }
+  return null;
 }
 
 /** Decompress a single message by its ref. Unlike block decompression (which
@@ -182,7 +262,13 @@ async function handleMessageRef(
   args: DecompressArgs,
   ctx: ExtensionContext,
 ): Promise<string> {
-  const found = findMessageContent(ref, ctx);
+  let found = findMessageContent(ref, ctx);
+  if (!found) {
+    const baseId = ref.split("#")[0]!;
+    // #579: live-* refs are never jsonl entry ids — the entry-id ancestor scan
+    // can only miss them; bridge through sidecar identities instead.
+    found = baseId.startsWith("live-") ? await findLiveRefMessage(ref, ctx) : await findAncestorMessage(ref, ctx);
+  }
   if (!found || !found.text) {
     return `Message ${ref} (in block ${ownerBlockId}) has no restorable text content in the session log.`;
   }
@@ -217,8 +303,10 @@ async function handleMessageRef(
   ].join("\n");
 }
 
-async function handleDecompress(args: DecompressArgs, runtime: AcpRuntime, ctx: ExtensionContext): Promise<string> {
+async function handleDecompress(args: DecompressArgs, runtime: AcpRuntime, ctx: ExtensionContext, signal?: AbortSignal): Promise<string> {
+  assertNotAborted(signal);
   const { state, coreMessages } = await runtime.stateFor(ctx);
+  assertNotAborted(signal);
   const arg = (args.blockId ?? "").trim();
 
   // Resolve what `arg` refers to. Check message-ref FIRST (data-driven: a ref
@@ -241,9 +329,11 @@ async function handleDecompress(args: DecompressArgs, runtime: AcpRuntime, ctx: 
 
   const full = args.full ?? false;
   // Resolve the block's message refs against the FULL session tree (falling
-  // back to getEntry for refs missing from the active branch), so decompress
-  // still restores original text after a tree navigation (undo/redo//tree).
-  const resolved = resolveBlockMessages(block, coreMessages, ctx);
+  // back to getEntry for refs missing from the active branch, then to ancestor
+  // session logs for derived children — issue #531), so decompress still
+  // restores original text after a tree navigation (undo/redo//tree) or in a
+  // child that inherited the block.
+  const resolved = await resolveBlockMessages(block, coreMessages, ctx);
   const { text, count } = collectBlockContent(state, block, resolved, { full });
 
   if (count === 0) return `Block ${blockId} has no restorable message content.`;
@@ -251,9 +341,13 @@ async function handleDecompress(args: DecompressArgs, runtime: AcpRuntime, ctx: 
   // inline mode: return content directly. Model explicitly accepts the context
   // cost (e.g. small restorations or when it must reason over exact text).
   if (args.inline === true && !args.toFile) {
-    debug.event("decompress", { blockId, full, count, mode: "inline" });
-    logInfo("decompress", { sid: ctx.sessionManager.getSessionId(), event: "block", mode: "inline", blockId, full, count });
-    return `Restored block ${blockId} (${count} item${count === 1 ? "" : "s"}) inline:\n\n${text}`;
+    // Flag the block as inline-restored (persisted) so a later compress may
+    // refold it in place (kernel K2), and surface the re-fold hint.
+    const marked = markBlockRestoredInline(state, blockId);
+    await runtime.save(marked.state, ctx);
+    debug.event("decompress", { blockId, full, count, mode: "inline", restoredStartRef: marked.result?.restoredStartRef ?? null, restoredEndRef: marked.result?.restoredEndRef ?? null });
+    logInfo("decompress", { sid: ctx.sessionManager.getSessionId(), event: "block", mode: "inline", blockId, full, count, refold: marked.result !== null });
+    return `Restored block ${blockId} (${count} item${count === 1 ? "" : "s"}) inline:\n\n${text}\n\n${refoldHint(blockId, marked.result)}`;
   }
 
   const targetPath = args.toFile
@@ -264,6 +358,7 @@ async function handleDecompress(args: DecompressArgs, runtime: AcpRuntime, ctx: 
     return targetPath.error;
   }
 
+  assertNotAborted(signal);
   await mkdir(AUTO_DIR, { recursive: true }).catch(() => {});
   await writeFile(targetPath, text, "utf8");
 

@@ -1386,9 +1386,19 @@ async function runDelegate(
           run.exitCode = code;
           run.exitSignal = signal ?? undefined;
           const output = applier.getReplyText().trim();
+          // #506: exit 0 with zero final reply text delivered nothing (thinking-only stop,
+          // silent no-op). It must surface as a loud FAILED run, not a plain "completed".
+          const noOutput = genuineNoOutput(code, Boolean(run.timedOut), output);
           let body: string;
-          if (code === 0) {
+          if (code === 0 && !noOutput) {
             body = output || "(no output)";
+          } else if (noOutput) {
+            const parts: string[] = [NO_FINAL_OUTPUT_BODY];
+            const err = stderrText.trim();
+            if (err) parts.push(`stderr:\n${err}`);
+            const tail = activityStream ? await readActivityTail(activityFile) : "";
+            if (tail) parts.push(`last activity (full log: \`${activityFile}\`)\n${tail}`);
+            body = parts.join("\n\n");
           } else {
             // Failed runs: compose a diagnostic body — stderr first (the usual
             // error channel), then the tail of the activity log (where the run
@@ -1422,8 +1432,13 @@ async function runDelegate(
             // when the reply text is empty so the delivered file is never blank.
             const file = replyFile;
             if (output === "") {
-              const fallback = stderrText.trim();
-              await appendFile(file, fallback ? `${fallback}\n` : "(no output)\n");
+              if (noOutput) {
+                const err = stderrText.trim();
+                await appendFile(file, `${NO_FINAL_OUTPUT_BODY}\n${err ? `\n${err}` : ""}\n`);
+              } else {
+                const fallback = stderrText.trim();
+                await appendFile(file, fallback ? `${fallback}\n` : "(no output)\n");
+              }
             }
             // EOF-watchdog finalize has no exit code; if the output was delivered,
             // treat it as a completed result (the process is killed afterwards).
@@ -1432,7 +1447,8 @@ async function runDelegate(
             // is still "running" to any observer, so a concurrent wait cannot
             // see "finished but result missing".
             run.result = { code, file, body };
-            run.status = effectiveCode === 0 ? "completed" : "failed";
+            run.status = effectiveCode === 0 && !noOutput ? "completed" : "failed";
+            if (noOutput) logWarn("delegate", { event: "no-final-output", runId, agent: args.agent, code });
             run.finishedAt = Date.now();
             // If a wait is parked on this run, wake it — it owns the result now
             // (and marks consumed so we don't double-deliver by injecting).
@@ -1551,10 +1567,16 @@ async function runDelegate(
   });
   const result = await waitForChild(child, signal, effectiveSyncMs);
   void cleanupTmp(tmpDir);
-  const body =
-    result.timedOut || result.code !== 0
-      ? (result.stderr.trim() || "(no stderr)")
-      : (result.stdout || "(no output)");
+  const syncNoOutput = genuineNoOutput(result.code, result.timedOut, result.stdout);
+  let body: string;
+  if (result.timedOut || result.code !== 0) {
+    body = result.stderr.trim() || "(no stderr)";
+  } else if (syncNoOutput) {
+    const err = result.stderr.trim();
+    body = err ? `${NO_FINAL_OUTPUT_BODY}\n\nstderr:\n${err}` : NO_FINAL_OUTPUT_BODY;
+  } else {
+    body = result.stdout;
+  }
   const file = await persistResult(runId, body);
   return formatSyncResult(args.agent, runId, taskText, result, file);
 }
@@ -1744,15 +1766,30 @@ export function asyncWatchdogDescription(overrideAsyncMs?: number | null): strin
   return `A watchdog force-finishes a hung run: ${joined} — the result reflects whatever was produced.`;
 }
 
-function formatSyncResult(agent: string, runId: string, task: string, r: ChildResult, file: string): string {
-  const status = r.timedOut ? "timed out" : r.code === 0 ? "completed" : "FAILED ⚠️";
+export function formatSyncResult(agent: string, runId: string, task: string, r: ChildResult, file: string): string {
+  const noOutput = genuineNoOutput(r.code, r.timedOut, r.stdout);
+  const status = r.timedOut ? "timed out" : r.code === 0 && !noOutput ? "completed" : "FAILED ⚠️";
   const header = `Delegate **${agent}** ${status} (runId \`${runId}\`, ${exitLabel(r.code, r.signal)}).`;
-  if (r.code === 0 && !r.timedOut) {
+  if (r.code === 0 && !r.timedOut && !noOutput) {
     return formatPayload(header, file, task);
   }
-  const body = r.timedOut ? "(timed out)" : (r.stderr.trim() || "(no stderr)");
+  const body = r.timedOut ? "(timed out)" : r.code === 0 ? NO_FINAL_OUTPUT_BODY : (r.stderr.trim() || "(no stderr)");
   return formatPayload(header, file, task, body);
 }
+
+/** Exit-0 runs that produced no final reply text did not deliver anything
+ *  actionable (#506): a thinking-only stop (thinking budget exhausted) or a
+ *  silent no-op termination must not be announced as a plain completion — the
+ *  parent would trust the notification and never re-dispatch the task. Real
+ *  non-zero exits and watchdog kills (code null / timedOut) are handled by the
+ *  existing failure paths and stay excluded here. */
+export function genuineNoOutput(code: number | null, timedOut: boolean, output: string): boolean {
+  return !timedOut && code === 0 && output.trim().length === 0;
+}
+
+export const NO_FINAL_OUTPUT_BODY =
+  "child exited 0 but produced NO final reply text — likely a thinking-only stop (thinking budget exhausted) " +
+  "or a no-op termination. Treat the task as NOT delivered: inspect the activity log and session file, then re-dispatch if needed.";
 
 /** Watchdog/EOF finalize arrives with code === null (the child was killed or
  *  never exited). If a result was delivered (non-empty reply or stderr), the

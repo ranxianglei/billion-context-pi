@@ -8,6 +8,14 @@
 
 ---
 
+## 社区
+
+QQ群:
+1056132097(已满)
+1108730198(未满)
+
+---
+
 ## 📄 论文 / 预印本
 
 - **[模型驱动的分层增量压缩:面向长寿命编码 Agent 的免训练多代上下文管理](./paper/模型驱动的分层增量压缩-免训练多代上下文管理.md)**(中文版,v0.2)
@@ -31,12 +39,6 @@
 ---
 
 > **宿主支持:** 本插件面向 **Pi**。它**不支持 OMP(oh-my-pi)** —— 在 OMP 宿主上会拒绝运行。OMP 用户请直接改用 [billion-context](https://github.com/ranxianglei/billion-context)(启动命令 bili omp);其他客户端的完整对照见[该选哪个?](#该选哪个)。OMP 详细说明:[docs/omp.zh-CN.md](./docs/omp.zh-CN.md)。
-
-## 社区
-
-交流、求助与更新都在 QQ——同一个群覆盖三个项目(`billion-context`、`billion-context-pi`、`opencode-acp`):
-
-**QQ 群:1056132097**
 
 ## 为什么选择 billion-context
 
@@ -145,11 +147,12 @@ billion-context-pi 面向 **Pi** 编码代理(`@earendil-works/pi-coding-agent`)
 | `decompress` | 恢复之前压缩的块内容 |
 | `search_context` | 按关键词搜索已压缩块摘要(及可见消息) |
 | `acp_status` | 显示上下文用量、已压缩块、可压缩范围 |
+| `acp_rule` | 记录一条简短、原则性的提醒,穿越压缩保留(可选:`"rules": true`) |
 | `acp_delegate` | 为某个任务派生一个干净上下文的子代理(审查 / 调研 / 实现 / 规划 / 建议) |
 | `acp_delegate_wait` | 阻塞等待委派任务完成(返回结果,否则超时) |
 | `acp_delegate_cancel` | 按 runId 取消正在运行的委派任务 |
 
-`acp_delegate*` 四个工具是可选的:如果你自带子代理扩展,一个 `acp.json` 键即可关闭 —— 见下文*改用你自己的子代理*。
+`acp_delegate*` 四个工具是可选的:如果你自带子代理扩展,一个 `acp.json` 键即可关闭 —— 见下文*改用你自己的子代理*。`acp_rule` 同样是可选项 —— 默认关闭,在 `acp.json` 中设置 `"rules": true` 启用。
 
 ### acp_delegate — 干净上下文委派
 
@@ -167,7 +170,7 @@ billion-context-pi 面向 **Pi** 编码代理(`@earendil-works/pi-coding-agent`)
 
 Worker 运行在 Pi 的完整默认工具集上 - 不应用 `--tools` 白名单,因此任何已加载的扩展或自定义工具(如 ACP、LSP、MCP)保持可用。这确保主任务委派能力完整。上表中的 `read, edit, write, bash` 仅反映核心工具。
 
-委派的完整结果保存到文件(`/tmp/acp-delegate/<runId>.out`);工具结果和注入通知只携带**任务标题 + 文件路径**(无预览)- 需要细节时用 `read` 读取。这让父上下文保持精简。
+委派的完整结果保存到文件(`$TMPDIR/acp-delegate/<runId>.out`,默认 `/tmp/acp-delegate/<runId>.out`);工具结果和注入通知只携带**任务标题 + 文件路径**(无预览)- 需要细节时用 `read` 读取。这让父上下文保持精简。
 
 - **交互(TUI)与 RPC 模式**:`async:true`(默认)在后台运行子进程;完成时一条简短通知注入到聊天框。
 - **Print / JSON 模式**(`pi -p`、SDK):`async:true` 自动降级为**同步** — 结果在同一轮作为工具结果返回(父进程一轮后即退出,后台注入会丢失)。
@@ -242,8 +245,9 @@ billion-context-pi 会向 `~/.pi/acp.log`(可用 `ACP_LOG_FILE` 覆盖)写入结
 - `warn` — 值得注意的非致命情况:紧急 nudge 注入、配置加载失败、自动更新网络错误、工具输出被截断、委派结果注入被跳过。
 - `info` — 生命周期事件:会话启动、每轮上下文变换摘要(消息数/token/压缩比/活跃块数)、压缩/解压、delegate 派发与完成、自动更新检查。
 - `debug` —— 仅在 `debug: true` 时额外写入(细粒度的字段级事件)。
+- **Nudge 审计轨迹** — 无论何时注入上下文限制 nudge,一条紧凑的单行记录(如 `[ACP nudge] EMERGENCY 95% · T1 · top range m00120–m00168`)会作为*仅供显示*的会话条目写入——它跨进程重启存活,在 TUI 回滚历史和会话文件中可见,且永远不会发给模型。
 
-每行格式:`<ISO 时间戳> [<级别>] [<范围>] key=value key=value`。文件达到 10 MB 时轮转为 `~/.pi/acp.log.old`。
+每行格式:`<ISO 时间戳> [<级别>] [<范围>] key=value key=value`。多行字段值(如 `nudge-injected` 中的完整 nudge 正文)会被转义(`\n` → 字面量 `\\n`),保证每条日志恰好占**一行物理行**,便于 `grep`。文件达到 10 MB 时轮转为 `~/.pi/acp.log.old`。
 
 ```bash
 tail -f ~/.pi/acp.log                 # 实时观察会话
@@ -256,11 +260,12 @@ grep '\[error\]' ~/.pi/acp.log        # 汇总所有记录的失败
 
 ### 哪些内容会被保护
 
-billion-context 保护三类内容不被压缩:
+billion-context 保护四类内容不被压缩:
 
 1. **永久保护的工具** — `compress` 调用被硬保护(它们是承载关键元数据的;压缩它们会破坏 decompress 和"摘要是历史"的契约)。
 2. **软近期区** — 最后 N 条消息(默认 5)和最后约 5K token 被软保护,让模型保留工作集。来自 `decompress`、`search_context`、`read`、`bash` 的工具结果被**排除**出此区:它们体量大、消费后就该能压缩,所以不该占用保护预算。
 3. **最后一条用户消息** — 始终保护(用户意图必须存活)。
+4. **用户配置的工具保护** — `acp.json` 中的 `protectedTools` / `protectedLatestTools` 硬排除匹配的工具 call+result(全历史 vs 仅最近一次;见 [CONFIGURATION.zh-CN.md](./CONFIGURATION.zh-CN.md))。
 
 ## 会话存储与迁移
 
@@ -272,6 +277,16 @@ billion-context-pi 把每个会话的压缩状态持久化在会话转录文件�
 | `<id>.jsonl.acp.json` | ACP 压缩状态(压缩块、消息引用、nudge 与统计) |
 
 `.acp.json` 旁挂文件承载了你的压缩块。没有它,会话就会以完整原始历史运行,直到 ACP 再次压缩。
+
+### 旁挂文件契约(下游工具)
+
+直接读取 `<sessionFile>.acp.json` 的工具(跨会话检索、记忆层等)依赖以下契约:
+
+- 文件顶层携带 `schemaVersion` 与 `producer`。**缺失 `schemaVersion` 即视为 v1**(契约引入前的旧文件)。遇到未知的*更高*版本意味着字段可能已变化——跳过该文件、记一次日志、绝不改写它。
+- `blocks[]` 条目符合导出的 `BcpBlockV1` 类型(kernel `CompressionBlock` 原样存储);未知的额外字段是增量式的,读取方必须忽略。
+- 文件始终以**原子方式**替换(临时文件 + rename),并发读取方看到的要么是前一个完整文件、要么是后一个完整文件,绝不会读到半截写入。
+
+TypeScript 中通过 `import type { BcpBlockV1 } from "billion-context-pi/contract"` 导入契约;离线校验用的 JSON Schema 以 `billion-context-pi/contract/schema` 子路径发布。无需任何运行时依赖——文件本身仍是唯一事实来源。
 
 ### 迁移会话(跨机器拷贝 / 备份恢复)
 

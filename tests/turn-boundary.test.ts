@@ -101,6 +101,42 @@ test("policy on: the latest injected custom_message becomes the boundary", () =>
   assert.equal(lastTurnBoundaryIndex(BATTERY, { countCustomMessages: true }), BATTERY.findIndex((e) => e.id === "c2"));
 });
 
+// Prime's genuine host-turn injection types (#578).
+const PRIME_TURN_TYPES = ["agent_message", "async_bash_completion", "rlm_child_terminal_notice", "heartbeat_prompt"];
+const typed = (id: string, customType: string, content = "injected"): TurnBoundaryEntry => ({ type: "custom_message", id, customType, content });
+
+test("isTurnBoundary: customMessageTypes allowlist refines the opt-in (#578)", () => {
+  const policy = { countCustomMessages: true, customMessageTypes: PRIME_TURN_TYPES };
+  for (const t of PRIME_TURN_TYPES) {
+    assert.equal(isTurnBoundary(typed("a1", t), policy), true, `${t} is a real host turn`);
+  }
+  assert.equal(isTurnBoundary(typed("d1", "harness_digest"), policy), false, "metadata injection starts no turn");
+  assert.equal(isTurnBoundary(typed("s1", "ipython_state"), policy), false);
+  assert.equal(isTurnBoundary(custom("b1"), policy), false, "entry without customType never matches an allowlist");
+});
+
+test("isTurnBoundary: allowlist alone does not opt in (#578)", () => {
+  assert.equal(isTurnBoundary(typed("a1", "agent_message"), { customMessageTypes: PRIME_TURN_TYPES }), false);
+});
+
+test("isTurnBoundary: UI-only types stay excluded even when listed in the allowlist (#578)", () => {
+  assert.equal(isTurnBoundary(statusPanel("p1"), { countCustomMessages: true, customMessageTypes: [ACP_STATUS_CUSTOM_TYPE] }), false);
+});
+
+test("issue #578 repro: harness_digest no longer resets the boundary", () => {
+  const entries: TurnBoundaryEntry[] = [user("u1"), typed("a1", "agent_message"), typed("d1", "harness_digest")];
+  assert.equal(lastTurnBoundaryId(entries, { countCustomMessages: true }), "d1", "pre-#578 behavior: every non-empty injection counts");
+  assert.equal(lastTurnBoundaryId(entries, { countCustomMessages: true, customMessageTypes: PRIME_TURN_TYPES }), "a1");
+  assert.equal(lastTurnBoundaryIndex(entries, { countCustomMessages: true, customMessageTypes: PRIME_TURN_TYPES }), 1);
+});
+
+test("consistency: id view and index view agree under an allowlist policy (#578)", () => {
+  const policy = { countCustomMessages: true, customMessageTypes: ["agent_message"] };
+  const idx = lastTurnBoundaryIndex(BATTERY, policy);
+  assert.ok(idx >= 0);
+  assert.equal(lastTurnBoundaryId(BATTERY, policy), BATTERY[idx]?.id);
+});
+
 test("lastTurnBoundaryId: migrated legacy expectations hold under default policy", () => {
   const entries: TurnBoundaryEntry[] = [
     { id: "a", message: { role: "user" } },

@@ -6,6 +6,7 @@ import { createAcpExtension } from "../src/index.js";
 import { listSessions, exportSession, parseExportArgs } from "../src/export.js";
 import { isCompressSuccessText } from "../src/compress-tool.js";
 import { createInitialState } from "acp-kernel";
+import { tmpPath } from "./tmp-path.js";
 
 function captureApi() {
   const handlers = new Map<string, ((event: any, ctx: any) => any)[]>();
@@ -102,7 +103,7 @@ test("parseExportArgs parses selector, --full, and --output", () => {
 });
 
 test("listSessions returns ACP-managed sessions with id, title, and block count", async () => {
-  const dir = "/tmp/pai-acp-export-list";
+  const dir = tmpPath("pai-acp-export-list");
   const stateFile = `${dir}/test-session.jsonl`;
   await mkdir(dir, { recursive: true });
   await setupSession(stateFile);
@@ -114,7 +115,7 @@ test("listSessions returns ACP-managed sessions with id, title, and block count"
 });
 
 test("exportSession with no selector lists persisted sessions", async () => {
-  const dir = "/tmp/pai-acp-export-noselector";
+  const dir = tmpPath("pai-acp-export-noselector");
   const stateFile = `${dir}/test-session.jsonl`;
   await mkdir(dir, { recursive: true });
   await setupSession(stateFile);
@@ -126,7 +127,7 @@ test("exportSession with no selector lists persisted sessions", async () => {
 });
 
 test("exportSession renders the folded view (summary in place of the compressed range)", async () => {
-  const dir = "/tmp/pai-acp-export-folded";
+  const dir = tmpPath("pai-acp-export-folded");
   const stateFile = `${dir}/test-session.jsonl`;
   await mkdir(dir, { recursive: true });
   await setupSession(stateFile);
@@ -139,7 +140,7 @@ test("exportSession renders the folded view (summary in place of the compressed 
 });
 
 test("exportSession --full renders the original messages", async () => {
-  const dir = "/tmp/pai-acp-export-full";
+  const dir = tmpPath("pai-acp-export-full");
   const stateFile = `${dir}/test-session.jsonl`;
   await mkdir(dir, { recursive: true });
   await setupSession(stateFile);
@@ -150,7 +151,7 @@ test("exportSession --full renders the original messages", async () => {
 });
 
 test("exportSession --output writes the markdown file", async () => {
-  const dir = "/tmp/pai-acp-export-output";
+  const dir = tmpPath("pai-acp-export-output");
   const stateFile = `${dir}/test-session.jsonl`;
   const out = `${dir}/nested/handoff.md`;
   await mkdir(dir, { recursive: true });
@@ -163,7 +164,7 @@ test("exportSession --output writes the markdown file", async () => {
 });
 
 test("exportSession throws when no session matches the selector", async () => {
-  const dir = "/tmp/pai-acp-export-nomatch";
+  const dir = tmpPath("pai-acp-export-nomatch");
   const stateFile = `${dir}/test-session.jsonl`;
   await mkdir(dir, { recursive: true });
   await setupSession(stateFile);
@@ -171,14 +172,14 @@ test("exportSession throws when no session matches the selector", async () => {
 });
 
 test("exportSession reports an empty store", async () => {
-  const dir = "/tmp/pai-acp-export-empty";
+  const dir = tmpPath("pai-acp-export-empty");
   await mkdir(dir, { recursive: true });
   const text = await exportSession(undefined, {}, dir);
   assert.match(text, /No ACP-managed sessions found/);
 });
 
 test("exportSession throws on an ambiguous selector", async () => {
-  const dir = "/tmp/pai-acp-export-ambig";
+  const dir = tmpPath("pai-acp-export-ambig");
   await mkdir(dir, { recursive: true });
   for (const id of ["sess-a", "sess-b"]) {
     await writeSessionFile(`${dir}/${id}.jsonl`, id, [userMsg("m1", "hello world")]);
@@ -188,7 +189,7 @@ test("exportSession throws on an ambiguous selector", async () => {
 });
 
 test("/acp-export command is registered and lists, folds, and expands", async () => {
-  const dir = "/tmp/pai-acp-export-cmd";
+  const dir = tmpPath("pai-acp-export-cmd");
   const stateFile = `${dir}/test-session.jsonl`;
   await mkdir(dir, { recursive: true });
   const { api, ctx, notifies } = await setupSession(stateFile);

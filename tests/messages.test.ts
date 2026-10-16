@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { entriesToCoreMessages, coreOutToAgentMessages, isCustomMessageEntry, matchesStoredText, messageIdentity, ACP_STATUS_CUSTOM_TYPE, ACP_EXPORT_CUSTOM_TYPE } from "../src/messages.js";
+import { entriesToCoreMessages, coreOutToAgentMessages, isCustomMessageEntry, matchesStoredText, messageIdentity, ACP_STATUS_CUSTOM_TYPE, ACP_EXPORT_CUSTOM_TYPE, ACP_RULE_CUSTOM_TYPE } from "../src/messages.js";
 import { isTurnBoundary } from "../src/turn-boundary.js";
 import type { CoreMessage } from "acp-kernel";
 import type { SessionEntry, SessionMessageEntry } from "@earendil-works/pi-coding-agent";
@@ -206,17 +206,18 @@ test("entriesToCoreMessages drops custom_message with non-text-only array conten
   assert.equal(core.length, 0, "non-text array content yields empty text → skipped");
 });
 
-test("entriesToCoreMessages drops acp-status panels and acp-export docs (UI-only, never sent to model)", () => {
+test("entriesToCoreMessages drops acp-status panels, acp-export docs and acp-rule reports (UI-only, never sent to model)", () => {
   const entries: SessionEntry[] = [
     msgEntry("a", user("before")),
     customEntry("b", ACP_STATUS_CUSTOM_TYPE, "╭── ACP ──╮\npanel body"),
     customEntry("e", ACP_EXPORT_CUSTOM_TYPE, "# billion-context session handoff\n- session id: x"),
+    customEntry("f", ACP_RULE_CUSTOM_TYPE, "1. [rule1] always run typecheck"),
     customEntry("c", "subagent_result", "other custom messages still project"),
     msgEntry("d", user("after")),
   ];
   const core = entriesToCoreMessages(entries);
 
-  assert.deepEqual(core.map((m) => m.id), ["a", "c", "d"], "acp-status panel and acp-export doc excluded, other custom messages kept");
+  assert.deepEqual(core.map((m) => m.id), ["a", "c", "d"], "acp-status panel, acp-export doc and acp-rule report excluded, other custom messages kept");
 });
 
 test("custom_message round-trip: entriesToCoreMessages → collectOriginals → coreOutToAgentMessages preserves user role", () => {

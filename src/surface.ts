@@ -1,9 +1,7 @@
 import { readFileSync } from "node:fs";
-import * as path from "node:path";
-import { homedir } from "node:os";
 import type { TSchema } from "typebox";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { CONFIG_DIR_NAME } from "./config-dir.js";
+import { acpJsonFiles } from "./config-dir.js";
 import type { AdapterConfig } from "./config.js";
 import { sanitizePromptSections, type PiPromptSections } from "./system-prompt.js";
 
@@ -87,11 +85,10 @@ export function applyToolPromptOverrides<TParams extends TSchema>(def: ToolDefin
 }
 
 export function readToolSurfaceSync(cwd: string): ToolPromptsConfig {
-  const home = homedir();
   let out: ToolPromptsConfig = {};
-  for (const base of [path.join(home, CONFIG_DIR_NAME), path.join(cwd, CONFIG_DIR_NAME)]) {
+  for (const file of acpJsonFiles(cwd)) {
     try {
-      const parsed: unknown = JSON.parse(readFileSync(path.join(base, "acp.json"), "utf8"));
+      const parsed: unknown = JSON.parse(readFileSync(file, "utf8"));
       if (parsed && typeof parsed === "object") {
         const tp = (parsed as Record<string, unknown>).toolPrompts;
         if (tp) out = sanitizeToolPrompts(tp);

@@ -6,7 +6,7 @@ import * as path from "node:path";
 import { defaultPrompts } from "acp-kernel";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createAcpExtension } from "../src/index.js";
-import { buildAcpSystemPrompt } from "../src/system-prompt.js";
+import { buildAcpSystemPrompt, SECTION_KEYS } from "../src/system-prompt.js";
 import { leanPack, resolveSurfaceMeta } from "../src/prompt-pack.js";
 import {
   isValidPackName,
@@ -220,6 +220,16 @@ test("piAdapterSurface sanitizes junk: bad section types dropped, malformed extr
   assert.equal(s.delegatePrompt, "D");
 });
 
+test("piAdapterSurface pass-through: every kernel-shipped tri-state value on a pi key survives untouched", () => {
+  const sections: Record<string, string | null> = {};
+  let i = 0;
+  for (const key of SECTION_KEYS) {
+    sections[key] = i++ % 2 === 0 ? `V${key}` : null;
+  }
+  const pack: Pack = { name: "t", source: "test", surface: { adapters: { pi: { promptSections: sections } } } };
+  assert.deepEqual(piAdapterSurface(pack).promptSections, sections);
+});
+
 test("readToolSurfaceWithPacks applies base pack under inline (per-field, per-param)", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "acp-toolsurf-"));
   try {
@@ -234,7 +244,7 @@ test("readToolSurfaceWithPacks applies base pack under inline (per-field, per-pa
     );
     const out = readToolSurfaceWithPacks(dir);
     assert.equal(out.compress?.promptSnippet, "inline-snip");
-    assert.equal(out.compress?.description, "Replace consumed conversation ranges with self-contained summaries using mNNNNN or bN refs.");
+    assert.equal(out.compress?.description, "Replace consumed conversation ranges with self-contained summaries using mNNNNN or bN refs; batch multiple ranges into ONE call (a single string may hold every range).");
     assert.equal(out.compress?.paramDescriptions?.startId, "inline-start");
     assert.equal(out.compress?.paramDescriptions?.endId, "Inclusive last mNNNNN or bN ref.");
     assert.deepEqual(out.compress?.promptGuidelines, []);

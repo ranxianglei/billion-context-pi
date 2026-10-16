@@ -121,10 +121,23 @@ test("loadUserConfig reads outputHeadroomMaxPct (ratio and percent string)", asy
 test("loadUserConfig reads hostSession (object form survives pickKnown)", async () => {
   const tmpDir = path.join(os.tmpdir(), `acp-test-hostsession-${Date.now()}`);
   await fs.mkdir(tmpDir, { recursive: true });
-  await writeConfig(tmpDir, { hostSession: { countCustomMessages: true }, unknownKey: "nope" });
+  await writeConfig(tmpDir, { hostSession: { countCustomMessages: true, customMessageTypes: ["agent_message"] }, unknownKey: "nope" });
   try {
     const config = await loadUserConfig(tmpDir);
-    assert.deepEqual(config.hostSession, { countCustomMessages: true }, "hostSession is a known key");
+    assert.deepEqual(config.hostSession, { countCustomMessages: true, customMessageTypes: ["agent_message"] }, "hostSession object form passes through verbatim");
+    assert.equal((config as Record<string, unknown>).unknownKey, undefined, "unknown keys still filtered");
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("loadUserConfig reads rules (boolean survives pickKnown)", async () => {
+  const tmpDir = path.join(os.tmpdir(), `acp-test-rules-${Date.now()}`);
+  await fs.mkdir(tmpDir, { recursive: true });
+  await writeConfig(tmpDir, { rules: true, unknownKey: "nope" });
+  try {
+    const config = await loadUserConfig(tmpDir);
+    assert.equal(config.rules, true, "rules is a known key");
     assert.equal((config as Record<string, unknown>).unknownKey, undefined, "unknown keys still filtered");
   } finally {
     await fs.rm(tmpDir, { recursive: true, force: true });
@@ -213,6 +226,7 @@ test("applyUserConfig supports all user config keys", () => {
     toolBashDefaultTimeout: 120,
     toolOutputMaxBytes: 100_000,
     outputHeadroomMaxPct: 0.1,
+    rules: true,
   };
   const result = applyUserConfig(adapter, user);
   assert.equal(result.debug, true);
@@ -222,4 +236,121 @@ test("applyUserConfig supports all user config keys", () => {
   assert.equal(result.toolBashDefaultTimeout, 120);
   assert.equal(result.toolOutputMaxBytes, 100_000);
   assert.equal(result.outputHeadroomMaxPct, 0.1);
+  assert.equal(result.rules, true);
+});
+
+test("loadUserConfig picks up protection keys from acp.json", async () => {
+  const tmpDir = path.join(os.tmpdir(), `acp-test-protect-${Date.now()}`);
+  await fs.mkdir(tmpDir, { recursive: true });
+  try {
+    await writeConfig(tmpDir, { protectedTools: ["skill"], protectedLatestTools: ["read_*"] });
+    const config = await loadUserConfig(tmpDir);
+    assert.deepEqual(config.protectedTools, ["skill"]);
+    assert.deepEqual(config.protectedLatestTools, ["read_*"]);
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("applyUserConfig lets user protection keys override adapter values", () => {
+  const adapter: AdapterConfig = { protectedTools: ["read"], protectedLatestTools: ["write"] };
+  const user = { protectedTools: ["skill"], protectedLatestTools: ["grep_*"] };
+  const result = applyUserConfig(adapter, user);
+  assert.deepEqual(result.protectedTools, ["skill"], "user protectedTools wins");
+  assert.deepEqual(result.protectedLatestTools, ["grep_*"], "user protectedLatestTools wins");
+});
+
+test("applyUserConfig keeps adapter protection values when user does not set them", () => {
+  const adapter: AdapterConfig = { protectedTools: ["read"], protectedLatestTools: ["write"] };
+  const result = applyUserConfig(adapter, {});
+  assert.deepEqual(result.protectedTools, ["read"]);
+  assert.deepEqual(result.protectedLatestTools, ["write"]);
+});
+
+test("applyUserConfig trims protection entries", () => {
+  const result = applyUserConfig({}, { protectedTools: [" skill ", "skill_*"] });
+  assert.deepEqual(result.protectedTools, ["skill", "skill_*"]);
+});
+
+test("malformed protection values in acp.json warn and fall back instead of failing", async () => {
+  const tmpDir = path.join(os.tmpdir(), `acp-test-badprotect-${Date.now()}`);
+  await fs.mkdir(tmpDir, { recursive: true });
+  try {
+    for (const body of [
+      '{ "protectedTools": "skill" }',
+      '{ "protectedTools": [] }',
+      '{ "protectedTools": [42] }',
+      '{ "protectedTools": [" "] }',
+      '{ "protectedTools": null }',
+      '{ "protectedLatestTools": "read" }',
+    ]) {
+      const cfgDir = path.join(tmpDir, CONFIG_DIR_NAME);
+      await fs.mkdir(cfgDir, { recursive: true });
+      await fs.writeFile(path.join(cfgDir, "acp.json"), body, "utf8");
+      const user = await loadUserConfig(tmpDir);
+      const result = applyUserConfig({ protectedTools: ["fallback"], protectedLatestTools: ["fallback*"] }, user);
+      assert.deepEqual(result.protectedTools, ["fallback"], `malformed ${body} falls back to adapter value`);
+      assert.deepEqual(result.protectedLatestTools, ["fallback*"], `malformed ${body} leaves other key untouched`);
+    }
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+// --- neverPreserveRecentTools (empty array is a VALID escape hatch) ---------
+
+test("loadUserConfig picks up neverPreserveRecentTools from acp.json", async () => {
+  const tmpDir = path.join(os.tmpdir(), `acp-test-npr-${Date.now()}`);
+  await fs.mkdir(tmpDir, { recursive: true });
+  try {
+    await writeConfig(tmpDir, { neverPreserveRecentTools: ["decompress", "search_context", "bash"] });
+    const config = await loadUserConfig(tmpDir);
+    assert.deepEqual(config.neverPreserveRecentTools, ["decompress", "search_context", "bash"]);
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("applyUserConfig accepts an EMPTY neverPreserveRecentTools array (unlike the protection keys)", () => {
+  const result = applyUserConfig({}, { neverPreserveRecentTools: [] });
+  assert.deepEqual(result.neverPreserveRecentTools, [], "[] is the max-protection escape hatch, not a malformed value");
+});
+
+test("applyUserConfig trims neverPreserveRecentTools and lets the user override the adapter", () => {
+  const result = applyUserConfig(
+    { neverPreserveRecentTools: ["read", "bash"] },
+    { neverPreserveRecentTools: [" decompress ", "search_context", "bash"] },
+  );
+  assert.deepEqual(result.neverPreserveRecentTools, ["decompress", "search_context", "bash"]);
+});
+
+test("applyUserConfig keeps the adapter neverPreserveRecentTools when the user value is malformed", () => {
+  const result = applyUserConfig({ neverPreserveRecentTools: ["read"] }, { neverPreserveRecentTools: [42] });
+  assert.deepEqual(result.neverPreserveRecentTools, ["read"], "malformed user value falls back to adapter value");
+});
+
+test("applyUserConfig drops malformed neverPreserveRecentTools when no adapter value exists", () => {
+  const result = applyUserConfig({}, { neverPreserveRecentTools: "read" });
+  assert.equal(result.neverPreserveRecentTools, undefined);
+});
+
+// --- preserveRecentTools (positive knob; EMPTY array is INVALID here) -------
+
+test("applyUserConfig trims preserveRecentTools and lets the user override the adapter", () => {
+  const result = applyUserConfig(
+    { preserveRecentTools: ["bash"] },
+    { preserveRecentTools: [" read "] },
+  );
+  assert.deepEqual(result.preserveRecentTools, ["read"]);
+});
+
+test("applyUserConfig REJECTS an EMPTY preserveRecentTools array (no-op, unlike the never-list)", () => {
+  const result = applyUserConfig({ preserveRecentTools: ["read"] }, { preserveRecentTools: [] });
+  assert.deepEqual(result.preserveRecentTools, ["read"], "[] is a pure no-op — falls back to adapter, not accepted");
+});
+
+test("applyUserConfig keeps the adapter preserveRecentTools when the user value is malformed", () => {
+  const result = applyUserConfig({ preserveRecentTools: ["read"] }, { preserveRecentTools: [42] });
+  assert.deepEqual(result.preserveRecentTools, ["read"]);
+  assert.equal(applyUserConfig({}, { preserveRecentTools: "read" }).preserveRecentTools, undefined);
 });

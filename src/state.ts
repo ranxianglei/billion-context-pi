@@ -3,8 +3,9 @@ import * as path from "node:path";
 import { createInitialState, type AbsorbRecord, type CompressionState } from "acp-kernel";
 import { logError, logInfo, logWarn } from "./log.js";
 import type { RolloverPending } from "./rollover.js";
+import { SIDECAR_SCHEMA_VERSION, sidecarProducer } from "./contract.js";
 
-const STATE_SUFFIX = ".acp.json";
+export const STATE_SUFFIX = ".acp.json";
 
 export interface LiveRefOrigin {
   rawId: string;
@@ -75,7 +76,13 @@ export class SessionStateStore {
     if (file) {
       try {
         const raw = await fs.readFile(file, "utf8");
-        const parsed = JSON.parse(raw) as CompressionState & { liveRefOrigins?: unknown; rolloverPending?: unknown; derivedFrom?: unknown; activePack?: unknown };
+        const parsed = JSON.parse(raw) as CompressionState & { liveRefOrigins?: unknown; rolloverPending?: unknown; derivedFrom?: unknown; activePack?: unknown; schemaVersion?: unknown; producer?: unknown };
+        // #368: an unknown NEWER schema means a future writer touched the
+        // file. Best-effort read (same producer family), one warning — but we
+        // never rewrite structures we do not understand beyond the v1 fields.
+        if (typeof parsed.schemaVersion === "number" && parsed.schemaVersion > SIDECAR_SCHEMA_VERSION) {
+          logWarn("state", { event: "schema-newer", file, schemaVersion: parsed.schemaVersion, known: SIDECAR_SCHEMA_VERSION });
+        }
         if (parsed && Array.isArray(parsed.blocks)) {
           state = mergeInitialState(parsed);
           liveRefOrigins = parseLiveRefOrigins(parsed.liveRefOrigins);
@@ -134,7 +141,13 @@ export class SessionStateStore {
     });
     const tmp = path.join(dir, `.acp-tmp-${path.basename(file)}`);
     try {
-      const payload: Record<string, unknown> = { ...state, liveRefOrigins };
+      // #368 contract headers last: state fields can never clobber them.
+      const payload: Record<string, unknown> = {
+        ...state,
+        liveRefOrigins,
+        schemaVersion: SIDECAR_SCHEMA_VERSION,
+        producer: sidecarProducer(),
+      };
       if (derivedFrom) payload.derivedFrom = derivedFrom;
       if (activePack) payload.activePack = activePack;
       if (rolloverPending) payload.rolloverPending = rolloverPending;
@@ -237,12 +250,19 @@ export function deriveChildState(parent: CompressionState): CompressionState {
     absorbed: [],
     rules: structuredClone(parent.rules ?? []),
     nextRuleId: parent.nextRuleId ?? fresh.nextRuleId,
+    // Ref space is NOT re-issued on derive (byRaw/byRef carry verbatim), so the
+    // image ledgers stay valid for inherited content: imageShrinks gates
+    // image_full for inherited shrunk refs, imageFullRestored keeps
+    // parent-restored refs at full resolution. The kernel's MUST-clear
+    // (resetImageFullState) applies only to ref-reissue resets.
+    imageFullRestored: structuredClone(parent.imageFullRestored ?? []),
+    imageShrinks: structuredClone(parent.imageShrinks ?? []),
     nextBlockId: parent.nextBlockId,
     nextRunId: parent.nextRunId,
   };
 }
 
-function parseLiveRefOrigins(value: unknown): LiveRefOrigin[] {
+export function parseLiveRefOrigins(value: unknown): LiveRefOrigin[] {
   if (!Array.isArray(value)) return [];
   return value.filter((item): item is LiveRefOrigin => {
     if (!item || typeof item !== "object") return false;

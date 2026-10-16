@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { resolvePiCliEntry } from "../src/delegate-tool.js";
 
 const REL = join("@earendil-works", "pi-coding-agent", "dist", "cli.js");
@@ -13,8 +13,27 @@ function globalPiInstalled(): boolean {
   return ["/usr/local/lib", "/usr/lib"].some((p) => existsSync(join(p, "node_modules", REL)));
 }
 
+// Fixtures must have NO node_modules ancestor, or the upward pi probe finds a
+// real install and defeats the fallback-under-test (#545: $TMPDIR inside a repo tree).
+function isolatedRoot(): string {
+  let base = tmpdir();
+  for (;;) {
+    let dirty = false;
+    for (let d = base; ; ) {
+      if (existsSync(join(d, "node_modules"))) { dirty = true; break; }
+      const parent = dirname(d);
+      if (parent === d) break;
+      d = parent;
+    }
+    if (!dirty) return base;
+    const parent = dirname(base);
+    if (parent === base) throw new Error(`no node_modules-free ancestor of ${tmpdir()}`);
+    base = parent;
+  }
+}
+
 function makeTree(rel: string): string {
-  const base = mkdtempSync(join(tmpdir(), "acp-entry-"));
+  const base = mkdtempSync(join(isolatedRoot(), "acp-entry-"));
   const cli = join(base, rel);
   mkdirSync(join(cli, ".."), { recursive: true });
   writeFileSync(cli, "");
@@ -50,7 +69,7 @@ test("embedded host probes upward from argv[1] (pi-web: next bin finds pi-coding
 });
 
 test("global install candidates are probed when upward probe fails", () => {
-  const base = mkdtempSync(join(tmpdir(), "acp-entry-global-"));
+  const base = mkdtempSync(join(isolatedRoot(), "acp-entry-global-"));
   try {
     let env: NodeJS.ProcessEnv;
     let expected: string;
@@ -73,7 +92,7 @@ test("global install candidates are probed when upward probe fails", () => {
 });
 
 test("unresolvable pi host falls back to argv[1] (never worse than status quo)", { skip: globalPiInstalled() }, () => {
-  const argv1 = join(tmpdir(), "acp-entry-nohit", "bin", "server.js");
+  const argv1 = join(isolatedRoot(), "acp-entry-nohit", "bin", "server.js");
   assert.equal(resolvePiCliEntry(argv1, {}, true), argv1);
 });
 

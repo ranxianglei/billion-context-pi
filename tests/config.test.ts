@@ -477,3 +477,60 @@ test("resolveHostSession falls back to off for invalid values", () => {
   assert.deepEqual(resolveHostSession({ hostSession: "yes" as unknown as boolean }), { countCustomMessages: false });
   assert.deepEqual(resolveHostSession({ hostSession: { countCustomMessages: "yes" as unknown as boolean } }), { countCustomMessages: false });
 });
+
+test("resolveHostSession passes a valid customMessageTypes allowlist through (#578)", () => {
+  const r = resolveHostSession({ hostSession: { countCustomMessages: true, customMessageTypes: ["agent_message", "heartbeat_prompt"] } });
+  assert.equal(r.countCustomMessages, true);
+  assert.deepEqual(r.customMessageTypes, ["agent_message", "heartbeat_prompt"]);
+});
+
+test("resolveHostSession drops an orphaned customMessageTypes without countCustomMessages (#578)", () => {
+  const r = resolveHostSession({ hostSession: { customMessageTypes: ["agent_message"] } });
+  assert.deepEqual(r, { countCustomMessages: false }, "allowlist alone does not opt in");
+});
+
+test("resolveHostSession drops malformed customMessageTypes values (#578)", () => {
+  const bad = (v: unknown) => resolveHostSession({ hostSession: { countCustomMessages: true, customMessageTypes: v as string[] } });
+  assert.deepEqual(bad("agent_message"), { countCustomMessages: true }, "non-array falls back to all types counting");
+  assert.deepEqual(bad(["agent_message", 42]), { countCustomMessages: true }, "non-string member rejected");
+  assert.deepEqual(bad([""]), { countCustomMessages: true }, "empty-string member rejected");
+  assert.deepEqual(bad(null), { countCustomMessages: true }, "null rejected");
+});
+
+test("resolveHostSession honors an empty allowlist as explicit count-none (#578)", () => {
+  const r = resolveHostSession({ hostSession: { countCustomMessages: true, customMessageTypes: [] } });
+  assert.deepEqual(r, { countCustomMessages: true, customMessageTypes: [] });
+});
+
+test("resolveConfig forwards protection keys into the kernel config", () => {
+  const cfg = resolveConfig({ protectedTools: ["skill"], protectedLatestTools: ["read_*"] }, 200_000);
+  assert.deepEqual(cfg.protectedTools, ["skill"]);
+  assert.deepEqual(cfg.protectedLatestTools, ["read_*"]);
+});
+
+test("resolveConfig defaults protection keys to empty when unset", () => {
+  const cfg = resolveConfig(EMPTY, 200_000);
+  assert.deepEqual(cfg.protectedTools, []);
+  assert.deepEqual(cfg.protectedLatestTools, []);
+});
+
+// --- neverPreserveRecentTools (kernel >= 0.0.92, bili #1277) ----------------
+
+test("resolveConfig passes neverPreserveRecentTools verbatim, [] included", () => {
+  const cfg = resolveConfig({ neverPreserveRecentTools: ["decompress", "search_context", "bash"] }, 200_000);
+  assert.deepEqual(cfg.neverPreserveRecentTools, ["decompress", "search_context", "bash"]);
+  // [] is the max-protection escape hatch — must survive, not fall back to the kernel built-in.
+  assert.deepEqual(resolveConfig({ neverPreserveRecentTools: [] }, 200_000).neverPreserveRecentTools, []);
+});
+
+test("resolveConfig leaves neverPreserveRecentTools undefined so the kernel built-in list governs", () => {
+  assert.equal(resolveConfig({}, 200_000).neverPreserveRecentTools, undefined);
+});
+
+// --- preserveRecentTools (kernel >= 0.0.93, bili #1277) ---------------------
+
+test("resolveConfig passes preserveRecentTools verbatim (the one-entry #1198/#1277 remedy)", () => {
+  const cfg = resolveConfig({ preserveRecentTools: ["read"] }, 200_000);
+  assert.deepEqual(cfg.preserveRecentTools, ["read"]);
+  assert.equal(resolveConfig({}, 200_000).preserveRecentTools, undefined, "unset → no subtraction, kernel built-in governs");
+});

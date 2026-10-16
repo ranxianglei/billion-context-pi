@@ -10,6 +10,14 @@ The model decides <em>when</em> and <em>what</em> to compress — not a hard lim
 
 ---
 
+## Community
+
+QQ Group:
+1056132097 (full)
+1108730198 (open)
+
+---
+
 ## 📄 Paper / Preprint
 
 - **[Model-Driven Incremental Hierarchical Compression: Training-Free Multi-Generational Context Management for Long-Lived Coding Agents](./paper/model-driven-incremental-hierarchical-compression-training-free-multi-generational-context-management-for-long-lived-coding-agents.md)** (English, v0.2)
@@ -33,12 +41,6 @@ A production-scale longitudinal study: 4.5 months, three hosts, 174,327 model ca
 ---
 
 > **Host support:** this plugin is for **Pi**. It does **not** support **OMP (oh-my-pi)** — on an OMP host it refuses to run. OMP users: use [billion-context](https://github.com/ranxianglei/billion-context) instead (`bili omp`, built-in plugin). Full client → package table: see [Which do I need?](#which-do-i-need); OMP details: [docs/omp.md](./docs/omp.md).
-
-## Community
-
-Discussion, help, and updates on QQ — one group covers all three projects (`billion-context`, `billion-context-pi`, `opencode-acp`):
-
-**QQ Group: 1056132097**
 
 ## Why?
 
@@ -117,6 +119,16 @@ This has two practical implications:
 
 2. **Even with a single compression plugin, interference is still possible in rare cases.** Load order under Pi is determined by filesystem discovery order (`fs.readdirSync` over `.pi/extensions/` → global → packages), which is not fully deterministic. If another (non-compression) extension also hooks the `context` event and happens to load *after* billion-context-pi, it could modify the compressed output. billion-context-pi rebuilds its working set from the session log rather than the chained input, which makes it robust to handlers that run *before* it — but it cannot defend against a handler that runs *after* it. This is a limitation of Pi's extension model; if you observe unexpected context behavior, check whether other installed extensions intercept the `context` event.
 
+### Sidecar contract (downstream tools)
+
+Compression state lives next to the session log in `<sessionFile>.acp.json`. For tools that read it directly (cross-session retrieval, memory layers):
+
+- The file carries `schemaVersion` and `producer` at the top level. **A missing `schemaVersion` means v1.** An unknown *newer* version means fields may have changed — skip the file, log once, never rewrite it.
+- `blocks[]` entries match the exported `BcpBlockV1` type (kernel `CompressionBlock` verbatim); unknown extra fields are additive and must be ignored.
+- The file is always replaced **atomically** (temp file + rename), so a concurrent reader sees either the previous or the next complete file, never a torn write.
+
+Import the contract from TypeScript via `import type { BcpBlockV1 } from "billion-context-pi/contract"`; a JSON Schema for offline validation is published as the `billion-context-pi/contract/schema` subpath. No runtime dependency is required — the file remains the source of truth.
+
 ## Host support
 
 billion-context-pi is built for the **Pi** coding agent (`@earendil-works/pi-coding-agent`) and detects the host at session start — the full client → package table lives in [Which do I need?](#which-do-i-need):
@@ -147,11 +159,12 @@ billion-context-pi is built for the **Pi** coding agent (`@earendil-works/pi-cod
 | `search_context` | Search compressed block summaries (and visible messages) by keyword |
 | `acp_status` | Show context usage, compressed blocks, compressible ranges |
 | `acp_cache` | Prompt-cache reconciliation: grand ledger (input/cached/hit rate), per-request miss attribution, per-fold economics |
+| `acp_rule` | Record a short, principle-level reminder that survives compression (opt-in: `"rules": true`) |
 | `acp_delegate` | Spawn a clean-context sub-agent for a task (review / research / implement / plan / advise) |
 | `acp_delegate_wait` | Block until a delegate run finishes (returns its result; times out otherwise) |
 | `acp_delegate_cancel` | Cancel a running delegate by runId |
 
-The four `acp_delegate*` tools are optional: if you bring your own sub-agent extension, disable them with one `acp.json` key — see *Using your own sub-agent instead* below.
+The four `acp_delegate*` tools are optional: if you bring your own sub-agent extension, disable them with one `acp.json` key — see *Using your own sub-agent instead* below. `acp_rule` is likewise opt-in — off by default, enable it with `"rules": true`.
 
 ### acp_delegate — clean-context delegation
 
@@ -169,7 +182,7 @@ Read-only roles (reviewer, researcher, planner, oracle) receive a restricted too
 
 Worker runs on Pi's full default toolset - no `--tools` allowlist is applied, so any loaded extension or custom tools (e.g. ACP, LSP, MCP) remain available. This keeps primary-task delegation fully capable. The `read, edit, write, bash` listing above reflects core tools only.
 
-The full delegate result is saved to a file (`/tmp/acp-delegate/<runId>.out`); the tool result and injected notification carry only the **task title + file path** (no preview) - use `read` for the details. This keeps the parent context lean.
+The full delegate result is saved to a file (`$TMPDIR/acp-delegate/<runId>.out`, defaulting to `/tmp/acp-delegate/<runId>.out`); the tool result and injected notification carry only the **task title + file path** (no preview) - use `read` for the details. This keeps the parent context lean.
 
 - **Interactive (TUI) & RPC modes**: `async:true` (default) runs the child in the background; a short completion notification is injected into the chat when it finishes — **unless the model already read the result file after the run finished** (detected via the `read` tool or a bash command referencing the file), in which case the notification is skipped: the model already has the result, so re-injecting it would only waste context. Set `delegate: { notifyIfRead: "always" }` in `acp.json` to restore the always-inject behavior.
 - **Print / JSON modes** (`pi -p`, SDK): `async:true` auto-downgrades to **synchronous** — the result returns as the tool result in the same turn (the parent exits after one turn, so background injection would be lost).
@@ -244,7 +257,9 @@ billion-context-pi writes a structured, always-on log to `~/.pi/acp.log` (overri
 - **Always written** (even with `debug: false`): `error`, `warn`, `info` levels — session start, every context turn (token usage / nudge decision), compress/decompress, delegate spawn/done, and **all errors and warnings** (config/state/tool failures, delegate errors, guardrail caps, update failures). Error lines include the message and stack trace.
 - **Written only when `debug: true`**: verbose `debug`-level diagnostics (full field dumps, per-turn internals).
 
-Each line: `<ISO timestamp> [<level>] [<scope>] key=value key=value`. The file rotates to `~/.pi/acp.log.old` at 10 MB.
+- **Nudge audit trail**: whenever a context-limit nudge is injected, a compact one-line record (e.g. `[ACP nudge] EMERGENCY 95% · T1 · top range m00120–m00168`) is appended as a *display-only* session entry — it survives process restarts, shows up in TUI scrollback and the session file, and is never sent to the model.
+
+Each line: `<ISO timestamp> [<level>] [<scope>] key=value key=value`. Multi-line values (e.g. the full nudge text in `nudge-injected`) are escaped (`\n` → literal `\\n`), so every entry occupies exactly **one physical line** and stays self-contained for `grep`. The file rotates to `~/.pi/acp.log.old` at 10 MB.
 
 ```sh
 tail -f ~/.pi/acp.log                 # watch the session live
@@ -257,11 +272,12 @@ The model receives detailed guidance (in its system prompt) on **when** to compr
 
 ### What gets protected
 
-billion-context protects three categories of content from compression:
+billion-context protects four categories of content from compression:
 
 1. **Always-protected tools** — `compress` calls are hard-protected (they're load-bearing metadata; compressing them breaks decompress and the "summary is historical" contract).
 2. **Soft recent-zone** — the last N messages (default 5) and last ~5K tokens are soft-protected so the model keeps its working set. Tool results from `decompress`, `search_context`, `read`, and `bash` are **excluded** from this zone: they're large and meant to be compressible once consumed, so they don't eat the protected budget.
 3. **Last user message** — always protected (user intent must survive).
+4. **User-configured tool protection** — `protectedTools` / `protectedLatestTools` in `acp.json` hard-exclude matched tool calls+results (full history vs. latest-only; see [CONFIGURATION.md](./CONFIGURATION.md)).
 
 ## Session storage & migration
 

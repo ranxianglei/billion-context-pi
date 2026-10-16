@@ -4,11 +4,10 @@ import type {
   ExtensionFactory,
   SessionMessageEntry,
 } from "@earendil-works/pi-coding-agent";
-import { CONFIG_DIR_NAME } from "./config-dir.js";
-import type { KeyId } from "@earendil-works/pi-tui";
+import { acpJsonFiles } from "./config-dir.js";
+import { parseAcpJson } from "./user-config.js";
+import { Box, Text, type KeyId } from "@earendil-works/pi-tui";
 import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
 import type { CoreMessage, NudgeDecision, CompressionBlock, Prompts } from "acp-kernel";
 import { renderNudgeText, resolvePrompts, defaultPrompts, viableRanges } from "acp-kernel";
 import { type AdapterConfig, resolveDelegate, resolveRollover, resolveHostSession, DEFAULT_DELEGATE_POLICY } from "./config.js";
@@ -19,23 +18,26 @@ import { makeDecompressTool } from "./decompress-tool.js";
 import { makeSearchTool } from "./search-tool.js";
 import { makeStatusTool } from "./status-tool.js";
 import { makeCacheTool } from "./cache-tool.js";
+import { makeRuleTool } from "./rule-tool.js";
 import { makeDelegateTool, makeDelegateWaitTool, makeDelegateCancelTool, runningRunsSnapshot, resetDelegateUsage, setDelegateDisplayUsage, setDelegatePolicy, setDelegateDefaults, setDelegateNotifyIfRead, markDelegateResultRead, markDelegateRunReadByCommand } from "./delegate-tool.js";
 import { makeCommands } from "./commands.js";
 import { mergeSurface, readToolSurfaceWithPacks, resolveActivePack, resolvePackName, surfaceMetaOf } from "./prompt-pack.js";
 import type { NudgeSectionsConfig } from "./surface.js";
-import { coreOutToAgentMessages, extractText } from "./messages.js";
-import { liveOnlyTail } from "./live-only-tail.js";
+import { coreOutToAgentMessages, extractText, ACP_NUDGE_CUSTOM_TYPE, type AcpNudgeRecord } from "./messages.js";
+import { liveOnlyTailCached, dropLiveOnlyTailCache } from "./live-only-tail.js";
 import { carryHostSystemMessages } from "./system-passthrough.js";
+import { sanitizeToolPairing } from "./tool-pair-sanitizer.js";
 import { countThinkingChars, dropCompressReasoning } from "./reasoning-drop.js";
 import { collapseAssistantDegeneration, degenerationNotice, lastAssistantRuns, resolveDegenerationGuard } from "./degeneration.js";
 import { buildAcpSystemPrompt, ACP_DELEGATE_PROMPT, ROLLOVER_PROMPT_SECTION } from "./system-prompt.js";
 import { delegateStatusWidget } from "./fleet-widget.js";
 import { openFleetInspector } from "./fleet-inspector.js";
+import { applyStripImages } from "./strip-images.js";
 import { wireToolGuardrails } from "./tool-guardrails.js";
 import { debug, logError, logInfo, logWarn, logThrow, closeLogStream } from "./log.js";
-import { collectCoveredMessageIds, estimateTokens, collectImageTokens, modelSupportsImages, sentViewTokenCount } from "./tokens.js";
+import { collectCoveredMessageIds, estimateTokens, collectImageTokens, modelSupportsImages, sentViewTokenCount, sentViewMeterMatches } from "./tokens.js";
 import { lastTurnBoundaryId, lastTurnBoundaryIndex } from "./turn-boundary.js";
-import { usageAnchorPredatesCompression } from "./floor-stale.js";
+import { compressionAnchorStaleness } from "./floor-stale.js";
 import { findHiddenPendingCompressCalls, mergeRestoredMessages, pendingHasWork, rolloverReportText, runRollover, shouldRollover, type RolloverResult } from "./rollover.js";
 import { checkForUpdate } from "./update.js";
 import {
@@ -49,7 +51,7 @@ import {
 } from "./throttle-retry.js";
 import { defaultCountTokens } from "acp-kernel";
 import { formatSystemPromptForEvent, getSystemPromptText } from "./compat.js";
-import { applyOutputHeadroom, inspectOverflowMessage, resolveOutputHeadroomCap } from "./overflow-selfheal.js";
+import { applyOutputHeadroom, inspectOverflowMessage, isNoBody4xxError, resolveOutputHeadroomCap } from "./overflow-selfheal.js";
 import { FORK_HOST_WARNING_MESSAGE, UNSUPPORTED_HOST_MESSAGE } from "./omp.js";
 import { isDeclaredForkHost, isUnsupportedHost } from "./host.js";
 import { isBiliProxyBaseUrl, PROXY_STAND_DOWN_MESSAGE, nativeStandDownMessage } from "./proxy-detect.js";
@@ -120,6 +122,7 @@ export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactor
     wireDelegateReadTracking(pi);
     wireSessionLifecycle(pi, runtime, standDownIfProxied);
     wireContextTransform(pi, runtime, standDownIfProxied);
+    wireBeforeProviderRequest(pi, runtime, standDownIfProxied);
     wireSystemPrompt(pi, runtime);
     wireToolGuardrails(pi, runtime);
     wireOverflowSelfHeal(pi, runtime);
@@ -133,6 +136,7 @@ export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactor
     for (const { name, options } of makeCommands(runtime, pi)) {
       pi.registerCommand(name, options);
     }
+    wireNudgeRecords(pi);
   };
 }
 
@@ -144,18 +148,36 @@ export default createAcpExtension();
 // no tools, no system prompt, no context transform, and no compaction-cancel,
 // leaving Pi's native context management in control (issue #250: models too
 // small to handle ACP). Project acp.json overrides global; only a literal
-// enabled:true/false counts; missing/bad files mean "not disabled".
+// enabled:true/false counts; missing files mean "not disabled", while bad
+// files are repaired when possible and otherwise warned about loudly (#467).
 function userConfigDisabled(cwd: string): boolean {
   let disabled: boolean | undefined;
-  for (const base of [join(homedir(), CONFIG_DIR_NAME), join(cwd, CONFIG_DIR_NAME)]) {
+  for (const file of acpJsonFiles(cwd)) {
+    let text: string;
     try {
-      const parsed: unknown = JSON.parse(readFileSync(join(base, "acp.json"), "utf8"));
-      if (parsed && typeof parsed === "object") {
-        const v = (parsed as Record<string, unknown>).enabled;
-        if (v === true || v === false) disabled = v;
-      }
+      text = readFileSync(file, "utf8");
     } catch {
-      // missing file / bad JSON → not disabled
+      continue; // missing file → nothing to say
+    }
+    // #467: hand-edited configs commonly carry BOM heads, unquoted keys, or
+    // trailing commas (Windows notepad defaults). Strict JSON.parse made every
+    // one of those silently mean "not disabled" — the exact opposite of the
+    // user's intent. parseAcpJson repairs the common shapes and warns loudly
+    // on whatever still fails instead of swallowing it.
+    const r = parseAcpJson(file, text);
+    if (r.status === "failed") {
+      console.warn(`[bcp] ${r.reason}`);
+      continue;
+    }
+    if (r.status === "repaired") {
+      console.warn(`[bcp] ${r.reason}`);
+    }
+    if (r.value) {
+      const v = r.value.enabled;
+      if (v === true || v === false) disabled = v;
+      else if (v !== undefined) {
+        console.warn(`[bcp] ${file}: enabled must be the literal boolean true/false, got ${JSON.stringify(v)} — ignoring. ACP stays enabled.`);
+      }
     }
   }
   return disabled === false;
@@ -218,16 +240,15 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
       }
       return;
     }
-    // Declared fork hosts are admitted but carry a known limitation (#454):
-    // their in-process live-entries integration can drift the nudge's example
-    // refs from the session's real refs as the session grows, so compress
-    // calls may start failing with "does not exist in this session". Warn at
-    // admission instead of letting users discover it mid-session; root fix is
-    // tracked in #459. Log per session (support logs need the attribution),
-    // notify once per process like the refusal path above.
+    // Declared fork hosts are admitted with a caveat (#454/#459): live-tail
+    // refs are content-stable while the host's view grows append-only; a host
+    // that rewrites in-flight messages can still drift them, so warn at
+    // admission and point long sessions at the proxy. Log per session (support
+    // logs need the attribution), notify once per process like the refusal
+    // path above.
     if (isDeclaredForkHost() && !isPiHost(ctx.sessionManager)) {
       const sid = ctx.sessionManager.getSessionId();
-      logWarn("host", { event: "fork-host-admitted", sid, knownLimitation: "ref-drift", seeIssue: "#454", rootFix: "#459" });
+      logWarn("host", { event: "fork-host-admitted", sid, hardening: "#459", proxy: "billion-context" });
       if (!forkWarned) {
         forkWarned = true;
         if (ctx.hasUI) ctx.ui.notify(FORK_HOST_WARNING_MESSAGE, "warning");
@@ -240,7 +261,13 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     runtime.throttleFor(ctx.sessionManager.getSessionId()).reset();
     runtime.clearCompressRetryTracking(ctx.sessionManager.getSessionId());
     runtime.dropHostUsageSamples(ctx.sessionManager.getSessionId());
+    runtime.dropKhat(ctx.sessionManager.getSessionId());
     runtime.dropSizeDivergence(ctx.sessionManager.getSessionId());
+    runtime.dropTerminalEscape(ctx.sessionManager.getSessionId());
+    runtime.dropTruncationSkipped(ctx.sessionManager.getSessionId());
+    runtime.dropSentViewCount(ctx.sessionManager.getSessionId());
+    runtime.dropProjectionCache(ctx.sessionManager.getSessionId());
+    dropLiveOnlyTailCache(ctx.sessionManager.getSessionId());
     resetDelegateUsage();
     setDelegateDisplayUsage("separate");
     setDelegatePolicy(DEFAULT_DELEGATE_POLICY);
@@ -314,6 +341,11 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     if (resolveRollover(runtime.adapter).enabled) {
       pi.registerTool(makeAbsorbTool(runtime));
     }
+    // #433: opt-in record tool (default off). Registered here, not at factory
+    // load, because the gate is user config applied in reloadConfig above.
+    if (runtime.adapter.rules === true) {
+      pi.registerTool(makeRuleTool(runtime));
+    }
     // Headless hosts exit as soon as the turn ends; awaiting the check keeps
     // the process alive until a running install finishes. TUI stays
     // fire-and-forget so interactive startup is never blocked by npm.
@@ -334,7 +366,13 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     runtime.clearNudgeTracking(sid);
     runtime.clearCompressRetryTracking(sid);
     runtime.dropHostUsageSamples(sid);
+    runtime.dropKhat(sid);
     runtime.dropSizeDivergence(sid);
+    runtime.dropTerminalEscape(sid);
+    runtime.dropTruncationSkipped(sid);
+    runtime.dropSentViewCount(sid);
+    runtime.dropProjectionCache(sid);
+    dropLiveOnlyTailCache(sid);
     delegateStatusWidget.dispose();
     closeLogStream();
   });
@@ -347,6 +385,32 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
 // degeneration (different count/char) re-notifies. Per-process, like the
 // other one-shot warn flags (ompWarned, proxyStandDownWarned).
 let lastDegNoticeKey: string | null = null;
+
+// Opt-in wire-level strip of historical image payloads (issue #321, kernel
+// #215). pi serializes the provider request body from the (already transformed)
+// messages and fires before_provider_request with the RAW payload right before
+// the HTTP call — the same wire point the billion-context proxy strips at. We
+// only touch the body when the policy is enabled AND something was actually
+// removed; returning undefined keeps pi's payload reference untouched.
+function wireBeforeProviderRequest(pi: ExtensionAPI, runtime: AcpRuntime, standDownIfProxied: (ctx: ExtensionContext) => boolean): void {
+  pi.on("before_provider_request", async (event, ctx) => {
+    if (runtime.refused) return;
+    if (standDownIfProxied(ctx)) return;
+    const settings = runtime.stripImagesFor(ctx);
+    if (!settings.enabled) return;
+    const outcome = applyStripImages(event.payload, (ctx.model as { api?: string } | undefined)?.api, settings);
+    if (outcome.removed > 0) {
+      logInfo("strip-images", {
+        sid: ctx.sessionManager.getSessionId(),
+        event: "stripped",
+        removed: outcome.removed,
+        keepRecent: settings.keepRecent,
+      });
+      return outcome.body;
+    }
+    return;
+  });
+}
 
 // The core integration: Pi's `context` event fires before every LLM call with the
 // messages about to be sent. We run acp-kernel's processTurn (prune + ref-tag +
@@ -406,20 +470,41 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
       const systemPromptTokens = systemPromptText ? defaultCountTokens(systemPromptText) : 0;
       const imageTokens = collectImageTokens(entries, modelSupportsImages(ctx.model));
       const sentTokens = estimateTokens(coreMessages, coveredIds, imageTokens) + systemPromptTokens;
-      // Floors (raise-only, applied to whichever base wins below): the host's
-      // real context usage (issue #257/#258 — anchored on the last assistant's
-      // provider-reported usage + trailing estimate; skipped while the anchor
-      // predates a successful compress, floor-stale.ts) and the armed self-heal
-      // 95% floor after an upstream overflow. Captured once so both bases see
-      // identical floors; ov.armed is consumed exactly once either way.
+      // Self-heal (armed): after an overflow, force this turn's usage to >=95%
+      // so the kernel's emergency nudge + tool-result truncate fire immediately,
+      // even if the estimate under-reports the sent view. Consumed exactly once.
       let armedFloor = 0;
       if (ov.armed && config.modelContextLimit > 0) {
         ov.armed = false;
         armedFloor = Math.floor(config.modelContextLimit * 0.95);
         logWarn("overflow-selfheal", { sid, event: "armed-emergency", floor: armedFloor, limit: config.modelContextLimit });
       }
-      const hostFloorActive = !usageAnchorPredatesCompression(entries);
-      const realPromptTokens = realUsage?.tokens ?? 0;
+      // Host floor (#257/#258): the provider's real prompt size, anchored on the
+      // last assistant's provider-reported usage + trailing estimate. While the
+      // anchor predates a successful compress its raw value still reflects the
+      // pre-compression request, so subtract the tokens genuinely freed since
+      // it (issue #325, floor-stale.ts) instead of skipping the floor entirely —
+      // the skip dropped the meter onto the undercounting estimate (~70-80K low)
+      // and the next fresh reading snapped it back into the emergency band.
+      const { predates, netReclaimed, fresh, lastRealTokens } = compressionAnchorStaleness(entries, state.blocks, defaultCountTokens);
+      // issue #600: when the previous model turn yielded no fresh provider usage
+      // (errored / aborted / zero-usage — e.g. a network "fetch failed"), the host's
+      // getContextUsage() has no anchor and reports the raw session-tree total
+      // (uncompressed, only grows). Flooring at that transient inflation drags the
+      // raise-only meter into the emergency band and drives redundant compresses
+      // (each "recovers" once a fresh reading lands). Reject it: floor at the last
+       // REAL provider reading instead, and suspend the downward calibration below —
+       // a stale reading must not cap the current estimate down, or growth since
+       // that reading would be hidden. Fresh turns take this path unchanged. With NO
+       // prior anchor at all nothing has ever been compressed, so the tree-sum carries
+       // no ACP inflation and IS the true size — keep trusting it (rejecting it would
+       // drop the floor to 0, blinding the meter and its terminal-escape backstop).
+       const reportedHost = realUsage?.tokens ?? 0;
+       const realPromptTokens = fresh || lastRealTokens <= 0 ? reportedHost : lastRealTokens;
+       if (!fresh && lastRealTokens > 0 && reportedHost > 0) {
+        logInfo("turn", { sid, event: "host-tree-sum-rejected", reported: reportedHost, flooredAt: lastRealTokens });
+      }
+      const hostFloor = realPromptTokens > 0 ? Math.max(0, realPromptTokens - (predates ? netReclaimed : 0)) : 0;
       // Calibration anchor (issue #455): the estimate carries systematic phantom
       // mass (content counted locally that never goes on the wire) which the
       // raise-only floors below can never pull down — in #452 the meter ran
@@ -430,38 +515,82 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
       // pre-send prediction for growth beyond the lagged-by-one-response
       // measurement. Stale or jittering measurements fall back to the raw
       // estimate; the divergence watch below keeps that fallback visible.
-      const hostUsageStable = hostFloorActive && realPromptTokens > 0 ? runtime.noteHostUsage(sid, realPromptTokens) : false;
+      const hostUsageStable = fresh && !predates && realPromptTokens > 0 ? runtime.noteHostUsage(sid, realPromptTokens) : false;
+      // k̂ calibration (#598 root fix, borrowed from billion-context#1940 F1):
+      // the usage report that just arrived settles the PREVIOUS request — pair
+      // it with the estimate recorded for that request to learn the
+      // local→provider ratio (deflate-only, published only when two settled
+      // samples agree). A published k̂ replaces the ×1.2 cap as the meter's
+      // ruler: one learned continuous ruler instead of two raw ones
+      // max-arbitrated, so equality-line jitter stops pretending to be a scale
+      // change. scaleChanged (model switch, publish, disagreement clear) is
+      // the genuine transition the growth guard re-anchors on below.
+      // (#601 union) the learner is gated on fresh: on errored turns this value
+      // is the replayed lastRealTokens (#600), not a new settlement — feeding
+      // it would duplicate samples and pair stale usage with the current
+      // request's estimate, corrupting the learned ratio.
+      const khatReport = fresh && realPromptTokens > 0
+        ? runtime.noteKhatUsage(sid, modelId, realPromptTokens)
+        : { khat: runtime.khatFor(sid, modelId), scaleChanged: false };
       const calibrate = (base: number): number =>
-        hostUsageStable ? Math.min(base, Math.ceil(realPromptTokens * 1.2)) : base;
-      const applyFloors = (base: number): number => Math.max(calibrate(base), hostFloorActive ? realPromptTokens : 0, armedFloor);
+        khatReport.khat !== null ? Math.ceil(base * khatReport.khat)
+          : hostUsageStable ? Math.min(base, Math.ceil(realPromptTokens * 1.2)) : base;
+      const applyFloors = (base: number): number => Math.max(calibrate(base), hostFloor, armedFloor);
+      // Basis for the no-body-4xx overflow guard (wireOverflowSelfHeal): the
+      // sent-view estimate of the request about to be sent, on the same scale
+      // as the turn log below — but WITHOUT the armed 95% floor: that floor is
+      // an artifact of a prior arm, not evidence of size, and feeding it back
+      // into the ratio guard would re-arm unconditionally right after any
+      // emergency.
+      const guardBasis = (base: number): number => Math.max(calibrate(base), hostFloor);
       let tokenCount = applyFloors(sentTokens);
+      let guardTokens = guardBasis(sentTokens);
       // View-based recount (issue #289): the raw-view estimate counts uncovered
       // messages that prune strips from the sent view every turn (orphaned tool
       // pairs straddling block boundaries, absorbed/filtered messages) — in long
       // multi-block sessions that pins tokenCount far above reality, holding
       // usage in the emergency band and driving low/zero-yield compression loops.
-      // Re-measure on the actual post-processTurn view and adopt it when the two
-      // diverge beyond noise (the probe runs on a clone; see sentViewTokenCount).
+      // Issue #561: re-measuring that view used to cost a second full processTurn
+      // (structuredClone + whole-history pass) EVERY turn. Steady state now adopts
+      // the previous turn's exact measured view (recorded after the real pass
+      // below) whenever the signature matches; the probe only runs to resync —
+      // first turn, structural change (compress/decompress/window), or after a
+      // truncation-band turn whose output under-reports.
       if (state.blocks.some((b) => b.active && b.effectiveMessageIds.length > 0)) {
-        const view = sentViewTokenCount(runtime.core, coreMessages, state, config, tokenCount, imageTokens, systemPromptTokens);
-        if (view.drifted) {
-          tokenCount = applyFloors(view.viewTokens);
-          logInfo("turn", { sid, event: "view-recount", prelim: sentTokens, viewTokens: view.viewTokens, tokenCount });
+        const meter = runtime.peekSentViewCount(sid);
+        if (meter && sentViewMeterMatches(meter, state, config)) {
+          if (Math.abs(meter.viewTokens - sentTokens) > Math.max(1000, 0.1 * sentTokens)) {
+            tokenCount = applyFloors(meter.viewTokens);
+            guardTokens = guardBasis(meter.viewTokens);
+            logInfo("turn", { sid, event: "view-recount", source: "prev-turn", prelim: sentTokens, viewTokens: meter.viewTokens, tokenCount });
+          }
+        } else {
+          const view = sentViewTokenCount(runtime.core, coreMessages, state, config, tokenCount, imageTokens, systemPromptTokens);
+          if (view.drifted) {
+            tokenCount = applyFloors(view.viewTokens);
+            guardTokens = guardBasis(view.viewTokens);
+            logInfo("turn", { sid, event: "view-recount", source: "probe", prelim: sentTokens, viewTokens: view.viewTokens, tokenCount });
+          }
         }
       }
+      ov.noteSentView(guardTokens, config.modelContextLimit);
       // Divergence watch (issue #455): persistent >2x disagreement between the
       // internal meter and the FRESH provider measurement means calibration
       // could not engage (stale anchor or jittering usage) — warn once per
       // episode instead of silently driving every threshold off the wrong ruler.
       // With calibration engaged the capped tokenCount stays within 20% of the
       // measurement, so this only fires in the fallback states it diagnoses.
-      const sizeDivergent = hostFloorActive && realPromptTokens > 0 && Math.abs(tokenCount - realPromptTokens) / realPromptTokens > 0.5;
+      const sizeDivergent = fresh && !predates && realPromptTokens > 0 && Math.abs(tokenCount - realPromptTokens) / realPromptTokens > 0.5;
       if (runtime.noteSizeDivergence(sid, sizeDivergent)) {
         logWarn("turn", { sid, event: "size-divergence", est: tokenCount, host: realPromptTokens, ratio: Number((tokenCount / realPromptTokens).toFixed(2)), stable: hostUsageStable });
       }
-      // Growth scale guard (issue #267, re-anchored in #455): the meter switches
-      // rulers when the anchor flips stale↔not-stale (estimate ↔ provider). A
-      // growth delta spanning that switch is a false artifact, not real growth.
+      // Growth scale guard (issue #267, re-anchored in #455, hysteresis in #598):
+      // the meter switches rulers when one ruler clearly overtakes the other
+      // (hostFloor vs sentTokens, not raw staleness — a stale anchor whose adjusted
+      // floor still dominates is not a switch, #325). A growth delta spanning that
+      // switch is a false artifact, not real growth. Near-tied rulers jitter across
+      // the equality line turn-to-turn; without the dead-band every micro-crossing
+      // re-anchored the baselines and growth could never reach growthFloor (#598).
       // Zeroing the baselines (the original fix) re-armed the kernel's one-shot
       // first-sight-mass bypass on EVERY flip (it requires
       // lastNudgeShownTokens === 0 && baseline === 0) — flips happen twice per
@@ -471,7 +600,11 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
       // reference resets to zero, cadence baselines stay meaningful on the new
       // ruler, and the mass bypass keeps its consumed state. Genuine cold starts
       // (references already 0) are untouched and keep their one-shot.
-      if (runtime.noteTokenScale(sid, !hostFloorActive)) {
+      // With a published k̂ (root fix for #598) the meter runs on one learned
+      // ruler and the dead-band tracks its calibrated base; the flip then only
+      // fires while k̂ is unpublished or mid-relearn.
+      const estFlipped = runtime.noteTokenScale(sid, hostFloor, calibrate(sentTokens));
+      if (khatReport.scaleChanged || estFlipped) {
         state.nudge.lastNudgeShownTokens = state.nudge.lastNudgeShownTokens > 0 ? tokenCount : 0;
         state.nudge.lastPerMessageNudgeTokens = state.nudge.lastPerMessageNudgeTokens > 0 ? tokenCount : 0;
         const reanchored: Record<number, number> = {};
@@ -480,7 +613,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
         }
         state.nudge.lastShownByTier = reanchored;
         runtime.clearNudgeTokenStamps(sid);
-        logInfo("growth-scale", { sid, event: "scale-flip-reanchor", anchorStale: !hostFloorActive, tokenCount });
+        logInfo("growth-scale", { sid, event: "scale-flip-reanchor", source: khatReport.scaleChanged ? "khat" : "dead-band", khat: khatReport.khat, estScaleWins: sentTokens >= hostFloor, predates, hostFloor, sentTokens, tokenCount });
       }
       debug.event("context-in", {
         sid,
@@ -497,6 +630,55 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
 
       let turn = runtime.core.processTurn({ messages: coreMessages, state, config, tokenCount });
       await runtime.save(turn.state, ctx);
+
+      // Issue #561: measure the EXACT view that just went out (turn.messages is
+      // the pruned, summary-injected projection the provider receives) and
+      // record it as next turn's recount source — this is what lets the probe
+      // processTurn above stay on the resync-only path. Unusable when this turn
+      // ran in the truncate band (output may be post-truncation → under-reports).
+      const truncateBand = config.modelContextLimit > 0 ? Math.floor(config.truncate.threshold * config.modelContextLimit) : Number.MAX_SAFE_INTEGER;
+      const sentViewTokens = estimateTokens(turn.messages, collectCoveredMessageIds(turn.state), imageTokens) + systemPromptTokens;
+      runtime.noteSentViewCount(sid, {
+        viewTokens: sentViewTokens,
+        blocksLen: turn.state.blocks.length,
+        activeBlocks: turn.state.blocks.filter((b) => b.active).length,
+        limit: config.modelContextLimit,
+        usable: tokenCount < truncateBand,
+      });
+      // k̂ pairing source: the EXACT view that just went out is the estimate
+      // the next usage report settles. Skip when this turn ran in the truncate
+      // band — the provider saw a post-truncation request and pairing would
+      // learn garbage (same reason `usable` above is false).
+      if (tokenCount < truncateBand) runtime.setKhatPending(sid, modelId, sentViewTokens);
+
+      // [#464] Surface the kernel's end-game observability signals: they fire
+      // every stuck turn inside the kernel, but before this were invisible —
+      // exactly when compression can no longer save the session is the moment
+      // the user must hear about. One log + one UI notice per episode.
+      if (turn.terminalEscape) {
+        if (runtime.noteTerminalEscape(sid, true)) {
+          logWarn("overflow", {
+            sid,
+            event: "terminal-escape",
+            stuckEvents: turn.terminalEscape.stuckEvents,
+            usage: turn.terminalEscape.usage,
+            tokens: turn.terminalEscape.tokenCount,
+            limit: turn.terminalEscape.modelContextLimit,
+          });
+          if (ctx.hasUI) {
+            ctx.ui.notify(`[ACP] ⚠️ ${turn.terminalEscape.message}`, "warning");
+          }
+        }
+      } else {
+        runtime.noteTerminalEscape(sid, false);
+      }
+      if (turn.truncationSkipped) {
+        if (runtime.noteTruncationSkipped(sid, true)) {
+          logWarn("overflow", { sid, event: "truncation-skipped", detail: turn.truncationSkipped });
+        }
+      } else {
+        runtime.noteTruncationSkipped(sid, false);
+      }
 
       logInfo("turn", {
         sid,
@@ -618,9 +800,10 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     const turnPolicy = resolveHostSession(runtime.adapter);
     const turnKey = lastTurnBoundaryId(entries, turnPolicy) ?? sid;
     // #453: the retry breaker keys off PERSISTED boundaries only — under fork
-    // hosts the merged `entries` carry volatile live-N ids for the not-yet-
-    // persisted tail, so `turnKey` churns between context fires and would
-    // reset failCount mid-episode (cap never latches, emergency-inject loops).
+    // hosts the merged `entries` carry content-addressed live-* ids (#459) for
+    // the not-yet-persisted tail, which can still churn when the host's view
+    // of a message drifts between context fires and would reset failCount
+    // mid-episode (cap never latches, emergency-inject loops).
     const retryTurnKey = retryBreakerKey(ctx.sessionManager, turnPolicy) ?? sid;
 
     // Compress-outcome tracking feeds ONLY the nudge circuit breaker below:
@@ -714,6 +897,19 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
         }
         if (!emergency) runtime.markNudgeShown(sid, turnKey, tokenCount);
         debug.event("nudge-injected", { sid: ctx.sessionManager.getSessionId(), voice: rendered.voice, channels: ["context", debugOn ? "terminal" : null].filter(Boolean), emergency, turnKey, reInject: shownAt !== undefined, text: rendered.text + example });
+        // issue #326: persist a compact display-only record so the injection
+        // survives restarts (TUI scrollback + session file). One per user turn:
+        // emergency nudges re-inject on every LLM call and must not flood the
+        // session file; type:"custom" entries are never projected into the
+        // sent view, so model context stays clean.
+        if (typeof pi.appendEntry === "function" && !runtime.nudgeRecordedFor(sid, turnKey)) {
+          try {
+            pi.appendEntry(ACP_NUDGE_CUSTOM_TYPE, { text: formatNudgeRecord(turn.nudge, emergency) });
+            runtime.markNudgeRecorded(sid, turnKey);
+          } catch (e) {
+            logWarn("nudge", { sid: ctx.sessionManager.getSessionId(), event: "persist-failed", error: e instanceof Error ? e.message : String(e) });
+          }
+        }
       } else {
         debug.event("nudge-suppressed", { sid: ctx.sessionManager.getSessionId(), turnKey, reason: turn.nudge.reason, shownAt: shownAt ?? null, tokenCount, adaptiveGrowth, reInjectFloor });
       }
@@ -736,7 +932,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     // rebuild from entries alone drops them). null = no-op: normal turns align
     // byte-for-byte and non-Pi hosts already merged live into entries. Append-only
     // — never touches refs/blocks, so it stays orthogonal to the #459 ref churn.
-    const liveTail = liveOnlyTail(entries, event.messages);
+    const liveTail = liveOnlyTailCached(sid, entries, event.messages);
     if (liveTail && liveTail.length > 0) {
       rebuilt.push(...liveTail);
       logInfo("live-only-tail", { sid, event: "appended", tail: liveTail.length, outMsgs: rebuilt.length });
@@ -751,6 +947,18 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     if (withHostSystem !== rebuilt) {
       rebuilt = withHostSystem;
       logInfo("system-passthrough", { sid, event: "carried", systems: event.messages.filter((m) => (m as { role?: unknown }).role === "system").length, outMsgs: rebuilt.length });
+    }
+
+    // [#505] drop orphaned tool results created by compression folding away a
+    // matching call (an orphan result would 400 upstream). Gated on compression
+    // having occurred: a non-compressed branch can legitimately begin at a
+    // toolResult whose originating call is not in view, and must not be touched.
+    if (turn.state.blocks.length > 0) {
+      const sanitized = sanitizeToolPairing(rebuilt);
+      if (sanitized.droppedResults.length > 0) {
+        rebuilt = sanitized.messages;
+        logWarn("tool-pair-sanitize", { sid, event: "dropped-orphan-results", count: sanitized.droppedResults.length, droppedResults: sanitized.droppedResults });
+      }
     }
 
     // Always return the transformed array: every message needs its [mNNNNN] ref
@@ -839,21 +1047,46 @@ function wireOverflowSelfHeal(pi: ExtensionAPI, runtime: AcpRuntime): void {
   pi.on("message_end", (event, ctx) => {
     const msg = event.message;
     if (msg.role !== "assistant") return;
-    if (msg.stopReason !== "error") return;
+    const sid = ctx.sessionManager.getSessionId();
+    const ov = runtime.overflowFor(sid);
+    if (msg.stopReason !== "error") {
+      // Successful assistant turn: the request loop is unwedged, so the
+      // consecutive no-body-4xx count (possible-overflow path below)
+      // restarts from zero.
+      ov.noteSuccess();
+      return;
+    }
     // Haystack = errorMessage + error content: some relays put the upstream
     // error body in the streamed content and leave errorMessage generic
     // ("Provider finish_reason: error_finish") — errorMessage alone would miss
     // them. (Same haystack approach as isThrottleError.)
     const haystack = `${msg.errorMessage ?? ""}\n${extractText(msg.content)}`;
     const info = inspectOverflowMessage(haystack);
-    if (!info.isOverflow) return;
-    const sid = ctx.sessionManager.getSessionId();
     const modelId = (ctx.model as { id?: string } | undefined)?.id ?? "default";
-    const ov = runtime.overflowFor(sid);
-    if (info.window) ov.setLearnedWindow(modelId, info.window);
+    if (info.isOverflow) {
+      if (info.window) ov.setLearnedWindow(modelId, info.window);
+      ov.armed = true;
+      logWarn("overflow-selfheal", { sid, modelId, event: "detected", window: info.window ?? null, message: info.message.slice(0, 200) });
+      if (ctx.hasUI) ctx.ui.notify(`[ACP] context overflow detected${info.window ? ` (window ${info.window})` : ""} — forcing emergency compression next turn`);
+      return;
+    }
+    // Possible overflow: pi's bodyless "4xx ... (no body)" (incident
+    // 2026-08-23: a huge bash tool result pushed every request past sglang's
+    // input+max_tokens cap; each retry returned "400 status code (no body)"
+    // forever and the text-marker path above never matched, so the emergency
+    // never fired and the session dead-looped). The text is ambiguous — the
+    // same 4xx comes back for invalid models / malformed requests (see
+    // messages.ts) — so arm only with corroboration: sent-view >= 50% of the
+    // effective limit, or the >=2nd consecutive no-body since the last
+    // successful turn. Unlike the path above no window can be parsed from a
+    // bodyless error, so none is learned: the armed emergency uses the
+    // already-resolved effective limit (wireContextTransform).
+    if (!isNoBody4xxError(haystack)) return;
+    const decision = ov.onNoBody4xx();
+    if (!decision.arm) return;
     ov.armed = true;
-    logWarn("overflow-selfheal", { sid, modelId, event: "detected", window: info.window ?? null, message: info.message.slice(0, 200) });
-    if (ctx.hasUI) ctx.ui.notify(`[ACP] context overflow detected${info.window ? ` (window ${info.window})` : ""} — forcing emergency compression next turn`);
+    logWarn("overflow-selfheal", { sid, modelId, event: "no-body-arm", consecutive: decision.consecutive, ratio: decision.ratio, message: haystack.slice(0, 200) });
+    if (ctx.hasUI) ctx.ui.notify(`[ACP] possible context overflow (4xx no-body error, ${decision.consecutive} consecutive) — forcing emergency compression next turn`);
   });
   pi.on("session_shutdown", (_event, ctx) => {
     runtime.overflowDrop(ctx.sessionManager.getSessionId());
@@ -1008,4 +1241,29 @@ function rolloverReportMessage(r: RolloverResult): AgentMessage {
     content: [{ type: "text", text: rolloverReportText(r) }],
     timestamp: Date.now(),
   } as AgentMessage;
+}
+
+// issue #326: render persisted nudge records in the TUI. Without a registered
+// renderer pi silently drops custom entries on both live append and session
+// rebuild, so this is required for the records to be visible at all.
+function wireNudgeRecords(pi: ExtensionAPI): void {
+  if (typeof pi.registerEntryRenderer !== "function") return;
+  pi.registerEntryRenderer<AcpNudgeRecord>(ACP_NUDGE_CUSTOM_TYPE, (entry, _options, theme) => {
+    const text = entry.data?.text;
+    if (!text) return undefined;
+    const box = new Box(1, 1, (t: string) => theme.bg("customMessageBg", t));
+    box.addChild(new Text(theme.fg("dim", text), 0, 0));
+    return box;
+  });
+}
+
+// Compact one-line twin of nudgeMessage() for the persisted session entry
+// (issue #326): auditability only — the full multi-line nudge deliberately
+// stays out of the session file.
+export function formatNudgeRecord(nudge: NudgeDecision, emergency: boolean): string {
+  const pct = Math.round(nudge.contextUsage * 100);
+  const tier = `T${nudge.tier ?? 1}`;
+  const top = [...nudge.compressibleRanges].sort((a, b) => b.tokens - a.tokens)[0];
+  const range = top ? ` · top range ${top.startRef}–${top.endRef}` : "";
+  return `[ACP nudge]${emergency ? " EMERGENCY" : ""} ${pct}% · ${tier}${range}`;
 }

@@ -170,6 +170,16 @@ export interface CompressSettings {
    *  overrides only; a pack's `toolPrompts` follow the base selection (tool
    *  definitions freeze at extension load, before the model is known). */
   promptPack?: string;
+  /** Opt-in wire-level strip of historical image payloads (issue #321, kernel
+   *  #215). Default: false (images ride along verbatim, current behavior).
+   *  When true, every message older than `stripImagesKeepRecent` has its image
+   *  parts dropped from the outbound provider body (image-only messages
+   *  collapse to a "[image]" text placeholder). Host-side policy only — the
+   *  strip primitive lives in acp-kernel's wire layer. */
+  stripImages?: boolean;
+  /** How many of the MOST RECENT messages keep their image payloads when
+   *  `stripImages` is enabled. Default: 5. Ignored when stripImages is off. */
+  stripImagesKeepRecent?: number;
 }
 
 /** Batch rollover tuning (Prompt Cache stability, #241). Deferred compress /
@@ -243,7 +253,41 @@ export interface AdapterConfig {
   /** When omitted, the adapter reads `ctx.model.contextWindow` live each turn.
    *  Set explicitly for tests/headless runs. */
   modelContextLimit?: number;
+  /** Tool-name patterns (glob suffix allowed) whose EVERY call+result pair is
+   *  hard-excluded from compression — matching refs render as BLOCKED in every
+   *  view. Default: none. Intended for low-frequency high-value tools whose
+   *  outputs are independent content (e.g. skill loads); do NOT use for chatty
+   *  tools — protecting every instance grows context unboundedly (#639
+   *  rationale). Settable via acp.json since #499. */
   protectedTools?: string[];
+  /** Tool-name patterns (glob suffix allowed) whose LATEST call+result pair is
+   *  hard-excluded from compression; older pairs remain compressible. Default:
+   *  none. Intended for cumulative-snapshot tools where each call supersedes
+   *  the last. Settable via acp.json since #499. */
+  protectedLatestTools?: string[];
+  /** Tool-name patterns (glob suffix allowed) EXCLUDED from the soft-protected
+   *  recent zone: matching tool results inside the recent window fold
+   *  immediately instead of aging out first (kernel >= 0.0.92). Default:
+   *  unset → kernel built-in ["decompress", "search_context", "read",
+   *  "bash"]. The built-in keeps read/bash compressible — the largest
+   *  reclaimable mass — but that also folds freshly-read files in batch-read
+   *  workflows (#1198-style fold→re-read loop, bili #1277). Recommended
+   *  remedy: ["decompress", "search_context", "bash"] (remove only read).
+   *  ⚠ Unlike the two protection keys, an EMPTY ARRAY IS VALID — it excludes
+   *  nothing and gives every tool recent-zone protection (escape hatch); do
+   *  not re-include decompress/search_context or just-restored blocks get
+   *  pinned in the recent zone and become unreclaimable. */
+  neverPreserveRecentTools?: string[];
+  /** The positive counterpart of neverPreserveRecentTools: tool-name
+   *  patterns REMOVED from the effective recent-zone exclusion list (kernel
+   *  >= 0.0.93) — `(neverPreserveRecentTools ?? built-in) minus
+   *  preserveRecentTools`. The one-entry #1198/#1277 batch-read fold→re-read
+   *  remedy: ["read"] protects fresh read results without restating (or
+   *  freezing a stale copy of) the built-in list. Default: unset → no
+   *  subtraction. Unlike neverPreserveRecentTools an EMPTY ARRAY IS
+   *  INVALID here (pure no-op — use neverPreserveRecentTools: [] for
+   *  protect-everything instead). */
+  preserveRecentTools?: string[];
   preserveRecentMessages?: number;
   /** Check npm for a newer billion-context-pi on startup and auto-install it. Default: true.
    *  Disable via `autoUpdate: false` or env `ACP_AUTO_UPDATE=0` to avoid all
@@ -309,6 +353,12 @@ export interface AdapterConfig {
    *  multi-session hosts (Prime RLM & co.) whose injected agent messages must
    *  delimit real turns. See docs/host-adapter.md. */
   hostSession?: boolean | HostSessionConfig;
+  /** Persistent-rules feature gate (#526): opt-in `rules: true` in acp.json.
+   *  Gates the human `/acp-rule` command (list + record + remove + clear — kernel
+   *  `listRules`/`addRule`/`removeRule`/`clearRules` against the session `.acp.json` sidecar state) and
+   *  the model-side `acp_rule` tool (#490). Custom limits via
+   *  coreOverrides.rules ({ maxRules?, maxRuleChars? }). */
+  rules?: boolean;
   /** Legacy flat alias for `delegate.displayUsage`. Kept for backward
    *  compatibility with existing acp.json files. Prefer `delegate.displayUsage`. */
   displayUsage?: "merged" | "separate";
@@ -471,10 +521,20 @@ export interface HostSessionConfig {
   /** Count host-injected custom_message entries (agent_message) as turn
    *  boundaries. Default: false (pi-native behavior). */
   countCustomMessages?: boolean;
+  /** #578: optional customType allowlist refining countCustomMessages — when
+   *  set (with countCustomMessages:true), only injected entries whose
+   *  customType is listed start a turn, keeping metadata injections
+   *  (harness_digest, ipython_state) out of nudge/retry accounting. Ignored
+   *  unless countCustomMessages:true; malformed values warn and fall back to
+   *  "all injected types count". */
+  customMessageTypes?: string[];
 }
 
 export interface ResolvedHostSession {
   countCustomMessages: boolean;
+  /** Present only when countCustomMessages is on and a valid allowlist was
+   *  configured (#578). */
+  customMessageTypes?: readonly string[];
 }
 
 /** Resolve the host-session turn-boundary policy from the adapter, handling
@@ -488,7 +548,20 @@ export function resolveHostSession(adapter: AdapterConfig): ResolvedHostSession 
     if (typeof h.countCustomMessages !== "boolean") {
       logWarn("config", { event: "host-session-invalid", field: "countCustomMessages", value: String(h.countCustomMessages), fallback: "false" });
     }
-    return { countCustomMessages: h.countCustomMessages === true };
+    const count = h.countCustomMessages === true;
+    let types: readonly string[] | undefined;
+    if (h.customMessageTypes !== undefined) {
+      const raw = h.customMessageTypes;
+      const valid = Array.isArray(raw) && raw.every((t) => typeof t === "string" && t.length > 0);
+      if (!valid) {
+        logWarn("config", { event: "host-session-invalid", field: "customMessageTypes", value: JSON.stringify(raw), fallback: "unset" });
+      } else if (!count) {
+        logWarn("config", { event: "host-session-invalid", field: "customMessageTypes", value: JSON.stringify(raw), fallback: "ignored", reason: "requires-countCustomMessages" });
+      } else {
+        types = raw;
+      }
+    }
+    return types === undefined ? { countCustomMessages: count } : { countCustomMessages: count, customMessageTypes: types };
   }
   if (h !== undefined && h !== false) {
     logWarn("config", { event: "host-session-invalid", value: String(h), fallback: "off" });
@@ -530,6 +603,8 @@ export function mergeCompress(
       threshold: model?.reasoning?.threshold ?? provider?.reasoning?.threshold ?? global?.reasoning?.threshold,
     },
     promptPack: model?.promptPack ?? provider?.promptPack ?? global?.promptPack,
+    stripImages: model?.stripImages ?? provider?.stripImages ?? global?.stripImages,
+    stripImagesKeepRecent: model?.stripImagesKeepRecent ?? provider?.stripImagesKeepRecent ?? global?.stripImagesKeepRecent,
   };
 }
 
@@ -561,11 +636,21 @@ export function resolveConfig(adapter: AdapterConfig, liveContextLimit: number, 
         : liveContextLimit > 0
           ? liveContextLimit
           : FALLBACK_LIMIT;
-  const config = defaultConfig(limit, {
+  // preserveRecentTools needs acp-kernel >= 0.0.93 (acp-kernel#428); the
+  // package pin may still be 0.0.92 during the release window, whose
+  // Partial<Config> does not know the key. Annotating the overrides keeps
+  // this compiling against BOTH versions — the extra property rides through
+  // defaultConfig's spread and is simply ignored by kernels that don't read
+  // it (validateConfig does not flag unknown keys).
+  const overrides: Partial<Config> & { preserveRecentTools?: string[] } = {
     protectedTools: adapter.protectedTools ?? [],
+    protectedLatestTools: adapter.protectedLatestTools ?? [],
+    neverPreserveRecentTools: adapter.neverPreserveRecentTools,
+    preserveRecentTools: adapter.preserveRecentTools,
     preserveRecentMessages: adapter.preserveRecentMessages ?? 5,
     ...adapter.coreOverrides,
-  });
+  };
+  const config = defaultConfig(limit, overrides);
   const c = resolveCompress(adapter.compress, provider, modelId);
   if (c.maxContextLimit !== undefined) config.nudge.maxContextLimitPct = parsePercent(c.maxContextLimit);
   if (c.emergencyThresholdPercent !== undefined) {

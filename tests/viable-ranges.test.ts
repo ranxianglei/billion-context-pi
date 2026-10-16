@@ -22,11 +22,16 @@ test("acp_status applies the viability filter to compressible ranges", () => {
   // pipeline the status tool uses (filter first) cannot leak tiny ranges.
   const core = createCore();
   const config = resolveConfig({}, 200_000);
-  const messages = Array.from({ length: 60 }, (_, i) =>
-    i % 2 === 0
-      ? { role: "user", content: { type: "text", text: `u${i} ${"lorem ".repeat(i % 7)}` } }
-      : { role: "assistant", content: [{ type: "text", text: `a${i} ${"ipsum ".repeat(i % 5)}` }] },
-  );
+  // Well-formed CoreMessages: kernel 0.0.90's syncBlocks (subid coverage,
+  // kernel #233) dereferences message.id via baseIdOf — id-less host-shaped
+  // entries now throw where 0.0.86 silently tolerated them (kernel-side guard
+  // pending; tests should not depend on undocumented lenience).
+  const messages = Array.from({ length: 60 }, (_, i) => ({
+    id: `h_${i}`,
+    role: i % 2 === 0 ? "user" : "assistant",
+    contentType: "text",
+    text: `${i % 2 === 0 ? "u" : "a"}${i} ${i % 2 === 0 ? "lorem ".repeat(i % 7) : "ipsum ".repeat(i % 5)}`,
+  }));
   const turn = core.processTurn({ messages, state: createInitialState(), config, tokenCount: 90_000 });
   const nudge = turn.nudge!;
   const filtered = viableRanges(nudge.compressibleRanges ?? []);

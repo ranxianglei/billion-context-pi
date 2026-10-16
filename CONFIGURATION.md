@@ -19,6 +19,8 @@ Settings are read from JSON files named `acp.json`. The global file applies to e
 
 > **Precedence:** Environment variable &gt; Project file &gt; Global file &gt; Built-in default.
 
+On a Pi fork, `.pi` is the fork's own config directory — `~/.prime/acp.json` and `<project>/.prime/acp.json` on Prime. Until that file exists, the `.pi` path above is still read. See [docs/host-adapter.md §4](./docs/host-adapter.md#4-config-directory-config_dir_name).
+
 Files are loaded at session start. Missing files, malformed JSON, and unknown keys are silently ignored — the extension never fails to start because of a config issue. Only the documented keys are read; everything else is discarded.
 
 ---
@@ -127,10 +129,15 @@ All keys below are currently **ACTIVE**.
 | `outputHeadroomMaxPct` | number \| string | `0.25` | 🟢 ACTIVE | Cap on the output-headroom reservation, as a fraction of the context window. |
 | `toolBashDefaultTimeout` | number | `60` | 🟢 ACTIVE | Default `bash` tool timeout in seconds when the model omits it. |
 | `toolOutputMaxBytes` | number | `50000` | 🟢 ACTIVE | Hard byte cap on tool result text. |
+| `protectedTools` | string\[\] | `none` | 🟢 ACTIVE | Tool-name patterns (glob suffix allowed) whose **every** call+result pair is hard-excluded from compression (refs render `BLOCKED`). For low-frequency, high-value tools with independent outputs — see the ⚠ note below. |
+| `protectedLatestTools` | string\[\] | `none` | 🟢 ACTIVE | Tool-name patterns (glob suffix allowed) whose **latest** call+result pair is hard-excluded from compression; older pairs remain compressible. For cumulative-snapshot tools. |
+| `neverPreserveRecentTools` | string\[\] | kernel built-in (`["decompress", "search_context", "read", "bash"]`, acp-kernel >= 0.0.92) | 🟢 ACTIVE | Tool-name patterns **removed from** the soft-protected recent zone so their results fold immediately. Default keeps `read`/`bash` compressible; remove only `read` (keep `decompress`/`search_context`) to stop the batch-read fold→re-read loop. **Empty array `[]` is valid** (max-protection escape hatch). |
+| `preserveRecentTools` | string\[\] | unset (no subtraction; requires `acp-kernel` >= 0.0.93) | 🟢 ACTIVE | The **positive counterpart**: tool-name patterns **kept protected** in the recent zone — removed from the effective exclusion list computed by the kernel. The one-entry #1198/#1277 remedy: `["read"]`, no built-in list restating. **Empty array `[]` is invalid** (pure no-op — typo for `neverPreserveRecentTools: []`). |
 | `throttleRetry` | boolean \| object | `true` | 🟢 ACTIVE | Auto-retry provider token rate-limit errors with progressive backoff. |
 | `repetitionGuard` | boolean \| object | `true` | 🟢 ACTIVE | Break infinite loops of byte-identical tool calls (warn at 3 consecutive, block + abort at 5). |
 | `degenerationGuard` | boolean \| object | `true` | 🟢 ACTIVE | Collapse degenerate single-codepoint runs (e.g. 4655×「【」) in assistant text/thinking of the outgoing view and inject a one-shot recovery notice — breaks the abort loop where pi replays degenerated thinking back to the provider on every request (#351). |
 | `hostSession` | boolean \| object | `false` | 🟢 ACTIVE | Turn-boundary policy for multi-session hosts: count injected `custom_message` entries as turn starts. Off by default (pi-native behavior). |
+| `rules` | boolean | `false` | 🟢 ACTIVE | Register the opt-in `acp_rule` record tool: short, principle-level reminders hard-protected from compression. Off by default. |
 
 **Delegate keys**
 
@@ -176,6 +183,8 @@ All keys below are currently **ACTIVE**.
 | `compress.emergencyThresholdPercent` | number \| string | `"95%"` | 🟢 ACTIVE | Context threshold that triggers emergency truncation. |
 | `compress.nudgeGrowthTokens` | number | `50000` | 🟢 ACTIVE | Token growth step for soft compression nudges. |
 | `compress.reasoning` | object | `{ "drop": true, "threshold": 2048 }` | 🟢 ACTIVE | Drop oversized thinking from historical `compress` calls (request-time; persisted history untouched). |
+| `compress.stripImages` | boolean | `false` | 🟢 ACTIVE | **Opt-in** wire-level strip of historical image payloads (issue #321). When `true`, every message older than the most recent `stripImagesKeepRecent` has its image parts dropped from the outbound provider body; image-only messages collapse to a `"[image]"` text placeholder. Supported wire dialects: anthropic-messages, openai-completions, openai-responses (incl. azure/codex variants). |
+| `compress.stripImagesKeepRecent` | number | `5` | 🟢 ACTIVE | How many of the most recent messages keep their image payloads when `stripImages` is on. |
 
 **Rollover keys**
 
@@ -208,7 +217,7 @@ All keys below are currently **ACTIVE**.
 | `PI_ACP_DELEGATE_ASYNC_TIMEOUT_MINUTES` | Override `delegate.asyncTimeoutMinutes`; `0` disables the async hard limit. |
 | `PI_ACP_DELEGATE_FORCE_ENABLE` | Override `delegate.forceEnable`; takes `true` / `false`. |
 
-> **Only the documented keys are read from `acp.json`.** Other tuning knobs (`preserveRecentMessages`, `protectedTools`) are code-level and not user-overridable. The three compression thresholds form a three-tier escalation: growth-driven soft nudges → forced nudges at `compress.maxContextLimit` → emergency truncation at `compress.emergencyThresholdPercent`.
+> **Only the documented keys are read from `acp.json`.** Other tuning knobs (`preserveRecentMessages`) are code-level and not user-overridable. The three compression thresholds form a three-tier escalation: growth-driven soft nudges → forced nudges at `compress.maxContextLimit` → emergency truncation at `compress.emergencyThresholdPercent`.
 
 ---
 
@@ -242,7 +251,7 @@ All keys below are currently **ACTIVE**.
 - **Type:** `number`
 - **Default:** *(auto)* — the model's `contextWindow` read live each turn
 - **Status:** 🟢 ACTIVE
-- **Description:** Override the context limit, in tokens. By default the limit is read from the active model's `ctx.model.contextWindow` on every turn, so it stays correct when you switch models. Set an explicit value for deterministic test runs or headless/non-interactive sessions where the model metadata may be unavailable. The `ACP_MODEL_CONTEXT_LIMIT` environment variable takes precedence over this value.
+- **Description:** Override the context limit, in tokens. By default the limit is read from the active model's `ctx.model.contextWindow` on every turn, so it stays correct when you switch models. Set an explicit value for deterministic test runs or headless/non-interactive sessions where the model metadata may be unavailable. The `ACP_MODEL_CONTEXT_LIMIT` environment variable takes precedence over this value. Note this value is also the **denominator of all percentage compression thresholds** (`maxContextLimit`, `emergencyThresholdPercent`) — lowering it moves every trigger point down proportionally. To keep day-to-day context small without shrinking this denominator, see [Soft target with elastic headroom](#soft-target-with-elastic-headroom-1122).
 
 ### `outputHeadroomMaxPct`
 
@@ -264,6 +273,60 @@ All keys below are currently **ACTIVE**.
 - **Default:** `50000`
 - **Status:** 🟢 ACTIVE
 - **Description:** A hard byte cap (~50 KB, roughly 1250 lines) applied to tool result text via the `tool_result` hook. Aligned with Pi's own bash/read/grep cap so every tool path lands under one ceiling; the net still catches runaway output from tools Pi does not cap (MCP/custom). When the cap fires, the oversized text is head-truncated with a notice telling the model how to see the full output. Set higher for large MCP outputs, lower (e.g. `8192`) for a tighter context budget, or set to `0` to disable the cap entirely.
+
+### `protectedTools`
+
+- **Type:** `string[]`
+- **Default:** `none` (empty)
+- **Status:** 🟢 ACTIVE
+- **Description:** Tool-name patterns (glob suffix allowed, e.g. `"skill"`, `"read_*"`) whose **every** call+result pair is hard-excluded from compression: matching refs render as `BLOCKED` in every view, in both compression modes and across all wires. Intended for low-frequency, high-value tools whose outputs are **independent content** rather than cumulative snapshots (e.g. opencode/pi `skill` loads, one-shot references). Malformed values (non-array, empty array, non-string or blank entries) are rejected with a loud warning and ignored — they never fail the session.
+- **⚠ When to use which knob:** protecting ALL instances of a chatty tool grows context unboundedly — never put high-frequency tools here. Independent-content tools → `protectedTools`; cumulative-snapshot tools (each call supersedes the last) → `protectedLatestTools`; chatty tools → neither (rely on the soft recent-zone instead). Rule of thumb: if you would be annoyed to keep every single output forever, do not protect it fully.
+
+### `protectedLatestTools`
+
+- **Type:** `string[]`
+- **Default:** `none` (empty)
+- **Status:** 🟢 ACTIVE
+- **Description:** Tool-name patterns (glob suffix allowed) whose **latest** call+result pair is hard-excluded from compression (matching refs render as `BLOCKED`); older pairs remain compressible. Intended for cumulative-snapshot tools where each call supersedes the last. Same validation rules as `protectedTools`. See the ⚠ note under `protectedTools` for when to use which knob.
+
+### `neverPreserveRecentTools`
+
+- **Type:** `string[]` (tool-name patterns, glob suffix allowed)
+- **Default:** unset → kernel built-in `["decompress", "search_context", "read", "bash"]` (requires `acp-kernel` >= 0.0.92)
+- **Status:** 🟢 ACTIVE
+- **Description:** Tool-name patterns **excluded from the soft-protected recent zone** (`preserveRecentMessages` window): matching tool results inside the recent window become compressible immediately instead of aging out first. The kernel built-in keeps `read`/`bash` compressible because they are the largest reclaimable mass — but that same default folds freshly-read files right away in batch-read workflows and can descend into the fold→re-read death loop (upstream billion-context #1198/#1277). **Recommended remedy — remove only `read`:**
+
+  ```json
+  { "neverPreserveRecentTools": ["decompress", "search_context", "bash"] }
+  ```
+
+  Fresh read results then stay in the recent zone and age out by position later (unlike `protectedLatestTools`, which would pin the newest read forever, or `protectedTools`, which would never fold any read). **Keep `decompress`/`search_context` in the list**: re-including them pins just-restored blocks in the recent zone where they become unreclaimable — a different disease. **⚠ Empty array `[]` is VALID** here (unlike the two protection keys): it excludes nothing and gives every tool recent-zone protection — the max-protection escape hatch. An explicit array replaces the default verbatim. Prefer the simpler positive form below unless you need verbatim-replace semantics.
+
+### `preserveRecentTools`
+
+- **Type:** `string[]` (tool-name patterns, glob suffix allowed)
+- **Default:** unset → no subtraction (the `neverPreserveRecentTools` ?? kernel built-in list governs verbatim; requires `acp-kernel` >= 0.0.93)
+- **Status:** 🟢 ACTIVE
+- **Description:** The **positive counterpart** of `neverPreserveRecentTools`: tool-name patterns **removed from the effective recent-zone exclusion list**. Effective exclusion = `(neverPreserveRecentTools ?? built-in) minus preserveRecentTools`, computed in the kernel — so the #1198/#1277 batch-read fold→re-read remedy is one entry:
+
+  ```json
+  { "preserveRecentTools": ["read"] }
+  ```
+
+  without restating (or freezing a stale hand-copy of) the built-in list, and it keeps following built-in evolution. Composable with an explicit `neverPreserveRecentTools` (subtraction applies to the explicit list too); glob-suffix patterns subtract matching entries (`"bash*"` removes `bash`). **⚠ Empty array `[]` is INVALID** here — it is a pure no-op, so a bare `[]` is almost certainly a typo for `neverPreserveRecentTools: []` (the max-protection escape hatch); malformed values warn and fall back to the adapter value.
+
+---
+
+## Rules
+
+The `rules` key controls the `acp_rule` record tool — an opt-in way to persist short, principle-level reminders in the session so they survive context compression.
+
+### `rules`
+
+- **Type:** `boolean`
+- **Default:** `false`
+- **Status:** 🟢 ACTIVE
+- **Description:** When `true`, registers the `acp_rule` tool on session start. Call it with a short reminder to record it (echoes `Recorded ruleN: …`); call it with no argument to list all recorded rules. Rules live in the session's ACP state sidecar (persisted across restarts) and are **hard-protected from compression** — their tool call and result stay visible even when everything around them is compressed away. There is no system-prompt involvement: usage guidance lives entirely in the tool description, and nothing is re-injected per turn. Validation errors (empty / over-length / duplicate / limit reached) are returned verbatim to the model. Defaults: up to 50 rules × 300 chars each.
 
 ---
 
@@ -557,7 +620,8 @@ The `hostSession` key controls **turn-boundary detection** for hosts that run se
   ```json
   {
     "hostSession": {
-      "countCustomMessages": true
+      "countCustomMessages": true,
+      "customMessageTypes": ["agent_message", "async_bash_completion", "rlm_child_terminal_notice", "heartbeat_prompt"]
     }
   }
   ```
@@ -570,6 +634,13 @@ The `hostSession` key controls **turn-boundary detection** for hosts that run se
 - **Default:** `false`
 - **Status:** 🟢 ACTIVE
 - **Description:** Count host-injected `custom_message` entries with non-empty text (except UI-only `acp-status` panels) as turn boundaries for all per-turn ledgers; empty injections are pure control signals and start no turn. Does not change LLM-context projection — those entries were already projected as user-role messages under Pi-native semantics.
+
+### `hostSession.customMessageTypes`
+
+- **Type:** string[]
+- **Default:** unset (every non-empty injected type counts when opted in)
+- **Status:** 🟢 ACTIVE
+- **Description:** Optional `customType` allowlist refining `countCustomMessages`: when set (with `countCustomMessages: true`), only injected `custom_message` entries whose `customType` is listed start a turn — metadata injections that enter LLM context without being a real host turn (e.g. Prime's `harness_digest`, `ipython_state`) no longer reset nudge/retry accounting (#578). Entries without a `customType` never match; UI-only types (`acp-status`, `acp-export`, `acp-rule`) stay excluded even when listed. Ignored unless `countCustomMessages: true`; malformed values (non-array, non-string or empty-string members) warn and fall back to "all injected types count". An empty array is explicit "count none". Example above is Prime's set of genuine host-turn types.
 
 ---
 
@@ -634,6 +705,33 @@ The flow is:
 - **Default:** `"default"`
 - **Status:** 🟢 ACTIVE
 - **Description:** Selects a **prompt pack** — a named bundle of surface overrides (prompt sections, nudge sections, tool prompts, delegate prompt, compression rules) applied as the base layer under your inline `acp.json` overrides. Resolved through the same three-level cascade as every other `compress.*` field: `models > providers > global`, per active model, per turn. See [Prompt Packs](#prompt-packs) for the full reference and the built-in `lean` pack.
+
+### Soft target with elastic headroom (#1122)
+
+Keeping day-to-day context small is a **cost target**, not a window size. The common misconfiguration behind [billion-context#1122](https://github.com/ranxianglei/billion-context/issues/1122) is setting `modelContextLimit` below the model's native window to express that target — e.g., a 70k limit on a 200k model "to keep things around 40k". Because every percentage threshold is measured against `modelContextLimit`, this anchors *all* triggers to the shrunken value: forced nudges start at 75% of 70k ≈ 52.5k, and lossy emergency truncation fires at ~66.5k — so a legitimate task that genuinely needs 80k of context gets compressed, and eventually truncated, mid-task.
+
+The recipe: keep the denominator at the true window and express the cost target through the existing soft threshold instead.
+
+```jsonc
+{
+  // "modelContextLimit": 200000,   // optional — omit to follow Pi's live model catalog
+  "compress": {
+    "maxContextLimit": "35%"        // soft target ≈ 70k on a 200k window (= target ÷ native window)
+  }
+}
+```
+
+How compression actually gets triggered (three layers):
+
+1. **Growth layer** (day-to-day driver) — **absolute tokens, independent of `modelContextLimit` by design**: a soft nudge fires once cumulative growth since the last anchor (session start / last compress / post-shrink reset) passes the cadence floor (`max(20k, 45% × nudgeGrowthTokens)` ≈ 22.5k by default), provided there is enough effective compressible content (~`nudgeGrowthTokens`). Keeping the window large does NOT delay this layer.
+2. **Pressure layer** — the only %-anchored part: `usage ≥ maxContextLimit` (default 75%) → forced nudge every turn; ≥ 95% → emergency truncation. Scales with `modelContextLimit`.
+3. **Qualification layer** — kernel default 45%, not exposed here; gates only the turn-1 cold-start ticket and T2/T3 block-count escalation.
+
+Notes:
+
+- Setting `maxContextLimit` below 45% works correctly (the layers gate independent paths), but acp-kernel logs one validation warning per turn — log noise only, thresholds unaffected (tracked in acp-kernel#346).
+- Behavior delta vs the old low-limit config: the forced zone moves from 75%×old-limit up to chosen-%×native-window, and emergency truncation moves from ~95%×old-limit back to the true edge (~95%×native). Between the growth anchors and the forced zone, context may drift below your target — that drift is the price of elasticity. A strict ceiling *and* burst headroom simultaneously needs structure-aware compression ([billion-context#344](https://github.com/ranxianglei/billion-context/issues/344)), not a smaller denominator.
+- All of this resolves through the three-level cascade below (`models > providers > global`), so different targets can coexist across models.
 
 ### `compress.providers` — per-provider & per-model overrides
 
@@ -757,7 +855,7 @@ The `prompts` object overrides acp-kernel's **load-bearing** compression prompt 
 - **Type:** `object` (partial — per-section tri-state)
 - **Default:** *(built-in defaults)*
 - **Status:** 🟢 ACTIVE
-- **Description:** Override sections of the ACP system prompt. Thirteen keys: the nine structural documentation sections (`acpTags`, `summariesInContext`, `tools`, `whenToCompress`, `whenNotToCompress`, `multiTierIntro`, `decompressPhilosophy`, `contextBreakdown`, `throttleRetry`) plus the four rule blocks (`philosophy`, `howToCompress`, `tier2`, `tier3`). Tri-state per key: a string **replaces** the section, `null` **removes** it entirely, omitting it keeps the default. Not risk-gated — for a risk-gated replacement of rule text, use `prompts`; when both are set, the `promptSections` value wins (applied last). Example:
+- **Description:** Override sections of the ACP system prompt. Thirteen keys (`acpTags`, `summariesInContext`, `tools`, `whenToCompress`, `whenNotToCompress`, `multiTierIntro`, `decompressPhilosophy`, `contextBreakdown`, `throttleRetry`, `philosophy`, `howToCompress`, `tier2`, `tier3`) with one uniform tri-state contract each (mirroring the kernel's section semantics): a string **replaces** the section, `null` **removes** it entirely, omitting it keeps the default. Not risk-gated — for a risk-gated replacement of rule text, use `prompts`; when both are set, the `promptSections` value wins (applied last). Example:
 
   ```json
   {
@@ -930,7 +1028,7 @@ Environment variables take precedence over the JSON config files. They are usefu
 - **Type:** string (file path)
 - **Default:** `~/.pi/acp.log`
 - **Status:** 🟢 ACTIVE
-- **Description:** Override the path to the log file. By default, structured logs are written to `~/.pi/acp.log` (the file rotates to `~/.pi/acp.log.old` at 10 MB). Point this at a different location to keep per-project or per-run logs separate.
+- **Description:** Override the path to the log file. By default, structured logs are written to `~/.pi/acp.log` (the file rotates to `~/.pi/acp.log.old` at 10 MB). Point this at a different location to keep per-project or per-run logs separate. On a Pi fork, `~/.pi` is the fork's own config directory (`~/.prime` on Prime) — see [docs/host-adapter.md §4](./docs/host-adapter.md#4-config-directory-config_dir_name).
 
 ### `PI_ACP_DELEGATE_MAX_DEPTH`
 

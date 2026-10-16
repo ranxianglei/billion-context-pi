@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ACP Compression Economics Estimator</title>
+<style>
+  :root { --bg:#0f172a; --panel:#1e293b; --line:#334155; --txt:#e2e8f0; --dim:#94a3b8; --acc:#38bdf8; --good:#4ade80; --bad:#f87171; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--txt); font:15px/1.5 ui-sans-serif,system-ui,"Segoe UI",Roboto,sans-serif; }
+  .wrap { max-width:1100px; margin:0 auto; padding:24px 20px 60px; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  h2 { font-size:17px; margin:28px 0 10px; color:var(--acc); }
+  .sub { color:var(--dim); margin-bottom:18px; font-size:13.5px; }
+  .grid { display:grid; grid-template-columns:340px 1fr; gap:16px; }
+  @media (max-width:900px){ .grid{grid-template-columns:1fr;} }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px 16px; }
+  label { display:block; font-size:12.5px; color:var(--dim); margin:10px 0 2px; }
+  label b { color:var(--txt); font-weight:600; }
+  input[type=range] { width:100%; accent-color:var(--acc); }
+  select,input[type=number]{ width:100%; background:#0b1220; color:var(--txt); border:1px solid var(--line); border-radius:6px; padding:6px 8px; font-size:14px; }
+  .row { display:flex; gap:10px; } .row > div { flex:1; }
+  .kpis { display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:8px; margin-top:8px; }
+  .kpi { background:#0b1220; border:1px solid var(--line); border-radius:8px; padding:8px 10px; }
+  .kpi .v { font-size:19px; font-weight:700; }
+  .kpi .k { font-size:11.5px; color:var(--dim); }
+  .verdict { margin-top:10px; padding:8px 12px; border-radius:8px; font-size:14px; border:1px solid var(--line); }
+  .verdict.ok { border-color:var(--good); color:var(--good); }
+  .verdict.bad { border-color:var(--bad); color:var(--bad); }
+  canvas { width:100%; height:auto; display:block; background:#0b1220; border:1px solid var(--line); border-radius:8px; }
+  table { border-collapse:collapse; width:100%; font-size:13px; }
+  th,td { border:1px solid var(--line); padding:5px 8px; text-align:right; }
+  th:first-child,td:first-child { text-align:left; }
+  th { color:var(--dim); font-weight:600; background:#0b1220; }
+  tr.hl td { background:#12233c; }
+  .note { font-size:12.5px; color:var(--dim); margin-top:8px; }
+  code { background:#0b1220; border:1px solid var(--line); border-radius:4px; padding:1px 5px; font-size:12.5px; }
+  pre { background:#0b1220; border:1px solid var(--line); border-radius:8px; padding:12px; overflow-x:auto; font-size:12.5px; line-height:1.6; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>ACP Compression Economics Estimator</h1>
+  <div class="sub">
+    Companion to <a style="color:var(--acc)" href="../docs/compression-economics.md">docs/compression-economics.md</a>.
+    Prices normalized so 1 unit = 1 token at the model's base input price.
+    Data source: litellm price table @ <code>7e3ca14</code> (2026-09-15). Self-contained, works offline.
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <label><b>Pricing profile</b></label>
+      <select id="preset"></select>
+      <div id="customBox" style="display:none">
+        <div class="row">
+          <div><label>w = cacheWrite/input</label><input type="number" id="cw" step="0.05" value="1"></div>
+          <div><label>r = cacheRead/input</label><input type="number" id="cr" step="0.05" value="0.1"></div>
+          <div><label>q = output/input</label><input type="number" id="qo" step="0.5" value="5"></div>
+        </div>
+        <div class="row">
+          <div><label>$ input / M tok</label><input type="number" id="pin" step="0.25" value="1"></div>
+          <div><label>$ output / M tok</label><input type="number" id="pout" step="1" value="5"></div>
+        </div>
+      </div>
+
+      <label><b>V</b> pre-fold view = <span id="vV"></span></label>
+      <input type="range" id="V" min="10" max="200" step="1" value="70">
+      <label><b>S</b> tokens folded = <span id="vS"></span></label>
+      <input type="range" id="S" min="5" max="120" step="1" value="50">
+      <label><b>h</b> post-fold cache-hit fraction = <span id="vh"></span></label>
+      <input type="range" id="h" min="0" max="0.99" step="0.01" value="0.33">
+      <label><b>β</b> summary ratio σ/S = <span id="vb"></span></label>
+      <input type="range" id="beta" min="0.01" max="0.15" step="0.005" value="0.05">
+      <label><b>g</b> net growth per turn (K) = <span id="vg"></span></label>
+      <input type="range" id="g" min="0.5" max="10" step="0.5" value="2.5">
+      <label><b>Vmin</b> view floor after fold (K) = <span id="vVm"></span></label>
+      <input type="range" id="Vmin" min="5" max="60" step="1" value="20">
+      <label><b>k</b> actual fold cadence, turns = <span id="vk"></span></label>
+      <input type="range" id="k" min="2" max="60" step="1" value="20">
+    </div>
+
+    <div class="card">
+      <div class="kpis">
+        <div class="kpi"><div class="v" id="kDC"></div><div class="k">ΔC₁ one-time (K units)</div></div>
+        <div class="kpi"><div class="v" id="kDC$"></div><div class="k">ΔC₁ one-time ($)</div></div>
+        <div class="kpi"><div class="v" id="kDS"></div><div class="k">Δs saving / turn (K units)</div></div>
+        <div class="kpi"><div class="v" id="kN"></div><div class="k">n* break-even turns</div></div>
+        <div class="kpi"><div class="v" id="kSs"></div><div class="k">S* optimal fold size (K)</div></div>
+        <div class="kpi"><div class="v" id="kC"></div><div class="k">C(S) steady-state (K units/t)</div></div>
+        <div class="kpi"><div class="v" id="kCs"></div><div class="k">C(S*) steady-state (K units/t)</div></div>
+        <div class="kpi"><div class="v" id="kCH"></div><div class="k">≈ $ / 100 turns @ S*</div></div>
+      </div>
+      <div class="verdict" id="verdict"></div>
+    </div>
+  </div>
+
+  <h2>n*(S) — break-even turns vs fold size</h2>
+  <canvas id="cv1" width="1060" height="430"></canvas>
+  <div class="note">Dashed line = your cadence k. Region below k: folding pays back within one cycle.</div>
+
+  <h2>C(S) — steady-state per-turn cost vs fold size</h2>
+  <canvas id="cv2" width="1060" height="430"></canvas>
+  <div class="note">Star = S*, dot = your S. Lower is better; interior minimum exists when q·β &gt; r.</div>
+
+  <h2>Live pricing profiles (litellm, 2026-09-15)</h2>
+  <table id="ptable">
+    <thead><tr><th>Model</th><th>$in/M</th><th>$out/M</th><th>$cacheRead/M</th><th>$cacheWrite/M</th><th>w</th><th>r</th><th>q</th></tr></thead>
+    <tbody></tbody>
+  </table>
+  <div class="note">w/r/q derived as ratios of base input price (missing cache-write ⇒ w=1.0). Gemini entries reflect litellm's recorded implicit-caching discount; Google's explicit context caching is a different mechanism (storage fee) — treat its r as indicative only.</div>
+
+  <h2>Formulas</h2>
+  <pre>
+Prices (normalized, 1 unit = 1 token at base input price):  p_cw = w,  p_cr = r,  p_out = q
+Geometry:            V' = V - S                      post-fold view
+                     X  = h · V'                     first divergence point (cached prefix)
+                     T  = (1 - h) · V'               re-paid tail after a fold
+                     σ  = β · S                      summary output (persisted)
+
+One-time fold cost:  ΔC₁(h,S) = (w - r) · T + q·β·S - r·S          exact increment
+                     (upper bound when baseline cache can't be assumed: w · T instead of (w-r)·T)
+Per-turn saving:     Δs = (1 - β) · S · r̄ ,   r̄ = r + (g / (Vmin + S/2)) · (w - r)
+Break-even turns:    n*(S) = ΔC₁ / Δs                            strictly decreasing in S (fixed h)
+Steady-state cost:   C(S) = r̄·(Vmin + S/2) + (g/S) · [(w-r)(1-h)·Vmin + (qβ - r)·S]
+Optimal fold size:   S* = sqrt( 2·g·(w-r)·(1-h)·Vmin / r̄ )       interior when q·β > r
+Cadence guardrail:   k ≥ n*(S)                                    else each cycle loses money
+TTL extension:       r_eff = r + P_idle·(w - r)                   inter-turn gap &gt; provider TTL (~5 min)
+Dollar conversion:   $ = K-units × ($in/M) / 1000
+  </pre>
+</div>
+
+<script>
+"use strict";
+const PRESETS = [
+  // [id, label, w, r, q, $in/M, $out/M, $cr/M, $cw/M]
+  ["gpt-5.6",           "GPT-5.6 (OpenAI)",            1.25, 0.10, 5, 4,    20,   0.4,  5],
+  ["gpt-5.5",           "GPT-5.5 (OpenAI)",            1.0,  0.10, 6, 5,    30,   0.5,  null],
+  ["gpt-5.4",           "GPT-5.4 (OpenAI)",            1.0,  0.10, 6, 2.5,  15,   0.25, null],
+  ["gpt-5.4-mini",      "GPT-5.4 mini (OpenAI)",       1.0,  0.10, 6, 0.75, 4.5,  0.075,null],
+  ["gpt-5.1",           "GPT-5.1 (OpenAI)",            1.0,  0.10, 8, 1.25, 10,   0.125,null],
+  ["gpt-5",             "GPT-5 (OpenAI)",              1.0,  0.10, 8, 1.25, 10,   0.125,null],
+  ["gpt-5-mini",        "GPT-5 mini (OpenAI)",         1.0,  0.10, 8, 0.25, 2,    0.025,null],
+  ["o3",                "o3 (OpenAI)",                 1.0,  0.25, 4, 2,    8,    0.5,  null],
+  ["o4-mini",           "o4-mini (OpenAI)",            1.0,  0.25, 4, 1.1,  4.4,  0.275,null],
+  ["claude-opus-4-8",   "Claude Opus 4.8 (Anthropic)", 1.25, 0.10, 5, 5,    25,   0.5,  6.25],
+  ["claude-sonnet-5",   "Claude Sonnet 5 (Anthropic)", 1.25, 0.10, 5, 2,    10,   0.2,  2.5],
+  ["claude-sonnet-4-6", "Claude Sonnet 4.6 (Anthropic)",1.25,0.10, 5, 3,    15,   0.3,  3.75],
+  ["claude-haiku-4-5",  "Claude Haiku 4.5 (Anthropic)",1.25, 0.10, 5, 1,    5,    0.1,  1.25],
+  ["gemini-2.5-pro",    "Gemini 2.5 Pro (Google)",     1.0,  0.10, 8, 1.25, 10,   0.125,null],
+  ["gemini-3-pro",      "Gemini 3 Pro preview (Google)",1.0, 0.10, 6, 2,    12,   0.2,  null],
+  ["gemini-3.5-flash",  "Gemini 3.5 Flash (Google)",   1.0,  0.10, 6, 1.5,  9,    0.15, null],
+  ["custom",            "Custom…",                     1.0,  0.10, 5, 1,    5,    null, null],
+];
+
+const $ = (id) => document.getElementById(id);
+const sel = $("preset");
+for (const p of PRESETS) sel.add(new Option(p[1], p[0]));
+sel.value = "gpt-5.4";
+
+// pricing table
+{
+  const tb = $("ptable").tBodies[0];
+  for (const p of PRESETS.slice(0, -1)) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td>${p[1]}</td><td>${p[5]}</td><td>${p[6]}</td><td>${p[7] ?? "–"}</td><td>${p[8] ?? "–"}</td><td>${p[2].toFixed(2)}</td><td>${p[3].toFixed(2)}</td><td>${p[4]}</td>`;
+    tb.appendChild(tr);
+  }
+}
+
+function params() {
+  const p = PRESETS.find((x) => x[0] === sel.value);
+  let w, r, q, pin, pout;
+  if (sel.value === "custom") {
+    w = num($("cw"), 1); r = num($("cr"), 0.1); q = num($("qo"), 5);
+    pin = num($("pin"), 1); pout = num($("pout"), 5);
+  } else {
+    [,, w, r, q, pin, pout] = p;
+  }
+  return {
+    w, r, q, pin, pout,
+    V: +$("V").value, S: +$("S").value, h: +$("h").value,
+    beta: +$("beta").value, g: +$("g").value, Vmin: +$("Vmin").value, k: +$("k").value,
+  };
+}
+function num(el, dflt) { const v = parseFloat(el.value); return isFinite(v) && v > 0 ? v : dflt; }
+
+// ── core model (mirrors docs/compression-economics.md) ────────────────────
+function rbar(P, S) { return P.r + (P.g / Math.max(1, P.Vmin + S / 2)) * (P.w - P.r); }
+function dC1(P, S) {
+  const Vp = Math.max(0, P.V - S);
+  return (P.w - P.r) * (1 - P.h) * Vp + P.q * P.beta * S - P.r * S;
+}
+function dsav(P, S) { return (1 - P.beta) * S * rbar(P, S); }
+function nstar(P, S) { const s = dsav(P, S); return s > 0 ? dC1(P, S) / s : Infinity; }
+function cSteady(P, S) {
+  if (S <= 0) return Infinity;
+  const rb = rbar(P, S);
+  return rb * (P.Vmin + S / 2) + (P.g / S) * ((P.w - P.r) * (1 - P.h) * P.Vmin + (P.q * P.beta - P.r) * S);
+}
+function sStar(P) {
+  if (P.q * P.beta <= P.r) return null;
+  const rb = rbar(P, 0);
+  return Math.sqrt((2 * P.g * (P.w - P.r) * (1 - P.h) * P.Vmin) / rb);
+}
+const f1 = (x) => (isFinite(x) ? x.toFixed(1) : "∞");
+const f2 = (x) => (isFinite(x) ? x.toFixed(2) : "∞");
+const usd = (kunits, pin) => "$" + (kunits * pin / 1000).toFixed(kunits * pin / 1000 < 10 ? 3 : 1);
+
+// ── canvas helpers ─────────────────────────────────────────────────────────
+function plot(cv, fn, opts) {
+  const dpr = window.devicePixelRatio || 1;
+  const W = cv.width, H = cv.height;
+  cv.style.height = "auto";
+  const ctx = cv.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const w = W / dpr, hgt = H / dpr;
+  const M = { l: 60, r: 18, t: 26, b: 42 };
+  const iw = w - M.l - M.r, ih = hgt - M.t - M.b;
+  const X = (v) => M.l + ((v - opts.x0) / (opts.x1 - opts.x0)) * iw;
+  const Y = (v) => M.t + ih - ((v - opts.y0) / (opts.y1 - opts.y0)) * ih;
+  ctx.clearRect(0, 0, w, hgt);
+  ctx.font = "12px ui-sans-serif,system-ui,sans-serif";
+  // grid + axes
+  ctx.strokeStyle = "#334155"; ctx.fillStyle = "#94a3b8"; ctx.lineWidth = 1;
+  const ny = 5, nx = 6;
+  for (let i = 0; i <= ny; i++) {
+    const v = opts.y0 + ((opts.y1 - opts.y0) * i) / ny, y = Y(v);
+    ctx.beginPath(); ctx.moveTo(M.l, y); ctx.lineTo(M.l + iw, y); ctx.stroke();
+    ctx.textAlign = "right"; ctx.fillText(opts.fy(v), M.l - 6, y + 4);
+  }
+  for (let i = 0; i <= nx; i++) {
+    const v = opts.x0 + ((opts.x1 - opts.x0) * i) / nx, x = X(v);
+    ctx.textAlign = "center"; ctx.fillText(opts.fx(v), x, M.t + ih + 18);
+  }
+  ctx.strokeStyle = "#64748b";
+  ctx.strokeRect(M.l, M.t, iw, ih);
+  // clip curves to frame
+  ctx.save(); ctx.beginPath(); ctx.rect(M.l, M.t, iw, ih); ctx.clip();
+  if (opts.hline !== undefined) {
+    ctx.strokeStyle = "#fbbf24"; ctx.setLineDash([6, 4]);
+    const y = Y(opts.hline);
+    ctx.beginPath(); ctx.moveTo(M.l, y); ctx.lineTo(M.l + iw, y); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = "#fbbf24"; ctx.textAlign = "left";
+    ctx.fillText(opts.hlabel ?? "", M.l + 6, y - 5);
+  }
+  ctx.strokeStyle = opts.color; ctx.lineWidth = 2.5; ctx.beginPath();
+  let started = false;
+  for (let i = 0; i <= 240; i++) {
+    const x = opts.x0 + ((opts.x1 - opts.x0) * i) / 240;
+    const y = fn(x);
+    if (!isFinite(y) || y > opts.y1 * 1.05 || y < opts.y0) { started = false; continue; }
+    if (!started) { ctx.moveTo(X(x), Y(y)); started = true; } else ctx.lineTo(X(x), Y(y));
+  }
+  ctx.stroke();
+  if (opts.markX !== undefined) {
+    const y = fn(opts.markX);
+    if (isFinite(y) && y <= opts.y1 && y >= opts.y0) {
+      ctx.strokeStyle = "#64748b"; ctx.setLineDash([3, 3]);
+      ctx.beginPath(); ctx.moveTo(X(opts.markX), M.t); ctx.lineTo(X(opts.markX), M.t + ih); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = opts.markColor ?? "#38bdf8";
+      ctx.beginPath(); ctx.arc(X(opts.markX), Y(y), 5, 0, 7); ctx.fill();
+    }
+  }
+  if (opts.starX !== undefined) {
+    const y = fn(opts.starX);
+    if (isFinite(y) && y <= opts.y1 && y >= opts.y0) {
+      ctx.fillStyle = "#4ade80";
+      star(ctx, X(opts.starX), Y(y), 7);
+    }
+  }
+  ctx.restore();
+  ctx.fillStyle = "#e2e8f0"; ctx.font = "bold 13px ui-sans-serif,system-ui,sans-serif";
+  ctx.textAlign = "left"; ctx.fillText(opts.title, M.l + 4, 16);
+  ctx.fillStyle = "#94a3b8"; ctx.font = "12px ui-sans-serif,system-ui,sans-serif";
+  ctx.textAlign = "center"; ctx.fillText(opts.xlabel, M.l + iw / 2, hgt - 8);
+}
+function star(ctx, x, y, r) {
+  ctx.beginPath();
+  for (let i = 0; i < 10; i++) {
+    const rad = i % 2 ? r / 2.4 : r, a = (Math.PI / 5) * i - Math.PI / 2;
+    const px = x + rad * Math.cos(a), py = y + rad * Math.sin(a);
+    i ? ctx.lineTo(px, py) : ctx.moveTo(px, py);
+  }
+  ctx.closePath(); ctx.fill();
+}
+
+function render() {
+  $("customBox").style.display = sel.value === "custom" ? "" : "none";
+  const P = params();
+  const Smax = Math.min(120, P.V - 5, P.Vmin + 110);
+  if (P.S > Smax) { $("S").value = Smax; P.S = Smax; }
+  $("vV").textContent = P.V + "K"; $("vS").textContent = P.S + "K";
+  $("vh").textContent = P.h.toFixed(2); $("vb").textContent = P.beta.toFixed(3);
+  $("vg").textContent = P.g + "K"; $("vVm").textContent = P.Vmin + "K"; $("vk").textContent = P.k;
+
+  const dc1 = dC1(P, P.S), ds = dsav(P, P.S), ns = nstar(P, P.S), ss = sStar(P);
+  const cs = cSteady(P, P.S), css = ss ? cSteady(P, ss) : NaN;
+  $("kDC").textContent = f1(dc1);
+  $("kDC$").textContent = usd(dc1, P.pin);
+  $("kDS").textContent = f1(ds);
+  $("kN").textContent = f1(ns);
+  $("kSs").textContent = ss ? f1(ss) : "— (qβ≤r)";
+  $("kC").textContent = f1(cs);
+  $("kCs").textContent = isFinite(css) ? f1(css) : "—";
+  $("kCH").textContent = isFinite(css) ? usd(css * 100, P.pin) : "—";
+
+  const vd = $("verdict");
+  if (!isFinite(ns)) { vd.className = "verdict bad"; vd.textContent = "Δs ≤ 0 — folding saves nothing per turn here; don't fold."; }
+  else if (P.k >= ns) {
+    vd.className = "verdict ok";
+    let t = `Net-positive: pays back in ${f1(ns)} turns, actual cadence ${P.k}.`;
+    if (ss && Math.abs(P.S - ss) / ss < 0.15) t += ` Fold size near optimal (S*=${f1(ss)}K).`;
+    else if (ss) t += ` S=${P.S}K vs S*=${f1(ss)}K — ${P.S > ss ? "larger folds save more per-cycle cost but risk quality" : "smaller folds cost more per turn"} than price-optimal.`;
+    vd.textContent = t;
+  } else {
+    vd.className = "verdict bad";
+    vd.textContent = `Cadence too fast: needs ${f1(ns)} turns to break even but folds every ${P.k}. Slow down (raise growth floor) or fold larger.`;
+  }
+
+  const X0 = 5, X1 = Math.max(60, Smax);
+  plot($("cv1"), (S) => nstar(P, S), {
+    x0: X0, x1: X1, y0: 0, y1: Math.max(10, ns * 1.6, P.k * 1.3),
+    fx: (v) => v + "K", fy: (v) => f1(v),
+    hline: P.k, hlabel: `k = ${P.k} turns`,
+    markX: P.S, title: `n*(S) — ${sel.selectedOptions[0].text}`,
+    xlabel: "fold size S (K tokens)", color: "#38bdf8",
+  });
+  const y1c = Math.max(cs, css, 1) * 1.5;
+  plot($("cv2"), (S) => cSteady(P, S), {
+    x0: X0, x1: X1, y0: 0, y1: y1c,
+    fx: (v) => v + "K", fy: (v) => f1(v),
+    markX: P.S, starX: ss ?? undefined,
+    title: `C(S) — ${sel.selectedOptions[0].text}`,
+    xlabel: "fold size S (K tokens)", color: "#38bdf8",
+  });
+}
+
+document.querySelectorAll("input,select").forEach((el) => el.addEventListener("input", render));
+render();
+</script>
+</body>
+</html>
