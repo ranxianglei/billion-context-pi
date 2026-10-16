@@ -119,7 +119,7 @@ async function setupLiveRefChild(dir: string) {
     await writeJsonl(childJsonl, "child-sid", childEntries, parentJsonl);
 
     const { api, handlers } = captureApi();
-    createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+    createAcpExtension({ rollover: false, modelContextLimit: 200_000 })(api as any);
     const parentCtx = forkCtx(persisted, parentJsonl, "parent-sid");
     await handlers.get("session_start")![0]!({ type: "session_start", reason: "startup" }, parentCtx);
     const sendView = [...persisted.map(rawOf), ...liveTail.map(rawOf)];
@@ -225,7 +225,7 @@ test("issue #579: single-message-ref decompress resolves an inherited live-* ref
  *  (setup's finally already restored the env around setup). */
 function freshForkInstance(flushed: any[], parentJsonl: string) {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+  createAcpExtension({ rollover: false, modelContextLimit: 200_000 })(api as any);
   const ctx = forkCtx(flushed, parentJsonl, "parent-sid");
   return { api, handlers, ctx, decompressTool: api.tools.find((t: any) => t.name === "decompress")! };
 }
@@ -324,7 +324,7 @@ test("issue #579: multi-tool-call live ref remaps #callId cores back onto the al
       { sessionId: "parent-sid", sessionFile: parentJsonl }), true);
 
     const { api } = captureApi();
-    createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+    createAcpExtension({ rollover: false, modelContextLimit: 200_000 })(api as any);
     const decompressTool = api.tools.find((t: any) => t.name === "decompress")!;
     const childCtx = forkCtx(childEntries, childJsonl, "child-sid");
     const res = await decompressTool.execute("tc5", { blockId: "b2", inline: true }, undefined, undefined, childCtx);
@@ -354,7 +354,7 @@ test("issue #579: honest error preserved when the aliased content was never pers
       liveRefOrigins: [{ rawId: alias, identity: messageIdentity({ role: "user", content: "NEVER-PERSISTED-CONTENT", timestamp: 0 }) }],
     });
     const { api } = captureApi();
-    createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+    createAcpExtension({ rollover: false, modelContextLimit: 200_000 })(api as any);
     const decompressTool = api.tools.find((t: any) => t.name === "decompress")!;
     const sCtx = forkCtx(sEntries, sJsonl, "s-sid");
     const res = await decompressTool.execute("tc6", { blockId: "b9", inline: true }, undefined, undefined, sCtx);

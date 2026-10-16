@@ -11,7 +11,7 @@ import { tmpPath } from "./tmp-path.js";
 // blocks shaped as the exported BcpBlockV1, atomically replaced.
 test("saved sidecar carries schemaVersion/producer and BcpBlockV1-shaped blocks", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000, preserveRecentMessages: 1 })(api as any);
+  createAcpExtension({ rollover: false, modelContextLimit: 200_000, preserveRecentMessages: 1 })(api as any);
   const stateFile = tmpPath("pai-acp-contract.session.json");
   await rm(`${stateFile}.acp.json`, { force: true });
   const entries = [

@@ -77,7 +77,7 @@ async function setupDerivedChild(dir: string, levels: 1 | 2) {
   }
 
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+  createAcpExtension({ rollover: false, modelContextLimit: 200_000 })(api as any);
 
   const parentCtx = fakeCtx(parentEntries, parentJsonl, "parent-sid");
   await handlers.get("context")![0]!({ type: "context", messages: [] }, parentCtx);

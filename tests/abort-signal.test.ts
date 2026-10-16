@@ -64,7 +64,7 @@ test("assertNotAborted passes for undefined/fresh signal, throws AbortError when
 
 test("compress rejects with AbortError on a pre-aborted signal and persists nothing", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+  createAcpExtension({ rollover: false, modelContextLimit: 200_000 })(api as any);
   const stateFile = statePath("abort-compress");
   await rm(`${stateFile}.acp.json`, { force: true });
   const entries = [userMsg("e1", "hello world"), userMsg("e2", "more context here to compress")];
@@ -93,7 +93,7 @@ test("compress rejects with AbortError on a pre-aborted signal and persists noth
 
 test("decompress rejects with AbortError on a pre-aborted signal", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+  createAcpExtension({ rollover: false, modelContextLimit: 200_000 })(api as any);
   const stateFile = statePath("abort-decompress");
   await rm(`${stateFile}.acp.json`, { force: true });
   const entries = [userMsg("e1", "hello world"), userMsg("e2", "more context here")];
@@ -113,7 +113,7 @@ test("decompress rejects with AbortError on a pre-aborted signal", async () => {
 
 test("compress completes normally when given a live (unaborted) signal", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+  createAcpExtension({ rollover: false, modelContextLimit: 200_000 })(api as any);
   const stateFile = statePath("abort-live");
   await rm(`${stateFile}.acp.json`, { force: true });
   const entries = [userMsg("e1", "hello world"), userMsg("e2", "中".repeat(300))];
