@@ -225,3 +225,40 @@ test("freshness: no valid anchor anywhere → not fresh, lastRealTokens 0", () =
   assert.equal(r.fresh, false);
   assert.equal(r.lastRealTokens, 0);
 });
+
+// issue #665: turnFailed keys off stopReason only. A silent provider that reports
+// zero usage on a COMPLETED stop (#258) must keep firing emergencies — deferral on
+// `!fresh` alone would suppress them forever for such sessions.
+test("turnFailed: errored latest assistant → true", () => {
+  const entries = [
+    msg("e0", { role: "user", content: "go" }),
+    assistantUsage("e1"),
+    msg("e2", { role: "assistant", content: "err", stopReason: "error" }),
+  ];
+  assert.equal(compressionAnchorStaleness(entries, [], ct).turnFailed, true);
+});
+
+test("turnFailed: aborted latest assistant → true even with usage", () => {
+  const entries = [
+    msg("e0", { role: "user", content: "go" }),
+    msg("e1", { role: "assistant", content: "ab", stopReason: "aborted", usage: USAGE }),
+  ];
+  assert.equal(compressionAnchorStaleness(entries, [], ct).turnFailed, true);
+});
+
+test("turnFailed: completed zero-usage assistant (silent provider) → false", () => {
+  const entries = [
+    msg("e0", { role: "user", content: "go" }),
+    msg("e1", { role: "assistant", content: "ok", usage: { input: 0, cacheRead: 0, cacheWrite: 0 } }),
+  ];
+  assert.equal(compressionAnchorStaleness(entries, [], ct).turnFailed, false);
+});
+
+test("turnFailed: successful latest assistant → false", () => {
+  const entries = [msg("e0", { role: "user", content: "go" }), assistantUsage("e1")];
+  assert.equal(compressionAnchorStaleness(entries, [], ct).turnFailed, false);
+});
+
+test("turnFailed: no assistant at all → false", () => {
+  assert.equal(compressionAnchorStaleness([msg("e0", { role: "user", content: "go" })], [], ct).turnFailed, false);
+});

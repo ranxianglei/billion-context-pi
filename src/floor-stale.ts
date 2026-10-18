@@ -98,6 +98,11 @@ export interface AnchorStaleness {
   fresh: boolean;
   // total tokens of the last valid usage anchor (0 if none); the real floor base
   lastRealTokens: number;
+  // #665: the latest assistant turn never completed (stopReason error/aborted).
+  // Keyed on stopReason, NOT usage: silent providers that report zero usage on a
+  // completed stop (#258) must keep firing emergencies. While this is true no
+  // compress call can land, so the emergency nudge is deferred by the caller.
+  turnFailed: boolean;
 }
 
 // issue #325: flooring at a stale anchor's raw value re-fires a false EMERGENCY,
@@ -120,5 +125,8 @@ export function compressionAnchorStaleness(
   }
   const lastAssistant = scan.lastAssistantIdx >= 0 ? entries[scan.lastAssistantIdx] : undefined;
   const fresh = !!lastAssistant?.message && isFreshAnchor(lastAssistant.message);
-  return { predates: scan.lastCompressIdx > scan.lastUsageIdx, netReclaimed, fresh, lastRealTokens: scan.lastUsageTotal };
+  const turnFailed =
+    !!lastAssistant?.message &&
+    (lastAssistant.message.stopReason === "error" || lastAssistant.message.stopReason === "aborted");
+  return { predates: scan.lastCompressIdx > scan.lastUsageIdx, netReclaimed, fresh, lastRealTokens: scan.lastUsageTotal, turnFailed };
 }

@@ -361,6 +361,7 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     runtime.dropSizeDivergence(sid);
     runtime.dropTerminalEscape(sid);
     runtime.dropTruncationSkipped(sid);
+    runtime.dropEmergencyDeferred(sid);
     runtime.dropSentViewCount(sid);
     runtime.dropProjectionCache(sid);
     dropLiveOnlyTailCache(sid);
@@ -477,7 +478,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
       // it (issue #325, floor-stale.ts) instead of skipping the floor entirely —
       // the skip dropped the meter onto the undercounting estimate (~70-80K low)
       // and the next fresh reading snapped it back into the emergency band.
-      const { predates, netReclaimed, fresh, lastRealTokens } = compressionAnchorStaleness(entries, state.blocks, defaultCountTokens);
+      const { predates, netReclaimed, fresh, lastRealTokens, turnFailed } = compressionAnchorStaleness(entries, state.blocks, defaultCountTokens);
       // issue #600: when the previous model turn yielded no fresh provider usage
       // (errored / aborted / zero-usage — e.g. a network "fetch failed"), the host's
       // getContextUsage() has no anchor and reports the raw session-tree total
@@ -848,8 +849,23 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
       // kernel's emergency truncation still shrinks context mechanically.
       const retryCapped = runtime.compressRetryCappedFor(sid, retryTurnKey);
       const reInjectReady = shownAt === undefined || tokenCount - shownAt >= reInjectFloor;
-      const alreadyShown = retryCapped || (!emergency && runtime.nudgeShownFor(sid, turnKey) && !reInjectReady);
-      if (!alreadyShown) {
+      // issue #665: the previous model turn never completed (provider error / abort),
+      // so no compress call can land this window — injecting the emergency voice would
+      // reach every failing LLM call yet no model that can act on it, and the TUI would
+      // flash EMERGENCY during a plain network outage. Defer until the first COMPLETED
+      // turn: it carries fresh usage (#600 keeps the meter honest there) and re-fires
+      // the emergency immediately because nothing is marked shown/recorded while
+      // deferred. Kernel-side emergency truncation still shrinks the sent view
+      // mechanically on every attempt, so overflow protection is untouched.
+      const deferEmergency = emergency && turnFailed;
+      const alreadyShown = deferEmergency || retryCapped || (!emergency && runtime.nudgeShownFor(sid, turnKey) && !reInjectReady);
+      if (deferEmergency) {
+        logWarn("nudge", { sid, event: "emergency-deferred", pct: Math.round(turn.nudge.contextUsage * 100), reason: turn.nudge.reason });
+        if (runtime.noteEmergencyDeferred(sid, true) && ctx.hasUI) {
+          ctx.ui.notify("[ACP] previous model turn failed — emergency compress deferred until a turn completes (truncation still active).");
+        }
+        debug.event("nudge-suppressed", { sid: ctx.sessionManager.getSessionId(), turnKey, reason: turn.nudge.reason, deferred: true, tokenCount });
+      } else if (!alreadyShown) {
         rebuilt.push(nudgeMessage(turn.nudge, turn.state.blocks.filter((b) => b.active), runtime.prompts, activeNudgeSections(runtime, ctx)));
         const rendered = renderNudgeText(turn.nudge, runtime.prompts, activeNudgeSections(runtime, ctx));
         const top = [...turn.nudge.compressibleRanges].sort((a, b) => b.tokens - a.tokens)[0];
@@ -878,6 +894,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
       } else {
         debug.event("nudge-suppressed", { sid: ctx.sessionManager.getSessionId(), turnKey, reason: turn.nudge.reason, shownAt: shownAt ?? null, tokenCount, adaptiveGrowth, reInjectFloor });
       }
+      if (!deferEmergency) runtime.noteEmergencyDeferred(sid, false);
     }
 
     if (outcome !== null && outcome.cappedNow) {

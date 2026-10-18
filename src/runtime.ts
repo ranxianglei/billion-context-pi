@@ -225,6 +225,13 @@ export interface AcpRuntime {
   noteTruncationSkipped(sid: string, active: boolean): boolean;
   /** Drop a session's truncation-skipped episode (session_shutdown). */
   dropTruncationSkipped(sid: string): void;
+  /** Track the #665 emergency-deferral episode: while the latest model turn has
+   *  failed and pressure sits in the emergency band, returns true exactly once
+   *  so the caller notifies once instead of on every failing LLM call. A
+   *  non-deferred nudge decision ends the episode. */
+  noteEmergencyDeferred(sid: string, active: boolean): boolean;
+  /** Drop a session's emergency-deferral episode (session_shutdown). */
+  dropEmergencyDeferred(sid: string): void;
 }
 // omp fires the context event before the current user message is persisted to
 // the session branch, so merge event.messages (exact messages about to be sent,
@@ -682,6 +689,22 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   function dropTruncationSkipped(sid: string): void {
     truncationSkipEpisodes.delete(sid);
   }
+  // [#665] while the latest model turn errored/aborted an emergency nudge cannot
+  // be executed (compress needs a turn that completes) — defer it and tell the
+  // user once per outage episode.
+  const emergencyDeferredEpisodes = new Set<string>();
+  function noteEmergencyDeferred(sid: string, active: boolean): boolean {
+    if (!active) {
+      emergencyDeferredEpisodes.delete(sid);
+      return false;
+    }
+    if (emergencyDeferredEpisodes.has(sid)) return false;
+    emergencyDeferredEpisodes.add(sid);
+    return true;
+  }
+  function dropEmergencyDeferred(sid: string): void {
+    emergencyDeferredEpisodes.delete(sid);
+  }
 
   // [#361] session ids already logged for the strict-echo auto-disable, so the
   // info event fires once per session rather than once per LLM call.
@@ -918,4 +941,4 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   let refused = false;
   let refusalMessage: string | null = null;
   let delegateStoodDown = false;
-  return { core, store, get refused() { return refused; }, set refused(v: boolean) { refused = v; }, get refusalMessage() { return refusalMessage; }, set refusalMessage(v: string | null) { refusalMessage = v; }, get delegateStoodDown() { return delegateStoodDown; }, set delegateStoodDown(v: boolean) { delegateStoodDown = v; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown, nudgeShownFor, nudgeShownTokensFor, clearNudgeTracking, clearNudgeTokenStamps, markNudgeRecorded, nudgeRecordedFor, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reasoningDropFor, reloadConfig, stateFor, save, deriveChildState: deriveChild, acquireLock, overflowFor, overflowDrop, noteSentViewCount, peekSentViewCount, dropSentViewCount, dropProjectionCache, noteDeadCompress, clearDeadCompress, throttleFor, throttleDrop , noteTokenScale, dropTokenScale, noteKhatUsage, khatFor, setKhatPending, dropKhat, noteHostUsage, dropHostUsageSamples, noteSizeDivergence, dropSizeDivergence, noteTerminalEscape, dropTerminalEscape, noteTruncationSkipped, dropTruncationSkipped, stripImagesFor };}
+  return { core, store, get refused() { return refused; }, set refused(v: boolean) { refused = v; }, get refusalMessage() { return refusalMessage; }, set refusalMessage(v: string | null) { refusalMessage = v; }, get delegateStoodDown() { return delegateStoodDown; }, set delegateStoodDown(v: boolean) { delegateStoodDown = v; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown, nudgeShownFor, nudgeShownTokensFor, clearNudgeTracking, clearNudgeTokenStamps, markNudgeRecorded, nudgeRecordedFor, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reasoningDropFor, reloadConfig, stateFor, save, deriveChildState: deriveChild, acquireLock, overflowFor, overflowDrop, noteSentViewCount, peekSentViewCount, dropSentViewCount, dropProjectionCache, noteDeadCompress, clearDeadCompress, throttleFor, throttleDrop , noteTokenScale, dropTokenScale, noteKhatUsage, khatFor, setKhatPending, dropKhat, noteHostUsage, dropHostUsageSamples, noteSizeDivergence, dropSizeDivergence, noteTerminalEscape, dropTerminalEscape, noteTruncationSkipped, dropTruncationSkipped, noteEmergencyDeferred, dropEmergencyDeferred, stripImagesFor };}
