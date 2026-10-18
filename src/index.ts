@@ -484,15 +484,15 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
       // (uncompressed, only grows). Flooring at that transient inflation drags the
       // raise-only meter into the emergency band and drives redundant compresses
       // (each "recovers" once a fresh reading lands). Reject it: floor at the last
-       // REAL provider reading instead, and suspend the downward calibration below —
-       // a stale reading must not cap the current estimate down, or growth since
-       // that reading would be hidden. Fresh turns take this path unchanged. With NO
-       // prior anchor at all nothing has ever been compressed, so the tree-sum carries
-       // no ACP inflation and IS the true size — keep trusting it (rejecting it would
-       // drop the floor to 0, blinding the meter and its terminal-escape backstop).
-       const reportedHost = realUsage?.tokens ?? 0;
-       const realPromptTokens = fresh || lastRealTokens <= 0 ? reportedHost : lastRealTokens;
-       if (!fresh && lastRealTokens > 0 && reportedHost > 0) {
+      // REAL provider reading instead, and suspend the downward calibration below —
+      // a stale reading must not cap the current estimate down, or growth since
+      // that reading would be hidden. Fresh turns take this path unchanged. With NO
+      // prior anchor at all nothing has ever been compressed, so the tree-sum carries
+      // no ACP inflation and IS the true size — keep trusting it (rejecting it would
+      // drop the floor to 0, blinding the meter and its terminal-escape backstop).
+      const reportedHost = realUsage?.tokens ?? 0;
+      const realPromptTokens = fresh || lastRealTokens <= 0 ? reportedHost : lastRealTokens;
+      if (!fresh && lastRealTokens > 0 && reportedHost > 0) {
         logInfo("turn", { sid, event: "host-tree-sum-rejected", reported: reportedHost, flooredAt: lastRealTokens });
       }
       const hostFloor = realPromptTokens > 0 ? Math.max(0, realPromptTokens - (predates ? netReclaimed : 0)) : 0;
