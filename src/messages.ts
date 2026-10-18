@@ -3,7 +3,7 @@ import { defaultCountTokens, type CoreMessage } from "acp-kernel";
 import { rewriteTagTokens } from "./tag-tokens.js";
 import type { TurnBoundaryEntry } from "./turn-boundary.js";
 
-type AgentMessage = SessionMessageEntry["message"];
+export type AgentMessage = SessionMessageEntry["message"];
 
 type AnyMessage = {
   role?: string;
@@ -64,22 +64,89 @@ export function isCustomMessageEntry(entry: TurnBoundaryEntry): entry is TurnBou
   return extractText(entry.content).length > 0;
 }
 
+/** SDK ≥1.x `context_edit` session entry (absent from the pinned 0.83.0 types,
+ *  hence the structural guard below): replaces the content of the entry with
+ *  id `targetId`, or omits it from model context when replacement is null.
+ *  The LAST edit per target wins — the same single-pass resolution the SDK's
+ *  buildSessionProjection uses (map.set overwrites). */
+/** Entry type discriminator for SDK ≥1.x context_edit entries. */
+export const CONTEXT_EDIT_ENTRY_TYPE = "context_edit";
+
+export interface ContextEditEntry {
+  type: "context_edit";
+  targetId: string;
+  replacement: { content: unknown } | null;
+}
+
+// Structural guard: the pinned pi-coding-agent devDep predates context_edit, so
+// SessionEntry's union has no such member and a literal compare on it would not
+// typecheck.
+function isContextEditEntry(entry: unknown): entry is ContextEditEntry {
+  return typeof entry === "object" && entry !== null && (entry as { type?: unknown }).type === CONTEXT_EDIT_ENTRY_TYPE;
+}
+
+export type ContextEditReplacement = { content: unknown } | null;
+
+/** Latest context_edit per target entry id (last wins); null = omit from
+ *  context. Session files are parsed without validation, so malformed edits
+ *  (missing targetId / replacement shape) are ignored rather than trusted. */
+export function resolveContextEdits(entries: readonly { type: string }[]): Map<string, ContextEditReplacement> {
+  const edits = new Map<string, ContextEditReplacement>();
+  for (const entry of entries) {
+    if (!isContextEditEntry(entry)) continue;
+    if (!entry.targetId) continue;
+    const r = entry.replacement;
+    if (r === null || (typeof r === "object" && r !== null && "content" in (r as Record<string, unknown>))) {
+      edits.set(entry.targetId, r);
+    }
+  }
+  return edits;
+}
+
+// Mirror the SDK's projectContextEntry: assistant/toolResult messages normalize
+// a string replacement into text blocks; user/custom keep the content as-is.
+function editedContent(replacement: { content: unknown }, role: string | undefined): unknown {
+  if ((role === "assistant" || role === "toolResult") && typeof replacement.content === "string") {
+    return [{ type: "text", text: replacement.content }];
+  }
+  return replacement.content;
+}
+
+/** Project one entry to core messages with the resolved context_edits applied
+ *  (issue #662). Shared by the full projection and EntryProjectionCache's
+ *  incremental append so the two paths can never drift apart. */
+function projectEntry(entry: SessionEntry, edits: Map<string, ContextEditReplacement>): CoreMessage[] {
+  if (entry.type !== "message") {
+    // custom_message participates in LLM context per Pi native semantics
+    // (session-manager.d.ts) — project it as a user message.
+    if (entry.type === "custom_message") {
+      if (entry.customType !== undefined && CONTEXT_EXCLUDED_CUSTOM_TYPES.has(entry.customType)) return [];
+      const replacement = edits.get(entry.id);
+      if (replacement === null) return [];
+      const content = replacement === undefined ? entry.content : replacement.content;
+      const text = extractText(content);
+      return text.length > 0 ? [{ id: entry.id, role: "user", contentType: "text", text }] : [];
+    }
+    return [];
+  }
+  const replacement = edits.get(entry.id);
+  if (replacement === null) return [];
+  const message = entry.message;
+  if (replacement === undefined) return projectMessage(message, entry.id);
+  const role = (message as AnyMessage).role;
+  if (role !== "user" && role !== "assistant" && role !== "toolResult") return projectMessage(message, entry.id);
+  return projectMessage({ ...(message as object), content: editedContent(replacement, role) } as AgentMessage, entry.id);
+}
+
 export function entriesToCoreMessages(entries: SessionEntry[]): CoreMessage[] {
+  // Materialize the latest context_edit per target before projection (#662):
+  // hosts grow persisted entries in place via appended edits, so projecting
+  // the raw entry would show stale initial content ('#' instead of the full
+  // partial response that native JSONL / buildSessionContext carry).
+  const edits = resolveContextEdits(entries);
   const out: CoreMessage[] = [];
   for (const entry of entries) {
-    if (entry.type !== "message") {
-      // custom_message participates in LLM context per Pi native semantics
-      // (session-manager.d.ts) — project it as a user message.
-      if (isCustomMessageEntry(entry)) {
-        const text = extractText(entry.content);
-        if (text.length > 0) {
-          out.push({ id: entry.id, role: "user", contentType: "text", text });
-        }
-      }
-      continue;
-    }
-    const cores = projectMessage(entry.message, entry.id);
-    out.push(...cores);
+    out.push(...projectEntry(entry, edits));
   }
   return out;
 }
@@ -101,7 +168,10 @@ const MAX_INCREMENTAL_ENTRIES = 64;
  *    - count only ever GROWS (a drop = host rewind/truncate → full reproject),
  *    - the first and last cached boundary entries still carry the same ids
  *      (canaries against in-place rewrites the count check cannot see),
- *    - at most MAX_INCREMENTAL_ENTRIES new entries per turn.
+ *    - at most MAX_INCREMENTAL_ENTRIES new entries per turn,
+ *    - no new context_edit in the tail targets a cached-prefix entry (#662):
+ *      an appended edit re-projects an earlier entry in place, which the count
+ *      and canary checks above cannot see.
  *  Any doubt → full entriesToCoreMessages, identical result, just slower. */
 export class EntryProjectionCache {
   private count = 0;
@@ -121,16 +191,15 @@ export class EntryProjectionCache {
       this.firstId !== null &&
       this.lastId !== null &&
       entries[0]?.id === this.firstId &&
-      entries[this.count - 1]?.id === this.lastId
+      entries[this.count - 1]?.id === this.lastId &&
+      !newTailTargetsCachedPrefix(entries, this.count)
     ) {
+      // Full-array edit map, not just the tail: an edit may legally precede its
+      // target (the SDK resolves position-independently), so a tail entry can be
+      // governed by an edit that was already cached and harmlessly inert before.
+      const edits = resolveContextEdits(entries);
       for (let i = this.count; i < entries.length; i++) {
-        const entry = entries[i]!;
-        if (entry.type === "message") {
-          this.cores.push(...projectMessage(entry.message, entry.id));
-        } else if (isCustomMessageEntry(entry)) {
-          const text = extractText(entry.content);
-          if (text.length > 0) this.cores.push({ id: entry.id, role: "user", contentType: "text", text });
-        }
+        this.cores.push(...projectEntry(entries[i]!, edits));
       }
       this.count = entries.length;
       this.lastId = entries[entries.length - 1]!.id;
@@ -150,6 +219,24 @@ export class EntryProjectionCache {
     this.lastId = null;
     this.cores = [];
   }
+}
+
+// True when a context_edit appended after index `count` targets an entry inside
+// entries[0..count) — i.e. the cached prefix's projection is stale (#662). The
+// linear rescan is cheap (string id compares) and runs only on the incremental
+// path when the tail actually contains edits.
+function newTailTargetsCachedPrefix(entries: SessionEntry[], count: number): boolean {
+  for (let i = count; i < entries.length; i++) {
+    // Read-only structural access: isContextEditEntry cannot narrow a SessionEntry
+    // (the union has no context_edit member → empty intersection), so compare the
+    // discriminator directly on a minimal view of the entry.
+    const tail = entries[i]! as { type?: string; targetId?: string };
+    if (tail.type !== CONTEXT_EDIT_ENTRY_TYPE || !tail.targetId) continue;
+    for (let j = 0; j < count; j++) {
+      if (entries[j]?.id === tail.targetId) return true;
+    }
+  }
+  return false;
 }
 
 function projectMessage(message: AgentMessage, id: string): CoreMessage[] {
@@ -341,6 +428,38 @@ function safeStringify(value: unknown): string {
   } catch {
     return String(value);
   }
+}
+
+/** Original AgentMessage per entry id, for coreOutToAgentMessages restoration:
+ *  message entries keep their exact message; custom_message entries are mirrored
+ *  as user-role messages (Pi's convertToLlm projects them as user — role:"custom"
+ *  would be dropped by Pi). Latest context_edit replacements are materialized so
+ *  the restored view matches what the kernel saw (#662); a null replacement drops
+ *  the entry — it never reached the kernel, so nothing will look it up. */
+export function collectOriginals(entries: Array<{ type: string; id: string; message?: AgentMessage; content?: unknown }>): Map<string, AgentMessage> {
+  const map = new Map<string, AgentMessage>();
+  const edits = resolveContextEdits(entries);
+  for (const entry of entries) {
+    if (entry.type === "message" && entry.message) {
+      const replacement = edits.get(entry.id);
+      if (replacement === null) continue;
+      if (replacement !== undefined) {
+        const role = (entry.message as AnyMessage).role;
+        if (role === "user" || role === "assistant" || role === "toolResult") {
+          map.set(entry.id, { ...(entry.message as object), content: editedContent(replacement, role) } as AgentMessage);
+          continue;
+        }
+      }
+      map.set(entry.id, entry.message);
+    } else if (entry.type === "custom_message") {
+      const replacement = edits.get(entry.id);
+      if (replacement === null) continue;
+      const content = replacement === undefined ? entry.content : replacement.content;
+      const normalized = typeof content === "string" ? [{ type: "text" as const, text: content }] : content;
+      map.set(entry.id, { role: "user", content: normalized } as AgentMessage);
+    }
+  }
+  return map;
 }
 
 export function coreOutToAgentMessages(

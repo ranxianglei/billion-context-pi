@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { entriesToCoreMessages, coreOutToAgentMessages, isCustomMessageEntry, matchesStoredText, messageIdentity, ACP_STATUS_CUSTOM_TYPE, ACP_EXPORT_CUSTOM_TYPE, ACP_RULE_CUSTOM_TYPE } from "../src/messages.js";
+import { entriesToCoreMessages, coreOutToAgentMessages, isCustomMessageEntry, matchesStoredText, messageIdentity, collectOriginals, CONTEXT_EDIT_ENTRY_TYPE, ACP_STATUS_CUSTOM_TYPE, ACP_EXPORT_CUSTOM_TYPE, ACP_RULE_CUSTOM_TYPE } from "../src/messages.js";
 import { isTurnBoundary } from "../src/turn-boundary.js";
 import type { CoreMessage } from "acp-kernel";
 import type { SessionEntry, SessionMessageEntry } from "@earendil-works/pi-coding-agent";
@@ -137,6 +137,18 @@ function customEntry(id: string, customType: string, content: string | unknown[]
   } as SessionEntry;
 }
 
+// SDK ≥1.x context_edit entry (absent from the pinned 0.83.0 types → cast).
+function editEntry(id: string, targetId: string, replacement: { content: unknown } | null): SessionEntry {
+  return {
+    type: CONTEXT_EDIT_ENTRY_TYPE,
+    id,
+    parentId: null,
+    timestamp: new Date().toISOString(),
+    targetId,
+    replacement,
+  } as SessionEntry;
+}
+
 test("entriesToCoreMessages projects custom_message as user message (string content)", () => {
   const entries: SessionEntry[] = [
     msgEntry("a", user("hello")),
@@ -230,21 +242,10 @@ test("custom_message round-trip: entriesToCoreMessages → collectOriginals → 
   // Step 1: entries → CoreMessage[]
   const coreMessages = entriesToCoreMessages(entries);
 
-  // Step 2: simulate collectOriginals (mirrors src/index.ts collectOriginals logic)
-  // For message entries, the original is entry.message.
-  // For custom_message entries, the original is projected as a user AgentMessage
-  // (NOT role:"custom", which Pi would silently drop).
-  const originalById = new Map<string, SessionMessageEntry["message"]>();
-  for (const entry of entries) {
-    if (entry.type === "message") {
-      originalById.set(entry.id, entry.message);
-    } else if (entry.type === "custom_message") {
-      const content = typeof entry.content === "string"
-        ? [{ type: "text" as const, text: entry.content }]
-        : entry.content;
-      originalById.set(entry.id, { role: "user", content } as SessionMessageEntry["message"]);
-    }
-  }
+  // Step 2: collectOriginals — message entries keep their exact message;
+  // custom_message entries are mirrored as user-role AgentMessages
+  // (role:"custom" would be silently dropped by Pi).
+  const originalById = collectOriginals(entries);
 
   // Step 3: coreOutToAgentMessages restores from originalById
   const out = coreOutToAgentMessages(coreMessages, originalById);
@@ -461,4 +462,145 @@ test("message identity ignores tag-only text blocks but preserves original empty
   const emptyText = { role: "user", content: [image, { type: "text", text: "" }], timestamp: 3 };
   assert.equal(messageIdentity(taggedImage), messageIdentity(imageOnly));
   assert.notEqual(messageIdentity(emptyText), messageIdentity(imageOnly));
+});
+
+test("entriesToCoreMessages applies the latest context_edit to a custom_message (#662)", () => {
+  const entries: SessionEntry[] = [
+    msgEntry("a", user("before")),
+    customEntry("b", "assistant_partial", "#"),
+    editEntry("e1", "b", { content: "#Hel" }),
+    editEntry("e2", "b", { content: "#Hello — the full partial response" }),
+    msgEntry("c", user("after")),
+  ];
+  const core = entriesToCoreMessages(entries);
+
+  assert.deepEqual(core.map((m) => m.id), ["a", "b", "c"], "context_edit entries themselves never project");
+  assert.equal(core[1]!.role, "user");
+  assert.equal(core[1]!.contentType, "text");
+  assert.equal(core[1]!.text, "#Hello — the full partial response", "latest edit wins over earlier edits and the original");
+});
+
+test("entriesToCoreMessages omits a custom_message whose latest context_edit is null", () => {
+  const entries: SessionEntry[] = [
+    msgEntry("a", user("before")),
+    customEntry("b", "assistant_partial", "#"),
+    editEntry("e1", "b", { content: "#grown" }),
+    editEntry("e2", "b", null),
+  ];
+  const core = entriesToCoreMessages(entries);
+  assert.deepEqual(core.map((m) => m.id), ["a"], "null replacement omits the target from model context");
+});
+
+test("entriesToCoreMessages lets a context_edit resurrect an empty custom_message (gate on effective content)", () => {
+  const entries: SessionEntry[] = [
+    customEntry("b", "assistant_partial", ""),
+    editEntry("e1", "b", { content: "grown in place" }),
+  ];
+  const core = entriesToCoreMessages(entries);
+  assert.equal(core.length, 1);
+  assert.equal(core[0]!.id, "b");
+  assert.equal(core[0]!.text, "grown in place");
+});
+
+test("entriesToCoreMessages applies context_edits to message entries (SDK string-wrap semantics)", () => {
+  const entries: SessionEntry[] = [
+    msgEntry("u", user("original question")),
+    editEntry("e1", "u", { content: "revised question" }),
+    msgEntry("a", { role: "assistant", content: [{ type: "text", text: "old answer" }], timestamp: Date.now() }),
+    editEntry("e2", "a", { content: "replaced assistant text" }),
+    msgEntry("t", toolResult("tc9", "bash", "old output")),
+    editEntry("e3", "t", { content: "replaced output" }),
+  ];
+  const core = entriesToCoreMessages(entries);
+
+  assert.deepEqual(core.map((m) => m.id), ["u", "a", "t"]);
+  assert.equal(core[0]!.role, "user");
+  assert.equal(core[0]!.text, "revised question", "user keeps the replacement as-is");
+  assert.equal(core[1]!.role, "assistant");
+  assert.equal(core[1]!.contentType, "text");
+  assert.equal(core[1]!.text, "replaced assistant text", "assistant string replacement projected as text");
+  assert.equal(core[2]!.role, "tool");
+  assert.equal(core[2]!.contentType, "tool-result");
+  assert.equal(core[2]!.text, "replaced output", "toolResult string replacement projected as text");
+});
+
+test("entriesToCoreMessages ignores malformed context_edits (missing targetId / bad replacement shape)", () => {
+  const entries: SessionEntry[] = [
+    customEntry("b", "assistant_partial", "#"),
+    { type: CONTEXT_EDIT_ENTRY_TYPE, id: "bad1", parentId: null, timestamp: "", replacement: { content: "no target" } } as SessionEntry,
+    { type: CONTEXT_EDIT_ENTRY_TYPE, id: "bad2", parentId: null, timestamp: "", targetId: "b", replacement: "not-an-object" } as SessionEntry,
+  ];
+  const core = entriesToCoreMessages(entries);
+  assert.equal(core.length, 1);
+  assert.equal(core[0]!.text, "#", "malformed edits are ignored rather than trusted");
+});
+
+test("entriesToCoreMessages never projects UI-only custom types, even when edited", () => {
+  const entries: SessionEntry[] = [
+    customEntry("b", ACP_STATUS_CUSTOM_TYPE, "panel body"),
+    editEntry("e1", "b", { content: "should stay hidden" }),
+  ];
+  assert.deepEqual(entriesToCoreMessages(entries), []);
+});
+
+test("collectOriginals materializes the latest context_edit so restoration matches the kernel view (#662)", () => {
+  const full = "#The full partial response.";
+  const entries: SessionEntry[] = [
+    msgEntry("u", user("question")),
+    customEntry("b", "assistant_partial", "#"),
+    editEntry("e1", "b", { content: "#T" }),
+    editEntry("e2", "b", { content: full }),
+  ];
+  const map = collectOriginals(entries);
+
+  const b = map.get("b")!;
+  assert.equal(b.role, "user");
+  assert.deepEqual(b.content, [{ type: "text", text: full }], "restored original carries the latest replacement");
+  assert.equal(map.get("u"), entries[0]!.message, "unedited entries untouched");
+});
+
+test("collectOriginals drops null-replacement targets and wraps edited assistant strings into text blocks", () => {
+  const entries: SessionEntry[] = [
+    customEntry("b", "assistant_partial", "#"),
+    editEntry("e1", "b", null),
+    msgEntry("a", { role: "assistant", content: [{ type: "text", text: "old" }], timestamp: Date.now() }),
+    editEntry("e2", "a", { content: "new" }),
+  ];
+  const map = collectOriginals(entries);
+
+  assert.equal(map.has("b"), false, "omitted entry has nothing for coreOutToAgentMessages to restore");
+  assert.deepEqual(map.get("a")!.content, [{ type: "text", text: "new" }]);
+});
+
+test("#662 regression: interrupted response grown via context_edits reaches the model in full (not just '#')", () => {
+  const FULL = "# The full partial response streamed before the interruption.";
+  const entries: SessionEntry[] = [
+    msgEntry("u", user("do the thing")),
+    customEntry("hidden", "assistant_partial", "#"),
+    editEntry("e1", "hidden", { content: "# T" }),
+    editEntry("e2", "hidden", { content: FULL }),
+  ];
+
+  // Kernel input: the projection must carry the full response, not '#'.
+  const coreIn = entriesToCoreMessages(entries);
+  assert.equal(coreIn.length, 2);
+  assert.equal(coreIn[1]!.id, "hidden");
+  assert.equal(coreIn[1]!.text, FULL);
+
+  // Simulate the kernel passing the message through with its ref tag
+  // (tags ride at the start of core.text in this adapter's pipeline).
+  const tag = acpRef("m00002") + "\n";
+  const coreOut: CoreMessage[] = [
+    { id: "u", role: "user", contentType: "text", text: acpRef("m00001") + "\ndo the thing" },
+    { ...coreIn[1]!, text: tag + FULL },
+  ];
+
+  const out = coreOutToAgentMessages(coreOut, collectOriginals(entries));
+  assert.equal(out.length, 2);
+  const restored = out[1] as { role: string; content: Array<{ type: string; text?: string }> };
+  assert.equal(restored.role, "user");
+  const text = restored.content.find((blk) => blk.type === "text")!.text!;
+  assert.ok(text.startsWith(FULL), "model sees the full partial response");
+  assert.ok(text.includes("m00002"), "ref tag preserved");
+  assert.notEqual(text.trimStart(), "#", "stale first-character value no longer survives");
 });
