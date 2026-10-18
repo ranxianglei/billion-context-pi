@@ -34,6 +34,11 @@ function customEntry(id: string, customType: string, text: string): SessionEntry
   return { type: "custom_message", id, parentId: null, timestamp: new Date().toISOString(), customType, content: [{ type: "text", text }], display: true };
 }
 
+// SDK ≥1.x context_edit entry (absent from the pinned 0.83.0 types → cast).
+function editEntry(id: string, targetId: string, replacement: { content: unknown } | null): SessionEntry {
+  return { type: "context_edit", id, parentId: null, timestamp: new Date().toISOString(), targetId, replacement } as SessionEntry;
+}
+
 function buildHistory(count: number): SessionEntry[] {
   const out: SessionEntry[] = [];
   for (let i = 0; i < count; i++) {
@@ -115,7 +120,61 @@ test("reset() drops the cache", () => {
   const cache = new EntryProjectionCache();
   const entries = buildHistory(4);
   cache.project(entries);
-  cache.reset();
   const grown = [...entries, ...buildHistory(1)];
   assert.deepEqual(cache.project(grown), entriesToCoreMessages(grown));
+});
+
+test("appended context_edit targeting the cached prefix invalidates and re-projects (#662)", () => {
+  const cache = new EntryProjectionCache();
+  const hiddenId = `hidden-${seq++}`;
+  let entries: SessionEntry[] = [boundary(), customEntry(hiddenId, "assistant_partial", "#")];
+
+  // Turn 1: the hidden entry is cached with its initial content.
+  assert.deepEqual(cache.project(entries), entriesToCoreMessages(entries));
+  assert.equal(cache.project(entries)[0]?.text, "#");
+
+  // Turn 2: Pidian grows the hidden response in place via an appended edit.
+  // The count/canary checks cannot see this — the cache must invalidate itself.
+  entries = [...entries, editEntry(`e-${seq++}`, hiddenId, { content: "#Hel" })];
+  assert.deepEqual(cache.project(entries), entriesToCoreMessages(entries));
+  assert.equal(cache.project(entries)[0]?.text, "#Hel");
+
+  // Turn 3: another growth step plus a fresh user turn in the same batch.
+  const full = "#The full partial response.";
+  entries = [...entries, editEntry(`e-${seq++}`, hiddenId, { content: full }), boundary(), msgEntry(`u-${seq++}`, userMsg("next question"))];
+  const projected = cache.project(entries);
+  assert.deepEqual(projected, entriesToCoreMessages(entries));
+  assert.equal(projected[0]?.text, full, "full partial response visible after # → growth sequence");
+  assert.equal(projected[projected.length - 1]!.text, "next question");
+});
+
+test("incremental append applies an edit targeting a tail entry without invalidating the prefix", () => {
+  const cache = new EntryProjectionCache();
+  const hiddenId = `hidden-${seq++}`;
+  let entries: SessionEntry[] = [boundary(), msgEntry(`u-${seq++}`, userMsg("q"))];
+  cache.project(entries);
+
+  // Target and edit arrive together in the new tail: no cached-prefix entry is
+  // re-targeted, so the incremental path stays valid and still applies the edit.
+  entries = [...entries, customEntry(hiddenId, "assistant_partial", ""), editEntry(`e-${seq++}`, hiddenId, { content: "grown" })];
+  const projected = cache.project(entries);
+  assert.deepEqual(projected, entriesToCoreMessages(entries));
+  assert.equal(projected[1]?.text, "grown", "tail-targeting edit applied on the incremental path");
+});
+
+test("edit preceding its target (position-independent resolution) applies when the target lands in the tail", () => {
+  const cache = new EntryProjectionCache();
+  const targetId = `t-${seq++}`;
+  let entries: SessionEntry[] = [boundary(), msgEntry(`u-${seq++}`, userMsg("q"))];
+  cache.project(entries);
+
+  // The edit was appended while its target was not yet persisted; the host now
+  // replays both. The SDK resolves edits position-independently — the cached
+  // (inert) edit must govern the new tail entry.
+  entries = [...entries, customEntry(targetId, "assistant_partial", "original"), editEntry(`e-${seq++}`, targetId, { content: "edited" })];
+  // Reorder so the edit precedes its target, as a replay might deliver it.
+  entries = [entries[0]!, entries[1]!, entries[3]!, entries[2]!];
+  const projected = cache.project(entries);
+  assert.deepEqual(projected, entriesToCoreMessages(entries));
+  assert.equal(projected[1]?.text, "edited");
 });

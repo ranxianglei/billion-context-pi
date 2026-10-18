@@ -22,7 +22,7 @@ import { makeDelegateTool, makeDelegateWaitTool, makeDelegateCancelTool, running
 import { makeCommands } from "./commands.js";
 import { mergeSurface, readToolSurfaceWithPacks, resolveActivePack, resolvePackName, surfaceMetaOf } from "./prompt-pack.js";
 import type { NudgeSectionsConfig } from "./surface.js";
-import { coreOutToAgentMessages, extractText, ACP_NUDGE_CUSTOM_TYPE, type AcpNudgeRecord } from "./messages.js";
+import { collectOriginals, coreOutToAgentMessages, extractText, ACP_NUDGE_CUSTOM_TYPE, type AcpNudgeRecord } from "./messages.js";
 import { liveOnlyTailCached, dropLiveOnlyTailCache } from "./live-only-tail.js";
 import { carryHostSystemMessages } from "./system-passthrough.js";
 import { sanitizeToolPairing } from "./tool-pair-sanitizer.js";
@@ -1126,24 +1126,6 @@ function wireThrottleRetry(pi: ExtensionAPI, runtime: AcpRuntime): void {
   pi.on("session_shutdown", (_event, ctx) => {
     runtime.throttleDrop(ctx.sessionManager.getSessionId());
   });
-}
-
-function collectOriginals(entries: Array<{ type: string; id: string; message?: AgentMessage; content?: unknown }>): Map<string, AgentMessage> {
-  const map = new Map<string, AgentMessage>();
-  for (const entry of entries) {
-    if (entry.type === "message" && entry.message) {
-      map.set(entry.id, entry.message);
-    } else if (entry.type === "custom_message") {
-      // Pi's convertToLlm projects custom messages as { role: "user", content }
-      // for the LLM. Mirror that here so coreOutToAgentMessages restores a
-      // proper user AgentMessage — using role:"custom" would be dropped by Pi.
-      const content = typeof entry.content === "string"
-        ? [{ type: "text" as const, text: entry.content }]
-        : entry.content;
-      map.set(entry.id, { role: "user", content } as AgentMessage);
-    }
-  }
-  return map;
 }
 
 // Compress toolResults from the CURRENT user turn only — the raw material for
