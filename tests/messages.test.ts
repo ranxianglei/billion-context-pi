@@ -453,6 +453,69 @@ test("coreOutToAgentMessages drops pruned tool-call blocks when only some surviv
   assert.deepEqual(toolCalls.map((b) => b.id), ["call_a", "call_c"]);
 });
 
+test("coreOutToAgentMessages does not rescan coreOut per split group (#602)", () => {
+  // G groups, each an assistant message with 2 parallel tool-calls + 2 results
+  // => 4 cores per group. Deterministic complexity guard: count how many times
+  // the function runs a full-length scan of coreOut. The pre-fix code ran one
+  // such scan per group (survivingCallIds = coreOut.filter(...)), i.e. G scans
+  // => O(G*N). The fix precomputes the surviving sets in a single pass, so the
+  // number of full scans must stay a small constant independent of G. Timing is
+  // deliberately avoided (CI-host variance) — scan COUNT is host-stable.
+  const G = 300;
+  const entries: SessionEntry[] = [];
+  const originals = new Map<string, object>();
+  const ts = "2026-10-03T00:00:00.000Z";
+  for (let i = 0; i < G; i++) {
+    const id = `e${i}`;
+    const calls = [
+      { type: "toolCall", id: `tc${i}_0`, name: "read", arguments: { path: "a.txt" } },
+      { type: "toolCall", id: `tc${i}_1`, name: "read", arguments: { path: "b.txt" } },
+    ];
+    const assistant = {
+      role: "assistant",
+      content: [{ type: "text", text: "run" }, ...calls],
+      api: "anthropic", provider: "anthropic", model: "m",
+      stopReason: "toolUse", timestamp: 0,
+    };
+    entries.push({ type: "message", id, parentId: null, timestamp: ts, message: assistant });
+    originals.set(id, assistant);
+    for (const c of calls) {
+      const rid = `r${c.id}`;
+      const result = { role: "toolResult", toolCallId: c.id, toolName: c.name, content: [{ type: "text", text: "ok" }], isError: false, timestamp: 0 };
+      entries.push({ type: "message", id: rid, parentId: id, timestamp: ts, message: result });
+      originals.set(rid, result);
+    }
+  }
+  const coreOut = entriesToCoreMessages(entries);
+  const originalById = new Map<string, SessionMessageEntry["message"]>(
+    [...originals.entries()].map(([k, v]) => [k, v as SessionMessageEntry["message"]]),
+  );
+
+  let fullScans = 0;
+  // Patch the coreOut INSTANCE (not Array.prototype): only full-length scans of
+  // coreOut hit this; the small per-message block arrays inside reconstruction
+  // use the untouched prototype. Restored afterwards via configurable descriptor.
+  Object.defineProperty(coreOut, "filter", {
+    value(cb: (v: unknown, i: number, a: unknown[]) => boolean) {
+      fullScans++;
+      const self = coreOut as unknown[];
+      const kept: unknown[] = [];
+      for (let i = 0; i < self.length; i++) if (cb(self[i], i, self)) kept.push(self[i]);
+      return kept;
+    },
+    configurable: true,
+  });
+
+  const out = coreOutToAgentMessages(coreOut, originalById);
+  delete (coreOut as Record<string, unknown>).filter;
+
+  assert.equal(out.length, G * 3, "each group rebuilds to 1 assistant + 2 results");
+  const first = out[0] as { content: Array<{ type: string; id?: string }> };
+  assert.equal(first.content.filter((b) => b.type === "toolCall").length, 2, "both parallel calls retained");
+  // Quadratic regression would report G (=300) full scans here.
+  assert.ok(fullScans <= 3, `full coreOut scans must be bounded, got ${fullScans} for G=${G}`);
+});
+
 test("message identity ignores tag-only text blocks but preserves original empty blocks", () => {
   const image = { type: "image", data: "same", mimeType: "image/png" };
   const tag = acpRef("m00042");
