@@ -96,6 +96,12 @@ test("capToolOutput is UTF-8 safe (never splits a multibyte sequence)", () => {
   }
 });
 
+test("capToolOutput tolerates non-array content (undefined/object/string) without throwing (#668)", () => {
+  assert.equal(capToolOutput(undefined as unknown as Content, 500), undefined);
+  assert.equal(capToolOutput({ text: "x".repeat(10_000) } as unknown as Content, 500), undefined);
+  assert.equal(capToolOutput("plain string" as unknown as Content, 500), undefined);
+});
+
 test("detectBashTimeout extracts the seconds from Pi's timeout error text", () => {
   assert.equal(detectBashTimeout(text("Command timed out after 60 seconds")), 60);
   assert.equal(detectBashTimeout(text("partial output\nCommand timed out after 300 seconds")), 300);
@@ -105,6 +111,11 @@ test("detectBashTimeout returns undefined when there is no timeout error", () =>
   assert.equal(detectBashTimeout(text("Command aborted")), undefined);
   assert.equal(detectBashTimeout(text("no error here")), undefined);
   assert.equal(detectBashTimeout([]), undefined);
+});
+
+test("detectBashTimeout tolerates non-array content without throwing (#668)", () => {
+  assert.equal(detectBashTimeout(undefined as unknown as Content), undefined);
+  assert.equal(detectBashTimeout({ text: "Command timed out after 60 seconds" } as unknown as Content), undefined);
 });
 
 test("appendTimeoutNotice appends actionable guidance to the last text part", () => {
@@ -127,6 +138,10 @@ test("appendTimeoutNotice adds a new text part when content has no text part", (
   const out = appendTimeoutNotice([img], 30);
   assert.equal(out.length, 2);
   assert.equal(out[1].type, "text");
+});
+
+test("appendTimeoutNotice tolerates non-array content without throwing (#668)", () => {
+  assert.equal(appendTimeoutNotice(undefined as unknown as Content, 60), undefined);
 });
 
 test("isBashToolResult narrows by toolName and exposes bash details (vendored guard, host-agnostic)", () => {
@@ -184,6 +199,16 @@ test("wireToolGuardrails honors an explicit smaller cap", () => {
   assert.ok(ret && typeof ret === "object" && "content" in ret && Array.isArray(ret.content));
   const t = textOf(ret.content[0]);
   assert.ok(Buffer.byteLength(t, "utf8") < 2000, "payload must be truncated to the explicit cap");
+});
+
+test("tool_result hook passes non-array content through untouched instead of throwing (#668)", () => {
+  const onResult = wireFor({});
+  const undef = { toolName: "read", content: undefined, isError: false } as unknown as ToolResultEvent;
+  assert.doesNotThrow(() => {
+    assert.equal(onResult(undef), undefined);
+  });
+  const obj = { toolName: "read", content: { json: "result" }, isError: false } as unknown as ToolResultEvent;
+  assert.equal(onResult(obj), undefined, "object content must pass through unmodified");
 });
 
 // --- generic tool-call repetition guard (issue #308) ---
@@ -298,6 +323,17 @@ test("repetition guard queues a warning at warn=3 (default) without blocking", (
   const t = textOf(res.content[0]);
   assert.match(t, /CONSECUTIVE identical/);
   assert.match(t, /acp_status/);
+});
+
+test("repetition warn notice is skipped without throwing when result content is non-array (#668)", () => {
+  const w = wireRepetition({});
+  w.call(statusCall("n1"));
+  w.call(statusCall("n2"));
+  w.call(statusCall("n3"));
+  const bad = { toolName: "acp_status", toolCallId: "n3", content: undefined, isError: false } as unknown as ToolResultEvent;
+  assert.doesNotThrow(() => {
+    assert.equal(w.result(bad), undefined, "non-array content must pass through untouched");
+  });
 });
 
 test("repetition guard blocks and aborts at abort=5 (default)", () => {
