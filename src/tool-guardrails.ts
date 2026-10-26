@@ -41,6 +41,9 @@ export function capToolOutput(
   maxBytes: number | undefined,
   fullPath?: string,
 ): ToolResultEvent["content"] | undefined {
+  // Some hosts/tools emit non-array content (undefined or an object); pass it
+  // through untouched instead of throwing in the hook (#668).
+  if (!Array.isArray(content)) return undefined;
   const max = maxBytes ?? DEFAULT_TOOL_OUTPUT_MAX_BYTES;
   if (!Number.isFinite(max) || max <= 0) return undefined;
   const kept: ContentPart[] = [];
@@ -62,6 +65,7 @@ export function capToolOutput(
 const TIMEOUT_RE = /Command timed out after (\d+) seconds/;
 
 export function detectBashTimeout(content: ToolResultEvent["content"]): number | undefined {
+  if (!Array.isArray(content)) return undefined; // #668: non-array content passes through
   for (const c of content) {
     if (c.type !== "text") continue;
     const m = (c as { text: string }).text.match(TIMEOUT_RE);
@@ -73,7 +77,8 @@ export function detectBashTimeout(content: ToolResultEvent["content"]): number |
 function appendTrailingText(
   content: ToolResultEvent["content"],
   notice: string,
-): ToolResultEvent["content"] {
+): ToolResultEvent["content"] | undefined {
+  if (!Array.isArray(content)) return undefined; // #668: no array to append into -> skip notice
   const next = [...content];
   for (let i = next.length - 1; i >= 0; i--) {
     const part = next[i];
@@ -89,7 +94,7 @@ function appendTrailingText(
 export function appendTimeoutNotice(
   content: ToolResultEvent["content"],
   secs: number,
-): ToolResultEvent["content"] {
+): ToolResultEvent["content"] | undefined {
   return appendTrailingText(content, buildTimeoutNotice(secs));
 }
 
@@ -255,16 +260,22 @@ export function wireToolGuardrails(pi: ExtensionAPI, runtime: AcpRuntime): void 
     }
 
     if (timeoutSecs !== undefined) {
-      modified = appendTimeoutNotice(modified ?? event.content, timeoutSecs);
-      debug.event("guardrail-bash-timeout-notice", { secs: timeoutSecs });
-      logInfo("guardrail", { event: "bash-timeout-notice", secs: timeoutSecs });
+      const withNotice = appendTimeoutNotice(modified ?? event.content, timeoutSecs);
+      if (withNotice) {
+        modified = withNotice;
+        debug.event("guardrail-bash-timeout-notice", { secs: timeoutSecs });
+        logInfo("guardrail", { event: "bash-timeout-notice", secs: timeoutSecs });
+      }
     }
 
     const warnCount = pendingWarns.get(event.toolCallId);
     if (warnCount !== undefined) {
       pendingWarns.delete(event.toolCallId);
-      modified = appendTrailingText(modified ?? event.content, buildRepetitionWarnNotice(event.toolName, warnCount));
-      debug.event("guardrail-repetition-warn-injected", { tool: event.toolName, count: warnCount });
+      const warned = appendTrailingText(modified ?? event.content, buildRepetitionWarnNotice(event.toolName, warnCount));
+      if (warned) {
+        modified = warned;
+        debug.event("guardrail-repetition-warn-injected", { tool: event.toolName, count: warnCount });
+      }
     }
 
     if (modified) return { content: modified };
