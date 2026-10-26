@@ -244,7 +244,7 @@ test("readToolSurfaceWithPacks applies base pack under inline (per-field, per-pa
     );
     const out = readToolSurfaceWithPacks(dir);
     assert.equal(out.compress?.promptSnippet, "inline-snip");
-    assert.equal(out.compress?.description, "Replace consumed conversation ranges with self-contained summaries using mNNNNN or bN refs.");
+    assert.equal(out.compress?.description, "Replace consumed conversation ranges with self-contained summaries using mNNNNN or bN refs; batch multiple ranges into ONE call (a single string may hold every range).");
     assert.equal(out.compress?.paramDescriptions?.startId, "inline-start");
     assert.equal(out.compress?.paramDescriptions?.endId, "Inclusive last mNNNNN or bN ref.");
     assert.deepEqual(out.compress?.promptGuidelines, []);

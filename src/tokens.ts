@@ -93,4 +93,36 @@ export function adjustedTokenCount(
   return view.drifted ? view.viewTokens : prelim;
 }
 
+/** Per-session record of the EXACT sent view measured off the previous real
+ *  processTurn output (issue #561) — replaces re-running a probe processTurn
+ *  (clone + full second pass over the whole history) on every steady-state
+ *  turn. */
+export interface SentViewMeterRecord {
+  viewTokens: number;
+  blocksLen: number;
+  activeBlocks: number;
+  limit: number;
+  /** False when the measured view may be dishonest (post-truncation output,
+   *  or the record is absent) — callers must then run the full probe. */
+  usable: boolean;
+}
+
+/** Signature check for adopting the previous turn's measured view (issue #561):
+ *  the meter describes LAST turn's (state, config); it is only transferable
+ *  when nothing structural moved — same window, same block count, same active
+ *  count. Any compress/decompress/sync between turns changes one of these and
+ *  forces the full probe path for a turn. Pure function, unit-testable. */
+export function sentViewMeterMatches(
+  meter: SentViewMeterRecord | undefined,
+  state: CompressionState,
+  config: Config,
+): boolean {
+  if (!meter || !meter.usable) return false;
+  if (meter.limit !== config.modelContextLimit) return false;
+  if (meter.blocksLen !== state.blocks.length) return false;
+  let active = 0;
+  for (const b of state.blocks) if (b.active) active++;
+  return meter.activeBlocks === active;
+}
+
 

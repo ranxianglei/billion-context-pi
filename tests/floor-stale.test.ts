@@ -180,3 +180,48 @@ test("staleness: sums multiple post-anchor blocks", () => {
   assert.equal(r.predates, true);
   assert.equal(r.netReclaimed, 2990);
 });
+
+test("freshness: latest assistant with usage → fresh, lastRealTokens = that usage", () => {
+  const entries = [msg("e0", { role: "user", content: "go" }), assistantUsage("e1")];
+  const r = compressionAnchorStaleness(entries, [], ct);
+  assert.equal(r.fresh, true);
+  assert.equal(r.lastRealTokens, 175_000);
+});
+
+test("freshness: errored latest assistant → not fresh, lastRealTokens = prior anchor", () => {
+  const entries = [
+    msg("e0", { role: "user", content: "go" }),
+    assistantUsage("e1"),
+    msg("e2", { role: "assistant", content: "err", stopReason: "error" }),
+  ];
+  const r = compressionAnchorStaleness(entries, [], ct);
+  assert.equal(r.fresh, false);
+  assert.equal(r.lastRealTokens, 175_000);
+});
+
+test("freshness: aborted latest assistant → not fresh", () => {
+  const entries = [
+    msg("e0", { role: "user", content: "go" }),
+    assistantUsage("e1"),
+    msg("e2", { role: "assistant", content: "ab", stopReason: "aborted", usage: USAGE }),
+  ];
+  const r = compressionAnchorStaleness(entries, [], ct);
+  assert.equal(r.fresh, false);
+});
+
+test("freshness: zero-usage latest assistant → not fresh", () => {
+  const entries = [
+    msg("e0", { role: "user", content: "go" }),
+    assistantUsage("e1"),
+    msg("e2", { role: "assistant", content: "z", usage: { input: 0, cacheRead: 0, cacheWrite: 0 } }),
+  ];
+  const r = compressionAnchorStaleness(entries, [], ct);
+  assert.equal(r.fresh, false);
+});
+
+test("freshness: no valid anchor anywhere → not fresh, lastRealTokens 0", () => {
+  const entries = [msg("e0", { role: "user", content: "go" }), msg("e1", { role: "assistant", content: "err", stopReason: "error" })];
+  const r = compressionAnchorStaleness(entries, [], ct);
+  assert.equal(r.fresh, false);
+  assert.equal(r.lastRealTokens, 0);
+});

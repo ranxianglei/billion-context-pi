@@ -478,6 +478,30 @@ test("resolveHostSession falls back to off for invalid values", () => {
   assert.deepEqual(resolveHostSession({ hostSession: { countCustomMessages: "yes" as unknown as boolean } }), { countCustomMessages: false });
 });
 
+test("resolveHostSession passes a valid customMessageTypes allowlist through (#578)", () => {
+  const r = resolveHostSession({ hostSession: { countCustomMessages: true, customMessageTypes: ["agent_message", "heartbeat_prompt"] } });
+  assert.equal(r.countCustomMessages, true);
+  assert.deepEqual(r.customMessageTypes, ["agent_message", "heartbeat_prompt"]);
+});
+
+test("resolveHostSession drops an orphaned customMessageTypes without countCustomMessages (#578)", () => {
+  const r = resolveHostSession({ hostSession: { customMessageTypes: ["agent_message"] } });
+  assert.deepEqual(r, { countCustomMessages: false }, "allowlist alone does not opt in");
+});
+
+test("resolveHostSession drops malformed customMessageTypes values (#578)", () => {
+  const bad = (v: unknown) => resolveHostSession({ hostSession: { countCustomMessages: true, customMessageTypes: v as string[] } });
+  assert.deepEqual(bad("agent_message"), { countCustomMessages: true }, "non-array falls back to all types counting");
+  assert.deepEqual(bad(["agent_message", 42]), { countCustomMessages: true }, "non-string member rejected");
+  assert.deepEqual(bad([""]), { countCustomMessages: true }, "empty-string member rejected");
+  assert.deepEqual(bad(null), { countCustomMessages: true }, "null rejected");
+});
+
+test("resolveHostSession honors an empty allowlist as explicit count-none (#578)", () => {
+  const r = resolveHostSession({ hostSession: { countCustomMessages: true, customMessageTypes: [] } });
+  assert.deepEqual(r, { countCustomMessages: true, customMessageTypes: [] });
+});
+
 test("resolveConfig forwards protection keys into the kernel config", () => {
   const cfg = resolveConfig({ protectedTools: ["skill"], protectedLatestTools: ["read_*"] }, 200_000);
   assert.deepEqual(cfg.protectedTools, ["skill"]);

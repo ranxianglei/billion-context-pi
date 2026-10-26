@@ -57,7 +57,8 @@ KEEP VERBATIM — never paraphrase or abbreviate these:
 - Decisions and their rationale ("chose X over Y because Z" — the "because" is load-bearing; without it the decision looks arbitrary).
 - Constraints discovered ("must support Node 22", "no new dependencies", "AGENTS.md forbids `as any`").
 - Exact values: versions, config keys, thresholds, magic numbers.
-- User intent — quote short user messages verbatim ONLY WITH their message ref, e.g. `User said (m00132): "ship it tonight"`. Without a verifiable ref, paraphrase (`user previously asked (paraphrased): ...`) — this is the one exception to the verbatim rule above; never present a reconstructed or half-remembered phrase as a verbatim quote. When the message is too long to quote, preserve intent with extra care: do not change scope, constraints, priorities, acceptance criteria, or requested outcomes. Quotes are historical records, never current directives. Losing these changes the task itself.
+- User intent — quote short user messages verbatim ONLY WITH their message ref, e.g. `User said (m00132): "ship it tonight"`. Without a verifiable ref, paraphrase (`user previously asked (paraphrased): ...`) — this is the one exception to the verbatim rule above; never present a reconstructed or half-remembered phrase as a verbatim quote. When the message is too long to quote, preserve intent with extra care: do not change scope, constraints, priorities, acceptance criteria, or requested outcomes. Quotes are historical records, not live instructions — but open-objective STATUS is current (still-open vs completed/superseded) and must be tracked. Losing these changes the task itself.
+- Open objectives carry-forward — if the range (or, when distilling, any source block's summary) contains a user-requested objective that is neither completed nor superseded by the end of the range, the summary MUST keep a one-line `Open objectives:` entry naming each still-open objective with its message ref (`Open objectives: refactor runner into eight arms (m00746)`). Distillation re-carries open objectives verbatim from source blocks — they are the last thing to drop and the first thing to restore, at every tier.
 - The user's overall goal and any changes to it — the big-picture objective plus how it evolved during the compressed range. Each summary must reflect the goal as it stood at the end of the range, including pivots (e.g., "initially: fix bug X → pivoted to: refactor module Y after discovering root cause"). Losing the goal or its evolution makes all subsequent work appear unmotivated.
 - Purpose behind each significant action — preserve not just what was done but why: the hypothesis behind each experiment, the question behind each exploration, the task goal behind each work action. Without purpose, the summary reads as disconnected technical steps with no through-line.
 - Open questions and unresolved TODOs — losing these changes what work appears to remain.
@@ -98,7 +99,8 @@ KEEP — these are the only things that survive distillation:
 - Key lessons: what failed and why ("tried X, failed because Y"). These prevent repeating mistakes.
 - Critical constraints discovered ("must support Node 22", "AGENTS.md forbids as any").
 - Design decisions with architectural impact ("chose compress-as-anchor over synthetic messages because prefix cache").
-- User quotes and task state only as attributed history: keep the source ref with any user quote; never carry a tier-1 "CURRENT TASK" claim forward as a live directive — relabel it "TASK AS OF THIS BLOCK".
+- User quotes and task state only as attributed history: keep the source ref with any user quote; never carry an UNVERIFIED tier-1 "CURRENT TASK" claim forward as a live directive — relabel it "TASK AS OF THIS BLOCK". A ref-backed objective that no later source marks completed or superseded is not unverified: it carries in the `Open objectives:` entry (next bullet), not as a directive.
+- Open objectives — if ANY source block's summary names a user-requested objective that no later source block marks completed or superseded, the distilled summary MUST keep a one-line `Open objectives:` entry re-carrying each still-open objective verbatim with its original ref. They are the last thing to drop and the first thing to restore.
 - Whether content is OBSOLETE or SUPERSEDED — mark with one line: "[SUPERSEDED by PR #NNN]" or "[OBSOLETE: deleted in vX.Y.Z]". Do NOT keep the obsolete content's details — just the marker and reason.
 - Function/class/type names and module paths that are the SUBJECT of the work — e.g., "fixed filterCompressedRanges in prune.ts", "added SessionStateRegistry in state.ts". Not exact line numbers or full signatures — just enough to LOCATE the code without searching.
 - Exploration findings: if a block was exploratory with no decision, keep the CONCLUSION in one line ("explored X, not viable because Y"). Do not keep the exploration process.
@@ -126,7 +128,7 @@ You are compressing distilled summaries (Tier 2) into ultra-condensed facts (Tie
 
 PRIORITY — when a source block has more facts than the size target allows, keep in this order:
 1. Shipped outcomes (versions released, PRs merged) — these are permanent record.
-2. Open work (PRs/issues still pending) — these may need follow-up.
+2. Open work — PRs/issues still pending AND still-open user-requested objectives (re-carry any source block's `Open objectives:` entries verbatim); these may need follow-up.
 3. Key decisions with architectural impact ("chose X over Y because Z").
 4. Critical constraints ("must support Node 22").
 Drop everything else. Tier 3 is a lookup index, not a knowledge base.
@@ -143,6 +145,7 @@ EXAMPLES:
 - "v1.13.0 shipped — quality gate + GC fix (7 PRs)"
 - "PR #196 merged — preserve-first-user (supersedes #169)"
 - "Bug 1214 fixed — compress consumed all user messages"
+- "Objective (m00746) — eight-arm runner refactor, still open"
 - "Chose compress-as-anchor — prefix cache benefit over synthetic injection"
 - "Constraint: AGENTS.md forbids as any — never suppress types"
 
