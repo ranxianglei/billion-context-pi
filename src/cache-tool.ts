@@ -59,7 +59,7 @@ function foldEvents(state: CompressionState): FoldEvent[] {
 
 export async function cacheReportText(runtime: AcpRuntime, ctx: ExtensionContext, detail: "summary" | "full" = "summary"): Promise<string> {
   const { state, entries } = await runtime.stateFor(ctx);
-  const report = buildCacheReport(cacheSamples(entries), foldEvents(state));
+  const report = buildCacheReport(cacheSamples(entries), foldEvents(state), { priceProfile: runtime.adapter.priceProfile });
   return formatCacheReport(report, ctx.sessionManager.getSessionId(), { detail });
 }
 

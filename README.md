@@ -146,6 +146,7 @@ billion-context-pi is built for the **Pi** coding agent (`@earendil-works/pi-cod
 | `acp_status` | Show context usage, compressed blocks, compressible ranges |
 | `acp_cache` | Prompt-cache reconciliation: grand ledger (input/cached/hit rate), per-request miss attribution, per-fold economics |
 | `acp_rule` | Record a short, principle-level reminder that survives compression (opt-in: `"rules": true`) |
+| `acp_cache` | Prompt-cache reconciliation: grand ledger (input/cached/hit rate), per-request miss attribution, per-fold economics (P&L priced by the optional `priceProfile` config) |
 | `acp_delegate` | Spawn a clean-context sub-agent for a task (review / research / implement / plan / advise) |
 | `acp_delegate_wait` | Block until a delegate run finishes (returns its result; times out otherwise) |
 | `acp_delegate_cancel` | Cancel a running delegate by runId |
