@@ -19,6 +19,8 @@
 
 > **优先级：** 环境变量 &gt; 项目文件 &gt; 全局文件 &gt; 内置默认值。
 
+在 Pi 的 fork 上，`.pi` 指该 fork 自己的配置目录——Prime 上为 `~/.prime/acp.json` 和 `<项目>/.prime/acp.json`。在该文件存在之前，仍会读取上表的 `.pi` 路径。见 [docs/host-adapter.md §4](./docs/host-adapter.md#4-config-directory-config_dir_name)。
+
 文件在会话启动时加载。缺失文件、格式错误的 JSON、未知键都会被静默忽略——扩展绝不会因为配置问题而无法启动。只有文档中列出的键会被读取，其余一律丢弃。
 
 ---
@@ -606,7 +608,8 @@
   ```json
   {
     "hostSession": {
-      "countCustomMessages": true
+      "countCustomMessages": true,
+      "customMessageTypes": ["agent_message", "async_bash_completion", "rlm_child_terminal_notice", "heartbeat_prompt"]
     }
   }
   ```
@@ -619,6 +622,13 @@
 - **默认值：** `false`
 - **状态：** 🟢 ACTIVE
 - **说明：** 把宿主注入的非空文本 `custom_message` 条目（UI-only 的 `acp-status` 面板除外）计为所有按回合账本的回合起点；空内容注入是纯控制信号，不开启回合。不改变 LLM 上下文投影——这些条目的 user-role 投影本就是 pi 原生行为。
+
+### `hostSession.customMessageTypes`
+
+- **类型：** string[]
+- **默认值：** 未设置（开启 `countCustomMessages` 后，一切非空注入类型都计为回合起点）
+- **状态：** 🟢 ACTIVE
+- **说明：** 可选的 `customType` 白名单，细化 `countCustomMessages`：设置后（且 `countCustomMessages: true`），只有 `customType` 在列表内的注入 `custom_message` 条目才开启回合——进入 LLM 上下文但并非真实宿主回合的元数据注入（如 Prime 的 `harness_digest`、`ipython_state`）不再重置 nudge/重试账本（#578）。无 `customType` 的条目永不匹配；UI-only 类型（`acp-status`、`acp-export`、`acp-rule`）即使列出也保持排除。未开 `countCustomMessages: true` 时忽略；非法值（非数组、非字符串或空字符串成员）告警并回退到「全部注入类型都计数」。空数组表示显式「一个都不计」。上方示例即 Prime 的真实宿主回合类型集合。
 
 ---
 
@@ -959,7 +969,7 @@ interface PackSource {
 - **类型：** 字符串（文件路径）
 - **默认值：** `~/.pi/acp.log`
 - **状态：** 🟢 ACTIVE
-- **说明：** 覆盖日志文件路径。默认情况下，结构化日志写入 `~/.pi/acp.log`（文件在 10MB 时轮转为 `~/.pi/acp.log.old`）。指向不同位置可为每个项目或每次运行保留独立日志。
+- **说明：** 覆盖日志文件路径。默认情况下，结构化日志写入 `~/.pi/acp.log`（文件在 10MB 时轮转为 `~/.pi/acp.log.old`）。指向不同位置可为每个项目或每次运行保留独立日志。在 Pi 的 fork 上，`~/.pi` 指该 fork 自己的配置目录（Prime 上为 `~/.prime`）——见 [docs/host-adapter.md §4](./docs/host-adapter.md#4-config-directory-config_dir_name)。
 
 ### `PI_ACP_DELEGATE_MAX_DEPTH`
 

@@ -229,8 +229,9 @@ billion-context-pi 会向 `~/.pi/acp.log`(可用 `ACP_LOG_FILE` 覆盖)写入结
 - `warn` — 值得注意的非致命情况:紧急 nudge 注入、配置加载失败、自动更新网络错误、工具输出被截断、委派结果注入被跳过。
 - `info` — 生命周期事件:会话启动、每轮上下文变换摘要(消息数/token/压缩比/活跃块数)、压缩/解压、delegate 派发与完成、自动更新检查。
 - `debug` —— 仅在 `debug: true` 时额外写入(细粒度的字段级事件)。
+- **Nudge 审计轨迹** — 无论何时注入上下文限制 nudge,一条紧凑的单行记录(如 `[ACP nudge] EMERGENCY 95% · T1 · top range m00120–m00168`)会作为*仅供显示*的会话条目写入——它跨进程重启存活,在 TUI 回滚历史和会话文件中可见,且永远不会发给模型。
 
-每行格式:`<ISO 时间戳> [<级别>] [<范围>] key=value key=value`。文件达到 10 MB 时轮转为 `~/.pi/acp.log.old`。
+每行格式:`<ISO 时间戳> [<级别>] [<范围>] key=value key=value`。多行字段值(如 `nudge-injected` 中的完整 nudge 正文)会被转义(`\n` → 字面量 `\\n`),保证每条日志恰好占**一行物理行**,便于 `grep`。文件达到 10 MB 时轮转为 `~/.pi/acp.log.old`。
 
 ```bash
 tail -f ~/.pi/acp.log                 # 实时观察会话

@@ -35,7 +35,11 @@ message" can never drift apart again.
    and only if they carry non-empty text (the same `extractText` gate projection uses).
    Empty injections are pure control signals: they never enter LLM context, so they
    start no turn either. UI-only `acp-status` panels (the `/acp` slash-command output)
-   are excluded even under the opt-in.
+   are excluded even under the opt-in. When the host additionally sets
+   `customMessageTypes`, the opt-in is refined to an allowlist: only injected entries
+   whose `customType` is listed start a turn (#578) — metadata injections like
+   `harness_digest` / `ipython_state` stay out of turn accounting. Entries without a
+   `customType` never match; UI-only types stay excluded even when listed.
 4. LLM-context projection is **independent of this policy**: `custom_message` entries were
    and remain projected as user-role messages (Pi-native semantics). The policy only changes
    *turn accounting*, not what the model sees.
@@ -49,9 +53,17 @@ or equivalently
 ```json
 { "hostSession": { "countCustomMessages": true } }
 ```
+or, when the host also injects non-turn metadata that must not reset turn accounting
+(Prime: `harness_digest`, `ipython_state`), restrict the opt-in to the genuine host-turn
+types (#578):
+```json
+{ "hostSession": { "countCustomMessages": true, "customMessageTypes": ["agent_message", "async_bash_completion", "rlm_child_terminal_notice", "heartbeat_prompt"] } }
+```
 in `~/.pi/acp.json` / `<project>/.pi/acp.json`, or programmatically on the adapter config
 passed to `createAcpExtension(adapter)`. Invalid values warn and fall back to off; they
-never fail a session.
+never fail a session. `customMessageTypes` only takes effect with
+`countCustomMessages: true` (an orphaned allowlist warns and is dropped); malformed
+values fall back to "all injected types count"; an empty array is explicit "count none".
 
 **Default-off guarantee:** with no `hostSession` key the predicate reduces to the exact
 pre-#364 rule (user-role only). This is pinned by unit tests that compare against the
@@ -196,22 +208,44 @@ Fixtures: `tests/host-detection.test.ts` (Prime-shaped host = `{ getBranch }` on
 
 ## 4. Config directory (CONFIG_DIR_NAME)
 
-The extension resolves its config directory from the host's export of `CONFIG_DIR_NAME`
-(Pi exports `.pi`). A host that aliases `@earendil-works/pi-coding-agent` to its own build
-must either:
+Every adapter path has Pi's layout: `~/<name>/acp.json`, `~/<name>/acp.log`,
+`~/<name>/acp/packs`, the agent dir `~/<name>/agent`, and the project-level
+`<cwd>/<name>/…`. `src/config-dir.ts` resolves `<name>` from the host package, in order:
 
-1. **re-export `CONFIG_DIR_NAME`** (preferred — keeps paths exact if the fork renames its
-   directory), or
-2. accept the fallback: the adapter feature-detects a missing or invalid export and falls
-   back to Pi's canonical value `.pi` (`src/config-dir.ts`).
+1. the host's `CONFIG_DIR_NAME`, when it is a single directory name — Pi exports `.pi`;
+2. the parent of the host's `getAgentDir()`, when that is `~/<name>/agent` — this covers
+   forks that do not re-export `CONFIG_DIR_NAME`, or export it with different semantics;
+3. `.pi`.
 
-Responsibility boundary: the *export* belongs to the host (only it knows its own directory
-name); the *fallback* belongs to the adapter (it must not crash at load time because of a
-missing named export). A missing export fails differently per resolver — plain Node
+Prime is case 2. Its `CONFIG_DIR_NAME` is `.prime/agent` (the agent dir itself, not its
+parent) and its package entry does not export it, while `getAgentDir()` returns
+`~/.prime/agent`. The adapter therefore uses `.prime`, so Prime's log, `acp.json` and
+prompt packs live under `~/.prime` instead of mixing into Pi's `~/.pi`. A multi-segment
+export such as `.prime/agent` is never used verbatim: under Pi's layout it would put the
+agent dir at `~/.prime/agent/agent`.
+
+The derivation only accepts an agent dir directly under the home directory. With an
+agent-dir override pointing elsewhere (`PI_CODING_AGENT_DIR`,
+`PRIME_AGENT_CODING_AGENT_DIR`), a host without a usable export gets `.pi`, as before.
+`ACP_LOG_FILE` still overrides the log path on every host.
+
+Existing files keep working. Earlier releases used `.pi` on every host, so on a fork each
+user-authored path (`acp.json`, `acp/packs`, global and project) falls back to its `.pi`
+counterpart while the fork's own path does not exist (`userConfigPath()` in
+`src/config-dir.ts`). Creating `~/.prime/acp.json` — even `{}` — stops Prime from reading
+`~/.pi/acp.json`. Files the adapter writes itself (the log, update-check and read-only
+markers under the agent dir) move without a fallback.
+
+Known limit: the pi-subagents install probe (`src/setup-subagent-tools.ts`) still assumes
+Pi's project layout (`<cwd>/<name>/extensions`); Prime keeps project resources under
+`<cwd>/.prime/agent`.
+
+Responsibility boundary: the *directory layout* belongs to the host (only it knows it) and
+is read from its exports; the *fallback* belongs to the adapter (it must not crash at
+load time because of a missing named export). A missing export fails differently per resolver — plain Node
 ESM→CJS interop throws a link-time `SyntaxError: Named export 'CONFIG_DIR_NAME' not found`,
 while loader-based aliasing (Prime's loader) surfaces it as `undefined` at runtime, which
 previously broke `path.join()` outright. The adapter therefore imports the pi package as a
 **namespace** in `src/config-dir.ts` (safe under both resolvers) and feature-detects the
 property; it is the only value import from the pi package — every other import is type-only
-and erased at build time. All config/log/session paths flow through the single constant
-there.
+and erased at build time. All config/log/session paths are resolved in that module.

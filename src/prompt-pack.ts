@@ -1,5 +1,4 @@
 import { readFileSync } from "node:fs";
-import * as path from "node:path";
 import { homedir } from "node:os";
 import {
   builtinSource,
@@ -14,7 +13,7 @@ import {
 import type { Pack, PackResolver, PackSource, PackSurface, PromptPackFile, Prompts } from "acp-kernel";
 import type { AdapterConfig } from "./config.js";
 import { resolveCompress } from "./config.js";
-import { CONFIG_DIR_NAME } from "./config-dir.js";
+import { acpJsonFiles, userConfigPath } from "./config-dir.js";
 import { sanitizePromptSections, type PiPromptSections } from "./system-prompt.js";
 import { sanitizeToolPrompts, type AcpToolName, type NudgeSectionsConfig, type ToolPromptsConfig } from "./surface.js";
 
@@ -23,8 +22,8 @@ export type { Pack, PackResolver, PackSource, PackSurface, PromptPackFile };
 
 export function defaultPackSources(cwd: string): PackSource[] {
   return kernelPackSources({
-    projectDir: path.join(cwd, CONFIG_DIR_NAME, "acp", "packs"),
-    userDirs: [path.join(homedir(), CONFIG_DIR_NAME, "acp", "packs")],
+    projectDir: userConfigPath(cwd, "acp", "packs"),
+    userDirs: [userConfigPath(homedir(), "acp", "packs")],
   });
 }
 
@@ -212,12 +211,11 @@ export function mergeSurface(pack: Pack | null, inline: InlineSurface): MergedSu
 }
 
 export function readToolSurfaceWithPacks(cwd: string): ToolPromptsConfig {
-  const home = homedir();
   let inline: ToolPromptsConfig = {};
   let packName = "default";
-  for (const base of [path.join(home, CONFIG_DIR_NAME), path.join(cwd, CONFIG_DIR_NAME)]) {
+  for (const file of acpJsonFiles(cwd)) {
     try {
-      const parsed: unknown = JSON.parse(readFileSync(path.join(base, "acp.json"), "utf8"));
+      const parsed: unknown = JSON.parse(readFileSync(file, "utf8"));
       if (parsed && typeof parsed === "object") {
         const rec = parsed as Record<string, unknown>;
         if (rec.toolPrompts) inline = sanitizeToolPrompts(rec.toolPrompts);

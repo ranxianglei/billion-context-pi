@@ -1,7 +1,5 @@
 import { promises as fs } from "node:fs";
-import * as path from "node:path";
-import { homedir } from "node:os";
-import { CONFIG_DIR_NAME } from "./config-dir.js";
+import { acpJsonFiles } from "./config-dir.js";
 import type { Prompts } from "acp-kernel";
 import type { AdapterConfig, CompressConfig, DelegateConfig, HostSessionConfig, RepetitionGuardConfig } from "./config.js";
 import type { PiPromptSections } from "./system-prompt.js";
@@ -46,10 +44,8 @@ export interface UserAcpConfig {
  *  files are salvaged with a loud warning instead of silently meaning "not
  *  disabled" / "no config" (#467). */
 export async function loadUserConfig(cwd: string): Promise<UserAcpConfig> {
-  const home = homedir();
   const merged: UserAcpConfig = {};
-  for (const base of [join(home, CONFIG_DIR_NAME), join(cwd, CONFIG_DIR_NAME)]) {
-    const file = join(base, "acp.json");
+  for (const file of acpJsonFiles(cwd)) {
     let raw: string;
     try {
       raw = await fs.readFile(file, "utf8");
@@ -130,10 +126,6 @@ function diagnoseJsonFailure(raw: string, err: unknown): string {
     return `invalid JSON syntax (${msg})`;
   }
   return msg;
-}
-
-function join(... parts: string[]): string {
-  return path.join(...parts);
 }
 
 const KNOWN = new Set([

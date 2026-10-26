@@ -4,7 +4,7 @@ import { createInitialState, type CompressionState } from "acp-kernel";
 import { logError, logInfo, logWarn } from "./log.js";
 import { SIDECAR_SCHEMA_VERSION, sidecarProducer } from "./contract.js";
 
-const STATE_SUFFIX = ".acp.json";
+export const STATE_SUFFIX = ".acp.json";
 
 export interface LiveRefOrigin {
   rawId: string;
@@ -246,7 +246,7 @@ export function deriveChildState(parent: CompressionState): CompressionState {
   };
 }
 
-function parseLiveRefOrigins(value: unknown): LiveRefOrigin[] {
+export function parseLiveRefOrigins(value: unknown): LiveRefOrigin[] {
   if (!Array.isArray(value)) return [];
   return value.filter((item): item is LiveRefOrigin => {
     if (!item || typeof item !== "object") return false;

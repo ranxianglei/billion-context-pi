@@ -29,14 +29,27 @@ export interface TurnBoundaryEntry {
  *  standalone pi users' nudge cadence unchanged. */
 export interface TurnBoundaryPolicy {
   countCustomMessages?: boolean;
+  /** #578: optional customType allowlist refining countCustomMessages. When
+   *  set, only injected entries whose customType is listed delimit turns —
+   *  host metadata injections (harness_digest, ipython_state, …) that enter
+   *  LLM context without being a real host turn stay out of turn accounting.
+   *  Unset = every non-empty injected message counts (pre-#578 behavior).
+   *  Entries without a customType never match; UI-only types stay excluded
+   *  even when listed. Ignored unless countCustomMessages is true. */
+  customMessageTypes?: readonly string[];
 }
 
 /** The ONE turn-boundary predicate (#364): does this entry start a new turn?
  *  Genuine user-role messages always do (pi-native); host-injected
- *  custom_message entries do only when the host opts in via policy. */
+ *  custom_message entries do only when the host opts in via policy, optionally
+ *  refined by a customMessageTypes allowlist so metadata injections
+ *  (harness_digest, ipython_state) stay out of turn accounting (#578). */
 export function isTurnBoundary(entry: TurnBoundaryEntry, policy: TurnBoundaryPolicy = {}): boolean {
   if (entry.message?.role === "user") return true;
-  return policy.countCustomMessages === true && isCustomMessageEntry(entry);
+  if (policy.countCustomMessages !== true || !isCustomMessageEntry(entry)) return false;
+  const allowed = policy.customMessageTypes;
+  if (allowed === undefined) return true;
+  return entry.customType !== undefined && allowed.includes(entry.customType);
 }
 
 /** Id of the last turn-boundary entry — the per-turn key for nudge

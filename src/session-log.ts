@@ -1,7 +1,8 @@
 import { promises as fs } from "node:fs";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import { logWarn } from "./log.js";
-import { readParentSessionPath } from "./state.js";
+import { messageIdentity } from "./messages.js";
+import { parseLiveRefOrigins, readParentSessionPath, STATE_SUFFIX } from "./state.js";
 
 const MAX_CHAIN_DEPTH = 8;
 
@@ -52,4 +53,64 @@ export async function loadAncestorEntries(
     current = parent;
   }
   return [...found.values()];
+}
+
+/** Read-only content recovery for content-addressed `live-*` refs (issue
+ *  #579): fork hosts alias not-yet-persisted tail messages with `live-*` ids
+ *  (runtime.ts mergeLiveEntries); those aliases appear in NO jsonl, so the
+ *  entry-id lookup above can never find them. The rawId→identity bridge lives
+ *  in each session's OWN sidecar (liveRefOrigins). Walks the chain — itself
+ *  first, then ancestors, same depth/cycle rules as loadAncestorEntries — and
+ *  at each level pairs that level's declared origins with that same level's
+ *  log entries matched by messageIdentity. First matching entry wins per rawId
+ *  (identical identities are interchangeable: identity covers full normalized
+ *  content). Never writes any sidecar. */
+export async function loadLiveRefEntries(
+  sessionFile: string | undefined,
+  wantedRawIds: Set<string>,
+): Promise<Map<string, SessionEntry>> {
+  const wanted = new Set([...wantedRawIds].filter((id) => id.startsWith("live-")));
+  const found = new Map<string, SessionEntry>();
+  if (!sessionFile || wanted.size === 0) return found;
+  const seen = new Set<string>([sessionFile]);
+  let current: string | undefined = sessionFile;
+  for (let depth = 0; current !== undefined && depth <= MAX_CHAIN_DEPTH && found.size < wanted.size; depth++) {
+    const file = current;
+    const identities = new Map<string, string[]>();
+    try {
+      const raw = await fs.readFile(`${file}${STATE_SUFFIX}`, "utf8");
+      const parsed = JSON.parse(raw) as { liveRefOrigins?: unknown };
+      for (const origin of parseLiveRefOrigins(parsed.liveRefOrigins)) {
+        if (!wanted.has(origin.rawId)) continue;
+        const list = identities.get(origin.identity);
+        if (list) list.push(origin.rawId);
+        else identities.set(origin.identity, [origin.rawId]);
+      }
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT") logWarn("session-log", { event: "live-ref-sidecar-failed", file, error: e instanceof Error ? e.message : String(e) });
+    }
+    if (identities.size > 0) {
+      let text: string | undefined;
+      try {
+        text = await fs.readFile(file, "utf8");
+      } catch (e) {
+        const code = (e as NodeJS.ErrnoException).code;
+        if (code !== "ENOENT") logWarn("session-log", { event: "live-ref-log-failed", file, error: e instanceof Error ? e.message : String(e) });
+      }
+      if (text !== undefined) {
+        for (const entry of parseSessionLog(text)) {
+          if (entry.type !== "message") continue;
+          const rawIds = identities.get(messageIdentity(entry.message));
+          if (!rawIds) continue;
+          for (const rawId of rawIds) if (!found.has(rawId)) found.set(rawId, entry);
+        }
+      }
+    }
+    const parent = await readParentSessionPath(file);
+    if (!parent || seen.has(parent)) break;
+    seen.add(parent);
+    current = parent;
+  }
+  return found;
 }

@@ -150,3 +150,112 @@ test("no reset when the scale is stable (baseline keeps accumulating same-source
   assert.equal(afterB.nudge.lastPerMessageNudgeTokens, baselineA, "stable scale keeps the baseline (no spurious reset)");
   await rm(`${STATE_FILE}.acp.json`, { force: true });
 });
+
+// issue #598: near-tied rulers jitter across the equality line turn-to-turn;
+// every micro-crossing used to re-anchor the growth baselines, so growth could
+// never accumulate to growthFloor and growth nudges never fired. A flip now
+// requires one ruler to overtake the other by more than the dead-band (sticky
+// dominance); sub-band crossings keep the baseline intact while genuine
+// switches still re-anchor.
+
+test("micro-flips inside the dead-band no longer re-anchor the growth baseline", async () => {
+  await rm(`${STATE_FILE}.acp.json`, { force: true });
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 180_000 })(api as any);
+
+  // T1 — no provider usage: the estimate dominates; the cold start stamps the
+  // baseline at the estimate scale. Read it back as E.
+  const t1 = bulkEntries();
+  branchEntries = t1;
+  await fire(handlers, t1, fakeCtx(0));
+  const afterT1 = JSON.parse(await readFile(`${STATE_FILE}.acp.json`, "utf-8"));
+  const E = afterT1.nudge.lastPerMessageNudgeTokens;
+  assert.ok(E > 10_000, `estimate-scale baseline established (got ${E})`);
+
+  // T2 — provider floor lands ~3% UNDER the estimate (raw side unchanged).
+  const t2 = [...t1, msg("e21", "assistant", "ack-2")];
+  branchEntries = t2;
+  await fire(handlers, t2, fakeCtx(Math.round(E * 0.97)));
+  // T3 — provider floor lands ~3% OVER the estimate: the raw boolean crosses,
+  // but the overtaking is inside the dead-band → no re-anchor, baseline intact.
+  const t3 = [...t2, msg("e22", "assistant", "ack-3")];
+  branchEntries = t3;
+  await fire(handlers, t3, fakeCtx(Math.round(E * 1.03)));
+  const afterT3 = JSON.parse(await readFile(`${STATE_FILE}.acp.json`, "utf-8"));
+  assert.equal(afterT3.nudge.lastPerMessageNudgeTokens, E, "sub-band crossing keeps the baseline (no spurious re-anchor)");
+  // T4 — back under: a second micro-crossing, still no re-anchor — growth keeps
+  // accumulating on the same baseline instead of being zeroed every turn.
+  const t4 = [...t3, msg("e23", "assistant", "ack-4")];
+  branchEntries = t4;
+  await fire(handlers, t4, fakeCtx(Math.round(E * 0.97)));
+  const afterT4 = JSON.parse(await readFile(`${STATE_FILE}.acp.json`, "utf-8"));
+  assert.equal(afterT4.nudge.lastPerMessageNudgeTokens, E, "repeated micro-crossings keep accumulating on the same baseline");
+  await rm(`${STATE_FILE}.acp.json`, { force: true });
+});
+
+test("a genuine ruler switch beyond the dead-band still re-anchors, and dominance sticks on sub-band returns", async () => {
+  await rm(`${STATE_FILE}.acp.json`, { force: true });
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 180_000 })(api as any);
+
+  const t1 = bulkEntries();
+  branchEntries = t1;
+  await fire(handlers, t1, fakeCtx(0));
+  const E = JSON.parse(await readFile(`${STATE_FILE}.acp.json`, "utf-8")).nudge.lastPerMessageNudgeTokens;
+  assert.ok(E > 10_000, `estimate-scale baseline established (got ${E})`);
+
+  // T2 — provider floor overtakes the estimate by 15% (> dead-band): a genuine
+  // switch; the baselines must re-anchor onto the provider scale.
+  const t2 = [...t1, msg("e21", "assistant", "ack-2")];
+  branchEntries = t2;
+  await fire(handlers, t2, fakeCtx(Math.round(E * 1.15)));
+  const B2 = JSON.parse(await readFile(`${STATE_FILE}.acp.json`, "utf-8")).nudge.lastPerMessageNudgeTokens;
+  assert.ok(B2 > E, `genuine switch re-anchors the baseline (was ${E}, now ${B2})`);
+  assert.ok(B2 >= Math.round(E * 1.1), `re-anchored onto the provider scale (got ${B2})`);
+
+  // T3 — provider floor falls back just under the estimate (sub-band return):
+  // dominance must STICK on the host ruler — an immediate flip-back would
+  // double-reset the baseline right after the genuine switch.
+  const t3 = [...t2, msg("e22", "assistant", "ack-3")];
+  branchEntries = t3;
+  await fire(handlers, t3, fakeCtx(Math.round(E * 0.99)));
+  const afterT3 = JSON.parse(await readFile(`${STATE_FILE}.acp.json`, "utf-8"));
+  assert.equal(afterT3.nudge.lastPerMessageNudgeTokens, B2, "sub-band return crossing does not flip dominance back (sticky)");
+  await rm(`${STATE_FILE}.acp.json`, { force: true });
+});
+
+test("scale-flip-reanchor log carries both rulers (hostFloor/sentTokens)", async () => {
+  const logFile = tmpPath("pai-acp-growth-scale.log");
+  await rm(logFile, { force: true });
+  process.env.ACP_LOG_FILE = logFile;
+  try {
+    await rm(`${STATE_FILE}.acp.json`, { force: true });
+    const { api, handlers } = captureApi();
+    createAcpExtension({ modelContextLimit: 180_000 })(api as any);
+
+    const t1 = bulkEntries();
+    branchEntries = t1;
+    await fire(handlers, t1, fakeCtx(0));
+    const E = JSON.parse(await readFile(`${STATE_FILE}.acp.json`, "utf-8")).nudge.lastPerMessageNudgeTokens;
+
+    const t2 = [...t1, msg("e21", "assistant", "ack-2")];
+    branchEntries = t2;
+    await fire(handlers, t2, fakeCtx(Math.round(E * 1.03)));
+    const t3 = [...t2, msg("e22", "assistant", "ack-3")];
+    branchEntries = t3;
+    await fire(handlers, t3, fakeCtx(Math.round(E * 1.15)));
+
+    const log = await readFile(logFile, "utf-8");
+    const lines = log.split("\n").filter((l) => l.includes("event=scale-flip-reanchor"));
+    assert.equal(lines.length, 1, "exactly one reanchor logged (the genuine switch; the micro-crossing is silent)");
+    const line = lines[0]!;
+    assert.match(line, /hostFloor=\d+/);
+    assert.match(line, /sentTokens=\d+/);
+    const hf = Number(/hostFloor=(\d+)/.exec(line)?.[1]);
+    assert.equal(hf, Math.round(E * 1.15), "hostFloor in the log is the actual provider floor of the flipping turn");
+  } finally {
+    delete process.env.ACP_LOG_FILE;
+    await rm(logFile, { force: true });
+    await rm(`${STATE_FILE}.acp.json`, { force: true });
+  }
+});

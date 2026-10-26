@@ -19,6 +19,8 @@ Settings are read from JSON files named `acp.json`. The global file applies to e
 
 > **Precedence:** Environment variable &gt; Project file &gt; Global file &gt; Built-in default.
 
+On a Pi fork, `.pi` is the fork's own config directory — `~/.prime/acp.json` and `<project>/.prime/acp.json` on Prime. Until that file exists, the `.pi` path above is still read. See [docs/host-adapter.md §4](./docs/host-adapter.md#4-config-directory-config_dir_name).
+
 Files are loaded at session start. Missing files, malformed JSON, and unknown keys are silently ignored — the extension never fails to start because of a config issue. Only the documented keys are read; everything else is discarded.
 
 ---
@@ -610,7 +612,8 @@ The `hostSession` key controls **turn-boundary detection** for hosts that run se
   ```json
   {
     "hostSession": {
-      "countCustomMessages": true
+      "countCustomMessages": true,
+      "customMessageTypes": ["agent_message", "async_bash_completion", "rlm_child_terminal_notice", "heartbeat_prompt"]
     }
   }
   ```
@@ -623,6 +626,13 @@ The `hostSession` key controls **turn-boundary detection** for hosts that run se
 - **Default:** `false`
 - **Status:** 🟢 ACTIVE
 - **Description:** Count host-injected `custom_message` entries with non-empty text (except UI-only `acp-status` panels) as turn boundaries for all per-turn ledgers; empty injections are pure control signals and start no turn. Does not change LLM-context projection — those entries were already projected as user-role messages under Pi-native semantics.
+
+### `hostSession.customMessageTypes`
+
+- **Type:** string[]
+- **Default:** unset (every non-empty injected type counts when opted in)
+- **Status:** 🟢 ACTIVE
+- **Description:** Optional `customType` allowlist refining `countCustomMessages`: when set (with `countCustomMessages: true`), only injected `custom_message` entries whose `customType` is listed start a turn — metadata injections that enter LLM context without being a real host turn (e.g. Prime's `harness_digest`, `ipython_state`) no longer reset nudge/retry accounting (#578). Entries without a `customType` never match; UI-only types (`acp-status`, `acp-export`, `acp-rule`) stay excluded even when listed. Ignored unless `countCustomMessages: true`; malformed values (non-array, non-string or empty-string members) warn and fall back to "all injected types count". An empty array is explicit "count none". Example above is Prime's set of genuine host-turn types.
 
 ---
 
@@ -963,7 +973,7 @@ Environment variables take precedence over the JSON config files. They are usefu
 - **Type:** string (file path)
 - **Default:** `~/.pi/acp.log`
 - **Status:** 🟢 ACTIVE
-- **Description:** Override the path to the log file. By default, structured logs are written to `~/.pi/acp.log` (the file rotates to `~/.pi/acp.log.old` at 10 MB). Point this at a different location to keep per-project or per-run logs separate.
+- **Description:** Override the path to the log file. By default, structured logs are written to `~/.pi/acp.log` (the file rotates to `~/.pi/acp.log.old` at 10 MB). Point this at a different location to keep per-project or per-run logs separate. On a Pi fork, `~/.pi` is the fork's own config directory (`~/.prime` on Prime) — see [docs/host-adapter.md §4](./docs/host-adapter.md#4-config-directory-config_dir_name).
 
 ### `PI_ACP_DELEGATE_MAX_DEPTH`
 
