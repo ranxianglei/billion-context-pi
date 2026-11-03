@@ -38,7 +38,7 @@ A production-scale longitudinal study: 4.5 months, three hosts, 174,327 model ca
 <code>pi install npm:billion-context-pi</code>
 </p>
 
-> **Renamed from `pai-acp`.** This project was originally published as [`pai-acp`](https://www.npmjs.com/package/pai-acp) (v0.0.1–v0.1.22, July–August 2026) and continues as `billion-context-pi` from v0.1.23. If you still have `pai-acp` installed, it is frozen at 0.1.22 with no update path — remove it (`pi remove npm:pai-acp`) and install `billion-context-pi` instead.
+> **Renamed from `pai-acp`.** This project was originally published as [`pai-acp`](https://www.npmjs.com/package/pai-acp) (v0.0.1–v0.1.22, 2026-07-30 → 2026-08-06) and is now published only as `billion-context-pi`. If you still have `pai-acp` installed, it will never receive further releases — the final release (0.1.22) migrates you to the new name automatically on startup; if that has not happened, remove it (`pi remove npm:pai-acp`) and install `billion-context-pi` instead.
 
 ---
 

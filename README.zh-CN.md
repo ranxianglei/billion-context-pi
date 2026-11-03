@@ -36,7 +36,7 @@ QQ群:
 <code>pi install npm:billion-context-pi</code>
 </p>
 
-> **由 `pai-acp` 更名而来。** 本项目最初以 [`pai-acp`](https://www.npmjs.com/package/pai-acp)(v0.0.1–v0.1.22,2026 年 7–8 月)发布,v0.1.23 起更名为 `billion-context-pi`。如果你还装着 `pai-acp`,它已冻结在 0.1.22 且没有任何升级路径——请卸载(`pi remove npm:pai-acp`)并改装 `billion-context-pi`。
+> **由 `pai-acp` 更名而来。** 本项目最初以 [`pai-acp`](https://www.npmjs.com/package/pai-acp)(v0.0.1–v0.1.22,2026-07-30 → 2026-08-06)发布,现仅以 `billion-context-pi` 发布。如果你还装着 `pai-acp`,它将不会再有任何新版本——最终版(0.1.22)内置了改名自动迁移,启动时会自动切到新包名;若尚未发生,请卸载(`pi remove npm:pai-acp`)并改装 `billion-context-pi`。
 
 ---
 
