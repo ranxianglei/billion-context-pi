@@ -181,7 +181,9 @@ export class SessionStateStore {
     const key = cacheKey(sessionFile, sessionId);
     const slot = this.cache.get(key);
     if (slot) {
-      this.cache.set(key, { state: slot.state, liveRefOrigins: [...origins], derivedFrom: slot.derivedFrom });
+      // In-place rewrites must keep the whole slot intact — dropping activePack
+      // here would silently lose the pack audit trail until the next stamping.
+      this.cache.set(key, { state: slot.state, liveRefOrigins: [...origins], derivedFrom: slot.derivedFrom, activePack: slot.activePack });
       this.touch(key);
     }
   }
@@ -198,7 +200,7 @@ export class SessionStateStore {
     const key = cacheKey(sessionFile, sessionId);
     const slot = this.cache.get(key);
     if (slot) {
-      this.cache.set(key, { state: slot.state, liveRefOrigins: slot.liveRefOrigins, derivedFrom: mark });
+      this.cache.set(key, { state: slot.state, liveRefOrigins: slot.liveRefOrigins, derivedFrom: mark, activePack: slot.activePack });
       this.touch(key);
     }
   }
