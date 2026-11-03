@@ -351,19 +351,10 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     delegateStatusWidget.setContext(ctx, runningRunsSnapshot, delegatePolicy.fleetShortcut);
   });
   pi.on("session_shutdown", (_event, ctx) => {
-    const sid = ctx.sessionManager.getSessionId();
-    runtime.clearDeadCompress(sid);
-    runtime.dropTokenScale(sid);
-    runtime.clearNudgeTracking(sid);
-    runtime.clearCompressRetryTracking(sid);
-    runtime.dropHostUsageSamples(sid);
-    runtime.dropKhat(sid);
-    runtime.dropSizeDivergence(sid);
-    runtime.dropTerminalEscape(sid);
-    runtime.dropTruncationSkipped(sid);
-    runtime.dropSentViewCount(sid);
-    runtime.dropProjectionCache(sid);
-    dropLiveOnlyTailCache(sid);
+    // #672: one call releases every per-session structure (live tail,
+    // projection cache, tracker ledgers, state-store slot) — the runtime's
+    // lifetime registry is the single source of truth for the list.
+    runtime.dropSession(ctx);
     delegateStatusWidget.dispose();
     closeLogStream();
   });

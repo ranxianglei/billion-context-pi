@@ -14,6 +14,8 @@ import { resolveCompress, resolveConfig, type AdapterConfig } from "./config.js"
 import { applyStrictReasoningGate, resolveReasoningDrop, type CompressReasoningConfig } from "./reasoning-drop.js";
 import { entriesToCoreMessages, EntryProjectionCache, extractText, matchesStoredText, messageIdentity, messageRef } from "./messages.js";
 import { SessionStateStore, deriveChildState, type LiveRefOrigin } from "./state.js";
+import { DEFAULT_SESSION_IDLE_TTL_MS, SessionRegistry, type SessionRegistryOptions } from "./session-registry.js";
+import { dropLiveOnlyTailCache } from "./live-only-tail.js";
 import { hasCompressHistory, rebuildStateFromLog } from "./state-rebuild.js";
 import { loadUserConfig, applyUserConfig } from "./user-config.js";
 import { sanitizeSurfaceConfig } from "./surface.js";
@@ -169,6 +171,12 @@ export interface AcpRuntime {
   /** Drop a session's incremental projection cache (session_shutdown): it
    *  holds the full projected CoreMessage[] for the session history. */
   dropProjectionCache(sid: string): void;
+  /** #672: release ALL of a session's in-process bookkeeping in one call
+   *  (session_shutdown): every per-session structure registered with the
+   *  lifetime registry — live tail, projection cache, nudge/throttle/
+   *  token-scale trackers, … — plus its state-store slot. Subsumes the
+   *  individual drop* methods above. */
+  dropSession(ctx: ExtensionContext): void;
   save(state: CompressionState, ctx: ExtensionContext): Promise<void>;
   /** #364 inline child sessions (same process, e.g. Prime RLM): derive the
    *  child's compression state from another session's. Inherits blocks /
@@ -377,13 +385,18 @@ function pruneOrphanRefs(state: CompressionState, messages: ReturnType<typeof en
 /** Max FAILED compress calls per user turn before the nudge circuit breaker engages. */
 export const MAX_COMPRESS_ATTEMPTS = 3;
 
-export function createRuntime(adapter: AdapterConfig): AcpRuntime {
+export function createRuntime(adapter: AdapterConfig, sessionOpts?: SessionRegistryOptions): AcpRuntime {
   const core = createCore({
     // CJK-aware base counter (kernel default); the meter's real-scale floor
     // (src/index.ts) covers provider-anchored calibration.
     countTokens: defaultCountTokens,
   });
   const store = new SessionStateStore();
+  // #672: uniform lifetime for every per-session structure — explicit drop on
+  // session_shutdown plus idle/LRU eviction, because long-lived fork-host
+  // servers never send shutdown for sessions that merely go quiet.
+  const sessionTtlMs = sessionOpts?.ttlMs ?? DEFAULT_SESSION_IDLE_TTL_MS;
+  const sessions = new SessionRegistry({ ttlMs: sessionTtlMs, maxTracked: sessionOpts?.maxTracked });
   const locks = new Map<string, Promise<void>>();
   const factoryAdapter = adapter;
   let adapterRef = adapter;
@@ -823,11 +836,16 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   function dropProjectionCache(sid: string): void {
     projectionCaches.delete(sid);
   }
+  function dropLiveTail(sid: string): void {
+    lastLiveBySession.delete(sid);
+  }
 
   async function stateFor(ctx: ExtensionContext, liveMessages?: AgentMessage[]) {
     const sm = ctx.sessionManager;
     const sessionFile = sm.getSessionFile() ?? undefined;
     const sessionId = sm.getSessionId();
+    sessions.touch(sessionId);
+    store.sweepIdle(sessionTtlMs);
     const piHost = isPiHost(sm);
     if (!piHost && liveMessages && liveMessages.length > 0) lastLiveBySession.set(sessionId, [...liveMessages]);
     const live = piHost ? undefined : (liveMessages ?? lastLiveBySession.get(sessionId));
@@ -915,7 +933,34 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     return true;
   }
 
+  function dropSession(ctx: ExtensionContext): void {
+    const sm = ctx.sessionManager;
+    const sid = sm.getSessionId();
+    sessions.drop(sid);
+    store.drop(sm.getSessionFile() ?? undefined, sid);
+  }
+
+  // #672: register every per-session structure with the lifetime registry.
+  // This list is the single wiring point — adding a new per-session map here
+  // is what keeps it from leaking in long-lived processes.
+  sessions.track(clearNudgeTracking);
+  sessions.track(overflowDrop);
+  sessions.track(dropSentViewCount);
+  sessions.track(clearDeadCompress);
+  sessions.track(throttleDrop);
+  sessions.track(dropTokenScale);
+  sessions.track(dropKhat);
+  sessions.track(dropHostUsageSamples);
+  sessions.track(dropSizeDivergence);
+  sessions.track(dropTerminalEscape);
+  sessions.track(dropTruncationSkipped);
+  sessions.track((sid) => { strictEchoLogged.delete(sid); });
+  sessions.track(clearCompressRetryTracking);
+  sessions.track(dropLiveTail);
+  sessions.track(dropProjectionCache);
+  sessions.track(dropLiveOnlyTailCache);
+
   let refused = false;
   let refusalMessage: string | null = null;
   let delegateStoodDown = false;
-  return { core, store, get refused() { return refused; }, set refused(v: boolean) { refused = v; }, get refusalMessage() { return refusalMessage; }, set refusalMessage(v: string | null) { refusalMessage = v; }, get delegateStoodDown() { return delegateStoodDown; }, set delegateStoodDown(v: boolean) { delegateStoodDown = v; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown, nudgeShownFor, nudgeShownTokensFor, clearNudgeTracking, clearNudgeTokenStamps, markNudgeRecorded, nudgeRecordedFor, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reasoningDropFor, reloadConfig, stateFor, save, deriveChildState: deriveChild, acquireLock, overflowFor, overflowDrop, noteSentViewCount, peekSentViewCount, dropSentViewCount, dropProjectionCache, noteDeadCompress, clearDeadCompress, throttleFor, throttleDrop , noteTokenScale, dropTokenScale, noteKhatUsage, khatFor, setKhatPending, dropKhat, noteHostUsage, dropHostUsageSamples, noteSizeDivergence, dropSizeDivergence, noteTerminalEscape, dropTerminalEscape, noteTruncationSkipped, dropTruncationSkipped, stripImagesFor };}
+  return { core, store, get refused() { return refused; }, set refused(v: boolean) { refused = v; }, get refusalMessage() { return refusalMessage; }, set refusalMessage(v: string | null) { refusalMessage = v; }, get delegateStoodDown() { return delegateStoodDown; }, set delegateStoodDown(v: boolean) { delegateStoodDown = v; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown, nudgeShownFor, nudgeShownTokensFor, clearNudgeTracking, clearNudgeTokenStamps, markNudgeRecorded, nudgeRecordedFor, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reasoningDropFor, reloadConfig, stateFor, save, deriveChildState: deriveChild, acquireLock, overflowFor, overflowDrop, noteSentViewCount, peekSentViewCount, dropSentViewCount, dropProjectionCache, noteDeadCompress, clearDeadCompress, throttleFor, throttleDrop, noteTokenScale, dropTokenScale, noteKhatUsage, khatFor, setKhatPending, dropKhat, noteHostUsage, dropHostUsageSamples, noteSizeDivergence, dropSizeDivergence, noteTerminalEscape, dropTerminalEscape, noteTruncationSkipped, dropTruncationSkipped, stripImagesFor, dropSession };}
