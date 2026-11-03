@@ -38,6 +38,8 @@ A production-scale longitudinal study: 4.5 months, three hosts, 174,327 model ca
 <code>pi install npm:billion-context-pi</code>
 </p>
 
+> **Renamed from `pai-acp`.** This project was originally published as [`pai-acp`](https://www.npmjs.com/package/pai-acp) (v0.0.1–v0.1.22, July–August 2026) and continues as `billion-context-pi` from v0.1.23. If you still have `pai-acp` installed, it is frozen at 0.1.22 with no update path — remove it (`pi remove npm:pai-acp`) and install `billion-context-pi` instead.
+
 ---
 
 > **Host support:** this plugin is for **Pi**. It does **not** support **OMP (oh-my-pi)** — on an OMP host it refuses to run. OMP users: use [billion-context](https://github.com/ranxianglei/billion-context) instead (`bili omp`, built-in plugin). Full client → package table: see [Which do I need?](#which-do-i-need); OMP details: [docs/omp.md](./docs/omp.md).
