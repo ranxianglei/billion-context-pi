@@ -36,6 +36,8 @@ QQ群:
 <code>pi install npm:billion-context-pi</code>
 </p>
 
+> **由 `pai-acp` 更名而来。** 本项目最初以 [`pai-acp`](https://www.npmjs.com/package/pai-acp)(v0.0.1–v0.1.22,2026-07-30 → 2026-08-06)发布,现仅以 `billion-context-pi` 发布。如果你还装着 `pai-acp`,它将不会再有任何新版本——最终版(0.1.22)内置了改名自动迁移,启动时会自动切到新包名;若尚未发生,请卸载(`pi remove npm:pai-acp`)并改装 `billion-context-pi`。
+
 ---
 
 > **宿主支持:** 本插件面向 **Pi**。它**不支持 OMP(oh-my-pi)** —— 在 OMP 宿主上会拒绝运行。OMP 用户请直接改用 [billion-context](https://github.com/ranxianglei/billion-context)(启动命令 bili omp);其他客户端的完整对照见[该选哪个?](#该选哪个)。OMP 详细说明:[docs/omp.zh-CN.md](./docs/omp.zh-CN.md)。
