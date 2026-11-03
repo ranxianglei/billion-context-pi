@@ -740,11 +740,18 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
 
   async function acquireLock(sid: string): Promise<() => void> {
     const prev = locks.get(sid) ?? Promise.resolve();
-    let release!: () => void;
-    const next = new Promise<void>((resolve) => { release = () => { locks.delete(sid); resolve(); }; });
-    locks.set(sid, prev.then(() => next));
+    let resolveNext!: () => void;
+    const next = new Promise<void>((resolve) => { resolveNext = resolve; });
+    // Each caller waits on its own chain link and only clears the map entry if it is
+    // still the tail — an unconditional delete would wipe a queued successor's chain
+    // and let a late arrival skip the queue (#674).
+    const chain = prev.then(() => next);
+    locks.set(sid, chain);
     await prev;
-    return release;
+    return () => {
+      if (locks.get(sid) === chain) locks.delete(sid);
+      resolveNext();
+    };
   }
 
   function liveContextLimit(ctx: ExtensionContext): number {
