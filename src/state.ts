@@ -60,12 +60,20 @@ function cacheKey(sessionFile: string | undefined, sessionId: string): string {
 
 export class SessionStateStore {
   private cache = new Map<string, StateCacheSlot>();
+  private lastSeen = new Map<string, number>();
+
+  private touch(key: string): void {
+    this.lastSeen.set(key, Date.now());
+  }
 
   async load(sessionFile: string | undefined, sessionId: string): Promise<CompressionState> {
     const file = stateFileFor(sessionFile);
     const key = cacheKey(sessionFile, sessionId);
     const cached = this.cache.get(key);
-    if (cached) return cached.state;
+    if (cached) {
+      this.touch(key);
+      return cached.state;
+    }
     let state = createInitialState();
     let liveRefOrigins: LiveRefOrigin[] = [];
     let derivedFrom: DerivedFrom | null = null;
@@ -102,6 +110,7 @@ export class SessionStateStore {
       }
     }
     this.cache.set(key, { state, liveRefOrigins, derivedFrom, activePack });
+    this.touch(key);
     return state;
   }
 
@@ -110,11 +119,18 @@ export class SessionStateStore {
   setActivePack(sessionFile: string | undefined, sessionId: string, activePack: string): void {
     const key = cacheKey(sessionFile, sessionId);
     const slot = this.cache.get(key);
-    if (slot) this.cache.set(key, { ...slot, activePack });
+    if (slot) {
+      this.cache.set(key, { ...slot, activePack });
+      this.touch(key);
+    }
   }
 
   getActivePack(sessionFile: string | undefined, sessionId: string): string | undefined {
-    return this.cache.get(cacheKey(sessionFile, sessionId))?.activePack;
+    const key = cacheKey(sessionFile, sessionId);
+    const slot = this.cache.get(key);
+    if (!slot) return undefined;
+    this.touch(key);
+    return slot.activePack;
   }
 
   async save(state: CompressionState, sessionFile: string | undefined, sessionId: string): Promise<void> {
@@ -129,6 +145,7 @@ export class SessionStateStore {
     // this process — otherwise every compress result is dropped and the model
     // re-compresses the same original context forever (issue #322).
     this.cache.set(key, { state, liveRefOrigins, derivedFrom, activePack });
+    this.touch(key);
     if (!file) return;
     const dir = path.dirname(file);
     await fs.mkdir(dir, { recursive: true }).catch((e: unknown) => {
@@ -153,27 +170,65 @@ export class SessionStateStore {
   }
 
   getLiveRefOrigins(sessionFile: string | undefined, sessionId: string): LiveRefOrigin[] {
-    return [...(this.cache.get(cacheKey(sessionFile, sessionId))?.liveRefOrigins ?? [])];
+    const key = cacheKey(sessionFile, sessionId);
+    const slot = this.cache.get(key);
+    if (!slot) return [];
+    this.touch(key);
+    return [...slot.liveRefOrigins];
   }
 
   setLiveRefOrigins(sessionFile: string | undefined, sessionId: string, origins: LiveRefOrigin[]): void {
     const key = cacheKey(sessionFile, sessionId);
     const slot = this.cache.get(key);
-    if (slot) this.cache.set(key, { state: slot.state, liveRefOrigins: [...origins], derivedFrom: slot.derivedFrom });
+    if (slot) {
+      // In-place rewrites must keep the whole slot intact — dropping activePack
+      // here would silently lose the pack audit trail until the next stamping.
+      this.cache.set(key, { state: slot.state, liveRefOrigins: [...origins], derivedFrom: slot.derivedFrom, activePack: slot.activePack });
+      this.touch(key);
+    }
   }
 
   getDerivedFrom(sessionFile: string | undefined, sessionId: string): DerivedFrom | null {
-    return this.cache.get(cacheKey(sessionFile, sessionId))?.derivedFrom ?? null;
+    const key = cacheKey(sessionFile, sessionId);
+    const slot = this.cache.get(key);
+    if (!slot) return null;
+    this.touch(key);
+    return slot.derivedFrom;
   }
 
   setDerivedFrom(sessionFile: string | undefined, sessionId: string, mark: DerivedFrom | null): void {
     const key = cacheKey(sessionFile, sessionId);
     const slot = this.cache.get(key);
-    if (slot) this.cache.set(key, { state: slot.state, liveRefOrigins: slot.liveRefOrigins, derivedFrom: mark });
+    if (slot) {
+      this.cache.set(key, { state: slot.state, liveRefOrigins: slot.liveRefOrigins, derivedFrom: mark, activePack: slot.activePack });
+      this.touch(key);
+    }
   }
 
   invalidate(): void {
     this.cache.clear();
+    this.lastSeen.clear();
+  }
+
+  /** Release one session's slot explicitly (session_shutdown). */
+  drop(sessionFile: string | undefined, sessionId: string): void {
+    const key = cacheKey(sessionFile, sessionId);
+    this.cache.delete(key);
+    this.lastSeen.delete(key);
+  }
+
+  /** Evict FILE-BACKED slots idle past ttlMs (#672): long-lived hosts never
+   *  emit session_shutdown for sessions that merely go quiet. File-backed
+   *  slots reload losslessly from their sidecar on next access; file-less
+   *  (`session:`-keyed) slots are NEVER evicted — they have no sidecar, and
+   *  dropping one would lose the session's entire compression state (#322). */
+  sweepIdle(ttlMs: number): void {
+    const now = Date.now();
+    for (const [key, seen] of this.lastSeen) {
+      if (key.startsWith("session:") || now - seen <= ttlMs) continue;
+      this.cache.delete(key);
+      this.lastSeen.delete(key);
+    }
   }
 
   private async tryLoadParentState(sessionFile: string): Promise<CompressionState | undefined> {
