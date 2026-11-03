@@ -41,7 +41,8 @@ export class SessionRegistry {
 
   /** Record activity for a session, then evict whatever fell out of the
    *  lifetime window. Called on the hot path (every context fire and ACP
-   *  tool call), so it stays O(tracked sessions). */
+   *  tool call), so the sweep cost stays bounded by the tracked-session cap
+   *  (n log n over the sorted entries, n ≤ maxTracked). */
   touch(sid: string, now: number = Date.now()): void {
     this.lastSeenAt.set(sid, now);
     this.sweep(now);
