@@ -765,7 +765,7 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     // [#361] strict-echo upstreams (DeepSeek thinking mode) must keep reasoning
     // round-tripping or the rebuilt request 400s — force the pass off regardless
     // of config so a thinking-mode session can't be broken by default drop:true.
-    const gated = applyStrictReasoningGate(resolved, m?.provider, m?.baseUrl);
+    const gated = applyStrictReasoningGate(resolved, m?.provider, m?.baseUrl, m?.id);
     if (resolved.drop && !gated.drop) {
       const sid = ctx.sessionManager.getSessionId();
       if (!strictEchoLogged.has(sid)) {
