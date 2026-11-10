@@ -6,14 +6,14 @@ import { join } from "node:path";
 import { CONFIG_DIR_NAME, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createRuntime } from "../src/runtime.js";
 
-// [#361] E2E wiring for the strict-echo gate: drives the REAL production path
+// [#361/#626] E2E wiring for the strict-echo gate: drives the REAL production path
 // (createRuntime → reloadConfig → reasoningDropFor), complementing the pure-function
-// tests in reasoning-drop.test.ts. Proves ctx.model.baseUrl reaches the gate (not just
-// the provider name), an explicit drop:true loses to the safety override, and the
-// info log fires exactly once per session.
+// tests in reasoning-drop.test.ts. Proves ctx.model.baseUrl AND ctx.model.id reach the
+// gate (not just the provider name), an explicit drop:true loses to the safety override,
+// and the info log fires exactly once per session carrying both signals.
 
-function ctxFor(provider: string | undefined, baseUrl: string | undefined, sid = "s1"): ExtensionContext {
-    return { model: { provider, baseUrl }, sessionManager: { getSessionId: () => sid } } as unknown as ExtensionContext;
+function ctxFor(provider: string | undefined, baseUrl: string | undefined, sid = "s1", id?: string): ExtensionContext {
+    return { model: { provider, baseUrl, id }, sessionManager: { getSessionId: () => sid } } as unknown as ExtensionContext;
 }
 
 async function withIsolatedHome(json: unknown, fn: (cwd: string) => Promise<void>): Promise<void> {
@@ -78,5 +78,28 @@ test("e2e gate: explicit drop:true in acp.json still loses to the safety gate", 
 
         const plain = runtime.reasoningDropFor(ctxFor("anthropic", "https://api.anthropic.com", "d2"));
         assert.equal(plain.drop, true, "explicit drop:true honored for non-strict providers");
+    });
+});
+
+// [#626] gateway/mirror shape: the upstream vendor appears ONLY in the model id.
+// Pins ctx.model.id reaching the gate through the real pipeline — if the wiring in
+// reasoningDropFor ever drops the modelId argument, this fails even though every
+// pure-function test still passes.
+test("e2e gate [#626]: model id reaches the gate through the real pipeline (gateway shape)", async () => {
+    await withIsolatedHome(undefined, async (cwd) => {
+        const runtime = createRuntime({});
+        await runtime.reloadConfig(cwd);
+
+        const gated = runtime.reasoningDropFor(ctxFor("finloop", "https://gateway.example.com/v1", "g1", "deepseek-flash"));
+        assert.equal(gated.drop, false, "default drop:true forced off when only the model id carries the vendor token");
+        assert.equal(gated.threshold, 2048, "threshold preserved by the gate");
+
+        const plain = runtime.reasoningDropFor(ctxFor("finloop", "https://gateway.example.com/v1", "g2", "gpt-4o"));
+        assert.equal(plain.drop, true, "non-strict-echo model id keeps the pass armed");
+
+        const log = await readFile(join(cwd, "acp.log"), "utf8");
+        const lines = log.split("\n").filter((l) => l.includes("event=compress-reasoning-auto-disabled") && l.includes("sid=g1"));
+        assert.equal(lines.length, 1, "gated session logged once");
+        assert.ok(lines[0]!.includes("model=deepseek-flash"), "log carries the model-id signal (provider does not reveal the vendor on a gateway)");
     });
 });

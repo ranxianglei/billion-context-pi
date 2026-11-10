@@ -685,7 +685,13 @@
    { "compress": { "providers": { "openai": { "reasoning": { "drop": false } } } } }
    ```
 
-   **严格回传的思考型上游（自动禁用）。** 少数思考模式 provider 在已闭合轮次的 assistant 消息丢失 reasoning 后，会以 HTTP 400（`The \`reasoning_content\` ... must be passed back to the API`）拒绝重放请求。适配器通过静态检测识别 **DeepSeek**——模型的 `baseUrl` 或 provider 名包含 `deepseek`（不区分大小写）——并对该模型自动强制 `drop: false`，即使显式配置了 `drop: true` 也会为安全起见覆盖。对非思考的 DeepSeek 模型零成本（它们不产生可丢弃的 `thinking` 部分）。**不在** `deepseek` 主机上的严格回传 provider——GLM-thinking、QwQ、自托管 DeepSeek 镜像——刻意不做自动检测（否则会禁用其非思考模型的该 pass），请对它们使用上面的按 provider 覆盖。配套修复：代理侧 billion-context#690、内核侧折叠原子性 acp-kernel#245（随 acp-kernel 0.0.63 发布）；跟踪于 [#361](https://github.com/ranxianglei/billion-context-pi/issues/361)。
+   **严格回传的思考型上游（自动禁用）。** 少数思考模式 provider 在已闭合轮次的 assistant 消息丢失 reasoning 后，会以 HTTP 400（`The \`reasoning_content\` ... must be passed back to the API`）拒绝重放请求。适配器通过**静态检测**模型的来源信号识别这些上游，并对该模型自动强制 `drop: false`，即使显式配置了 `drop: true` 也会为安全起见覆盖。它把 token `deepseek`、`glm`、`qwq`、`reasoner`（不区分大小写）与**任意**三个信号之一匹配：模型的 `baseUrl`、provider 名，**以及模型 id**（[#626](https://github.com/ranxianglei/billion-context-pi/issues/626)）。模型 id 这一信号覆盖**自托管网关 / 镜像**（LiteLLM、one-api、newapi、企业内部 AI 网关）：在那里 provider id 是网关名、`baseUrl` 是网关机主，上游厂商名只出现在模型 id 里（如 `deepseek-flash`）——仅靠主机检测会漏掉这种形态。对那些主机上的非思考模型零成本（它们不产生可丢弃的 `thinking` 部分）。
+
+   如果你的严格回传上游使用的模型 id **不含**上述任何 token（完全自定义的网关模型名），检测不会触发——请设置 `compress.reasoning.drop: false` 让 reasoning 原样回传（全局，或按 provider，见上）：
+    ```json
+    { "compress": { "reasoning": { "drop": false } } }
+    ```
+   配套修复：代理侧 billion-context#690、内核侧折叠原子性 acp-kernel#245（随 acp-kernel 0.0.63 发布）；跟踪于 [#361](https://github.com/ranxianglei/billion-context-pi/issues/361) 与 [#626](https://github.com/ranxianglei/billion-context-pi/issues/626)。
 
 ### `compress.promptPack`
 

@@ -43,20 +43,31 @@ export function resolveReasoningDrop(cfg?: CompressReasoningConfig): Required<Co
   return { drop: cfg?.drop !== false, threshold };
 }
 
-/** [#361] Strict-echo thinking upstreams (DeepSeek thinking mode) require
- *  `reasoning_content` to round-trip verbatim across tool-call turns; a rebuilt
- *  request whose closed-round assistant messages lost their reasoning is rejected
- *  with HTTP 400 ("reasoning_content ... must be passed back"). Detect statically
- *  from the model's configured origin/name so the request-time drop pass stands
- *  down. Mirrors the proxy-side billion-context#690 detector, adapted to pi's
- *  signal sources: the in-process adapter does not own the HTTP layer, so there
- *  is no learn-on-400 self-heal here — see CONFIGURATION.md for the manual
- *  `drop:false` escape hatch (GLM-thinking / QwQ / self-hosted mirrors). */
-export function isStrictReasoningEcho(provider?: string, baseUrl?: string): boolean {
-  return /deepseek/i.test(baseUrl ?? "") || /deepseek/i.test(provider ?? "");
+/** [#361/#626] Vendor tokens marking a strict-echo thinking upstream. Matched
+ *  case-insensitively against ANY of the model's origin signals (provider name,
+ *  baseUrl, model id). #626 added the model id as a signal AND widened past
+ *  DeepSeek to the other known strict-echo families (GLM-thinking, QwQ,
+ *  *-reasoner): on a self-hosted gateway/mirror the provider id is the gateway
+ *  name and the baseUrl is the gateway host, so the upstream vendor appears only
+ *  in the model id (e.g. `deepseek-flash`) — host-only detection misses it. */
+const STRICT_ECHO_PATTERN = /deepseek|glm|qwq|reasoner/i;
+
+/** [#361/#626] Strict-echo thinking upstreams (DeepSeek thinking mode, GLM-
+ *  thinking, QwQ, *-reasoner) require `reasoning_content` to round-trip verbatim
+ *  across tool-call turns; a rebuilt request whose closed-round assistant messages
+ *  lost their reasoning is rejected with HTTP 400 ("reasoning_content ... must be
+ *  passed back"). Detect statically from the model's configured origin signals —
+ *  provider name, baseUrl, AND model id (#626) — so the request-time drop pass
+ *  stands down. Mirrors the proxy-side billion-context#690 detector, adapted to
+ *  pi's signal sources: the in-process adapter does not own the HTTP layer, so
+ *  there is no learn-on-400 self-heal here — see CONFIGURATION.md for the manual
+ *  `drop:false` escape hatch (and for upstreams whose vendor token is none of the
+ *  above). */
+export function isStrictReasoningEcho(provider?: string, baseUrl?: string, modelId?: string): boolean {
+  return [baseUrl, provider, modelId].some((s) => s !== undefined && STRICT_ECHO_PATTERN.test(s));
 }
 
-/** [#361] Force the drop pass off on a strict-echo upstream so its reasoning
+/** [#361/#626] Force the drop pass off on a strict-echo upstream so its reasoning
  *  round-trips unmodified. Pure: returns cfg unchanged when not strict-echo or
  *  already disabled. Cost-free for non-thinking models on those hosts — they emit
  *  no `thinking` parts, so the pass would be a no-op regardless. */
@@ -64,8 +75,9 @@ export function applyStrictReasoningGate(
   cfg: Required<CompressReasoningConfig>,
   provider?: string,
   baseUrl?: string,
+  modelId?: string,
 ): Required<CompressReasoningConfig> {
-  if (!cfg.drop || !isStrictReasoningEcho(provider, baseUrl)) return cfg;
+  if (!cfg.drop || !isStrictReasoningEcho(provider, baseUrl, modelId)) return cfg;
   return { ...cfg, drop: false };
 }
 
