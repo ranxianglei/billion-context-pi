@@ -56,8 +56,9 @@ function fakeCtx(cwd: string) {
 async function boot(api: any, handlers: Map<string, ((event: any, ctx: any) => any)[]>, cwd: string) {
     const ctx = fakeCtx(cwd);
     await handlers.get("session_start")![0]!({ type: "session_start", reason: "startup" }, ctx);
-    const promptEvent = await handlers.get("before_agent_start")![0]!({ systemPrompt: "BASE" }, ctx);
-    return { tools: (api.tools as any[]).map((t) => t.name as string), systemPrompt: promptEvent.systemPrompt as string };
+    const promptEvent: any = { systemPrompt: "BASE" };
+    await handlers.get("before_agent_start")![0]!(promptEvent, ctx);
+    return { tools: (api.tools as any[]).map((t) => t.name as string), systemPrompt: (promptEvent.systemPromptOptions?.appendSystemPrompt ?? "") as string };
 }
 
 /** Temp HOME + temp cwd: `global` lands in $HOME/.pi/acp.json, `project` in

@@ -48,7 +48,7 @@ import {
   throttleDelayMs,
 } from "./throttle-retry.js";
 import { defaultCountTokens } from "acp-kernel";
-import { formatSystemPromptForEvent, getSystemPromptText } from "./compat.js";
+import { getSystemPromptText } from "./compat.js";
 import { applyOutputHeadroom, inspectOverflowMessage, isNoBody4xxError, resolveOutputHeadroomCap } from "./overflow-selfheal.js";
 import { FORK_HOST_WARNING_MESSAGE, UNSUPPORTED_HOST_MESSAGE } from "./omp.js";
 import { isDeclaredForkHost, isUnsupportedHost } from "./host.js";
@@ -981,7 +981,16 @@ function wireSystemPrompt(pi: ExtensionAPI, runtime: AcpRuntime): void {
     const acp = buildAcpSystemPrompt(runtime.prompts, merged.promptSections);
     const delegateText = merged.delegatePrompt !== undefined ? merged.delegatePrompt : ACP_DELEGATE_PROMPT;
     const prompt = delegate && delegateText !== null ? `${acp}\n${delegateText}` : acp;
-    return { systemPrompt: formatSystemPromptForEvent(event.systemPrompt, prompt) };
+    const marker = "<!-- billion-context-pi:acp-system-prompt -->";
+    const block = `${marker}\n${prompt}`;
+    const opts = ((event as { systemPromptOptions?: { appendSystemPrompt?: string } }).systemPromptOptions ??= {});
+    const prev = opts.appendSystemPrompt ?? "";
+    if (prev.includes(marker)) {
+      const i = prev.indexOf(marker);
+      opts.appendSystemPrompt = `${prev.slice(0, i)}${block}`;
+    } else {
+      opts.appendSystemPrompt = prev ? `${prev}\n\n${block}` : block;
+    }
   });
 }
 

@@ -91,10 +91,30 @@ test("session_before_compact cancels Pi's auto-compaction", () => {
 test("before_agent_start appends the ACP system prompt", () => {
   const { api, handlers } = captureApi();
   createAcpExtension()(api as any);
-  const result = handlers.get("before_agent_start")![0]!({ systemPrompt: "BASE" }, {});
-  assert.ok(result.systemPrompt.startsWith("BASE"));
-  assert.ok(result.systemPrompt.includes("compress"));
-  assert.ok(result.systemPrompt.includes("acp"));
+  const event: any = { systemPrompt: "BASE" };
+  const result = handlers.get("before_agent_start")![0]!(event, {});
+  assert.equal(result, undefined);
+  assert.equal(event.systemPrompt, "BASE");
+  const appended = event.systemPromptOptions?.appendSystemPrompt ?? "";
+  assert.ok(appended.includes("compress"));
+  assert.ok(appended.includes("acp"));
+});
+
+test("before_agent_start mutates appendSystemPrompt idempotently without replacing systemPrompt", () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension()(api as any);
+  const handler = handlers.get("before_agent_start")![0]!;
+  const event: any = { systemPrompt: "BASE", systemPromptOptions: { appendSystemPrompt: "OTHER" } };
+  handler(event, {});
+  assert.equal(event.systemPrompt, "BASE");
+  const first = event.systemPromptOptions.appendSystemPrompt as string;
+  assert.ok(first.startsWith("OTHER"));
+  assert.ok(first.includes("compress"));
+  assert.equal(first.match(/<!-- billion-context-pi:acp-system-prompt -->/g)?.length, 1);
+  handler(event, {});
+  const second = event.systemPromptOptions.appendSystemPrompt as string;
+  assert.equal(second, first);
+  assert.equal(second.match(/<!-- billion-context-pi:acp-system-prompt -->/g)?.length, 1);
 });
 
 test("context handler tags every message with a ref even when length matches event.messages", async () => {
@@ -487,8 +507,9 @@ test("omp rebuilds refs after stale live state before status compression", async
 test("system prompt sources compression rules from acp-kernel (no hardcoded drift, no markers)", () => {
   const { api, handlers } = captureApi();
   createAcpExtension()(api as any);
-  const result = handlers.get("before_agent_start")![0]!({ systemPrompt: "" }, {});
-  const sp = result.systemPrompt;
+  const event: any = { systemPrompt: "" };
+  handlers.get("before_agent_start")![0]!(event, {});
+  const sp = event.systemPromptOptions?.appendSystemPrompt ?? "";
   // kernel constants inlined (regression guard against reverting to a hardcoded copy)
   assert.ok(sp.includes("Work from summaries, not raw tool outputs"), "kernel COMPRESS_PHILOSOPHY inlined");
   assert.ok(sp.includes("HOW TO COMPRESS"), "kernel HOW_TO_COMPRESS_RULES inlined");
@@ -743,19 +764,23 @@ test("omp keeps compression active when persisted and provider tails diverge", a
 test("delegate:false omits the ACP_DELEGATE NOTIFICATIONS section from the system prompt", () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ delegate: false })(api as any);
-  const result = handlers.get("before_agent_start")![0]!({ systemPrompt: "" }, {});
-  assert.ok(!result.systemPrompt.includes("ACP_DELEGATE NOTIFICATIONS"), "delegate section omitted when delegate:false");
+  const event: any = { systemPrompt: "" };
+  handlers.get("before_agent_start")![0]!(event, {});
+  const sp = event.systemPromptOptions?.appendSystemPrompt ?? "";
+  assert.ok(!sp.includes("ACP_DELEGATE NOTIFICATIONS"), "delegate section omitted when delegate:false");
   // Core ACP prompt is still present — only the delegate section is dropped.
-  assert.ok(result.systemPrompt.includes("ACP TAGS"), "core ACP prompt still present when delegate disabled");
+  assert.ok(sp.includes("ACP TAGS"), "core ACP prompt still present when delegate disabled");
 });
 
 test("delegate:{enabled:false} omits the ACP_DELEGATE NOTIFICATIONS section from the system prompt", () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ delegate: { enabled: false } })(api as any);
-  const result = handlers.get("before_agent_start")![0]!({ systemPrompt: "" }, {});
-  assert.ok(!result.systemPrompt.includes("ACP_DELEGATE NOTIFICATIONS"), "delegate section omitted when delegate:{enabled:false}");
+  const event: any = { systemPrompt: "" };
+  handlers.get("before_agent_start")![0]!(event, {});
+  const sp = event.systemPromptOptions?.appendSystemPrompt ?? "";
+  assert.ok(!sp.includes("ACP_DELEGATE NOTIFICATIONS"), "delegate section omitted when delegate:{enabled:false}");
   // Core ACP prompt is still present — only the delegate section is dropped.
-  assert.ok(result.systemPrompt.includes("ACP TAGS"), "core ACP prompt still present when delegate disabled");
+  assert.ok(sp.includes("ACP TAGS"), "core ACP prompt still present when delegate disabled");
 });
 
 // ─── ISSUE-9: modelContextLimit changes in <cwd>/.pi/acp.json hot-reload ──
@@ -982,9 +1007,11 @@ test("#415: project-scope pi-subagents → acp_delegate stands down (tools, shor
       assert.ok(toolNames.includes("compress"), "core ACP tools still registered");
       assert.deepEqual(shortcuts, [], "fleet shortcut not registered while stood down");
 
-      const promptResult = handlers.get("before_agent_start")![0]!({ systemPrompt: "" }, {});
-      assert.ok(!promptResult.systemPrompt.includes("ACP_DELEGATE NOTIFICATIONS"), "delegate prompt section omitted while stood down");
-      assert.ok(promptResult.systemPrompt.includes("ACP TAGS"), "core ACP prompt still present");
+      const promptEvent: any = { systemPrompt: "" };
+      handlers.get("before_agent_start")![0]!(promptEvent, {});
+      const promptSp = promptEvent.systemPromptOptions?.appendSystemPrompt ?? "";
+      assert.ok(!promptSp.includes("ACP_DELEGATE NOTIFICATIONS"), "delegate prompt section omitted while stood down");
+      assert.ok(promptSp.includes("ACP TAGS"), "core ACP prompt still present");
 
       assert.ok(notified.some((m) => m === DELEGATE_STAND_DOWN_MESSAGE), "stand-down reminder surfaced via ui.notify");
     });
@@ -1043,8 +1070,9 @@ test("#415: delegate.forceEnable keeps acp_delegate despite project-scope pi-sub
       assert.deepEqual(shortcuts, [DEFAULT_FLEET_SHORTCUT], "shortcut registered with forceEnable");
       assert.ok(!notified.some((m) => m === DELEGATE_STAND_DOWN_MESSAGE), "no stand-down reminder when forceEnable is set");
 
-      const promptResult = handlers.get("before_agent_start")![0]!({ systemPrompt: "" }, {});
-      assert.ok(promptResult.systemPrompt.includes("ACP_DELEGATE NOTIFICATIONS"), "delegate prompt section present with forceEnable");
+      const promptEvent: any = { systemPrompt: "" };
+      handlers.get("before_agent_start")![0]!(promptEvent, {});
+      assert.ok((promptEvent.systemPromptOptions?.appendSystemPrompt ?? "").includes("ACP_DELEGATE NOTIFICATIONS"), "delegate prompt section present with forceEnable");
     });
   } finally {
     fx.cleanup();
@@ -1069,8 +1097,9 @@ test("#415: explicit enabled:false wins over detection and forceEnable (priority
       assert.ok(!toolNames.includes("acp_delegate_cancel"), "acp_delegate_cancel stays off");
       assert.deepEqual(shortcuts, [], "no shortcut when explicitly disabled");
 
-      const promptResult = handlers.get("before_agent_start")![0]!({ systemPrompt: "" }, {});
-      assert.ok(!promptResult.systemPrompt.includes("ACP_DELEGATE NOTIFICATIONS"), "delegate prompt section absent when explicitly disabled");
+      const promptEvent: any = { systemPrompt: "" };
+      handlers.get("before_agent_start")![0]!(promptEvent, {});
+      assert.ok(!(promptEvent.systemPromptOptions?.appendSystemPrompt ?? "").includes("ACP_DELEGATE NOTIFICATIONS"), "delegate prompt section absent when explicitly disabled");
     });
   } finally {
     fx.cleanup();
