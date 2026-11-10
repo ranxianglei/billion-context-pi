@@ -1,4 +1,4 @@
-import { readFile, writeFile, mkdir, access } from "node:fs/promises";
+import { readFile, writeFile, mkdir, access, readdir, stat, unlink } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
@@ -194,6 +194,27 @@ function parseSemVer(version: string): { parts: number[]; pre: string[] } | unde
     parts: [Number(match[1]), Number(match[2]), Number(match[3])],
     pre: match[4]?.split(".") ?? [],
   };
+}
+
+async function cleanupStaleUpdateCheckMarkers(dir: string, activeMarker: string, now: number): Promise<void> {
+  let entries: string[];
+  try {
+    entries = await readdir(dir);
+  } catch {
+    return;
+  }
+  const cutoff = now - 24 * 60 * 60 * 1000;
+  await Promise.all(entries.map(async (name) => {
+    if (!/^\.billion-context-pi-update-check-[0-9a-f]{12}$/.test(name)) return;
+    const full = join(dir, name);
+    if (full === activeMarker) return;
+    try {
+      const st = await stat(full);
+      if (st.mtimeMs < cutoff) await unlink(full);
+    } catch {
+      // best-effort
+    }
+  }));
 }
 
 async function readLastCheck(throttle: string): Promise<number> {
@@ -466,6 +487,7 @@ export async function checkForUpdate(
     }
     const throttle = throttleFileFor(extDir);
     const now = Date.now();
+    await cleanupStaleUpdateCheckMarkers(dirname(throttle), throttle, now).catch(() => {});
     const lastCheck = await readLastCheck(throttle);
     if (now - lastCheck < CHECK_INTERVAL_MS) return;
 

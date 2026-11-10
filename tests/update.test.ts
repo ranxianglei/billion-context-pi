@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { join, dirname } from "node:path";
 import { homedir, tmpdir } from "node:os";
-import { mkdtempSync, readFileSync, rmSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, mkdirSync, writeFileSync, existsSync, utimesSync } from "node:fs";
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 import type { NpmRunner } from "../src/update.js";
 
@@ -502,4 +502,59 @@ test("checkForUpdate: read-only marker present → skips npm view entirely + not
   assert.equal(npmCalls, 0, "no npm view when the install location is read-only");
   assert.equal(notes.length, 1, "notify emitted once per process, not once per check");
   assert.match(notes[0], /npm i -g billion-context-pi/);
+});
+
+
+test("checkForUpdate: cleans up hash-suffixed update-check markers older than 24h, keeps active and unrelated files", async () => {
+  resetThrottle();
+  const dir = dirname(THROTTLE);
+  mkdirSync(dir, { recursive: true });
+  // throttle recent -> check returns early after cleanup, no npm/fetch needed
+  writeFileSync(THROTTLE, String(Date.now()));
+  const old = Date.now() - 25 * 60 * 60 * 1000;
+  const stale1 = join(dir, ".billion-context-pi-update-check-aaaaaaaaaaaa");
+  const stale2 = join(dir, ".billion-context-pi-update-check-bbbbbbbbbbbb");
+  const recent = join(dir, ".billion-context-pi-update-check-cccccccccccc");
+  const unrelated = join(dir, ".billion-context-pi-update-check-notahash");
+  const readonly = join(dir, ".billion-context-pi-readonly-dddddddddddd");
+  const other = join(dir, "other-file.txt");
+  for (const p of [stale1, stale2, recent, unrelated, readonly, other]) writeFileSync(p, "x");
+  for (const p of [stale1, stale2]) utimesSync(p, old / 1000, old / 1000);
+  utimesSync(recent, (Date.now() - 60 * 60 * 1000) / 1000, (Date.now() - 60 * 60 * 1000) / 1000);
+
+  // If ACP_UPDATE_THROTTLE_FILE points at THROTTLE (no hash suffix), active marker is THROTTLE itself.
+  // Also create an "active" hash-suffixed marker case by making one equal to active path name scenario is N/A here,
+  // but we must not delete THROTTLE (active). THROTTLE has no hash suffix so it won't match cleanup pattern.
+  await checkForUpdate(true);
+
+  assert.ok(!existsSync(stale1), "stale hash-suffixed marker deleted");
+  assert.ok(!existsSync(stale2), "stale hash-suffixed marker deleted");
+  assert.ok(existsSync(recent), "recent hash-suffixed marker kept");
+  assert.ok(existsSync(unrelated), "non-hash-suffixed update-check file untouched");
+  assert.ok(existsSync(readonly), "readonly marker untouched");
+  assert.ok(existsSync(other), "unrelated file untouched");
+  assert.ok(existsSync(THROTTLE), "active throttle marker kept");
+  for (const p of [recent, unrelated, readonly, other, THROTTLE]) rmSync(p, { force: true });
+});
+
+
+test("checkForUpdate: preserves active hash-suffixed throttle marker even if older than 24h", async () => {
+  resetThrottle();
+  const dir = dirname(THROTTLE);
+  mkdirSync(dir, { recursive: true });
+  const active = join(dir, ".billion-context-pi-update-check-ffffffffffff");
+  const old = Date.now() - 25 * 60 * 60 * 1000;
+  // Make active marker be the throttle file and be old-but-recently-read? throttle check uses content timestamp.
+  // Set its content to recent so check is throttled and returns early, but file mtime old to simulate stale file age.
+  writeFileSync(active, String(Date.now()));
+  utimesSync(active, old / 1000, old / 1000);
+  const prev = process.env.ACP_UPDATE_THROTTLE_FILE;
+  process.env.ACP_UPDATE_THROTTLE_FILE = active;
+  try {
+    await checkForUpdate(true);
+    assert.ok(existsSync(active), "active hash-suffixed throttle marker must not be deleted");
+  } finally {
+    if (prev === undefined) delete process.env.ACP_UPDATE_THROTTLE_FILE; else process.env.ACP_UPDATE_THROTTLE_FILE = prev;
+    rmSync(active, { force: true });
+  }
 });
