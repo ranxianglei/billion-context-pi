@@ -762,9 +762,10 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   function reasoningDropFor(ctx: ExtensionContext): Required<CompressReasoningConfig> {
     const m = ctx.model as { provider?: string; id?: string; baseUrl?: string } | undefined;
     const resolved = resolveReasoningDrop(resolveCompress(adapterRef.compress, m?.provider, m?.id).reasoning);
-    // [#361] strict-echo upstreams (DeepSeek thinking mode) must keep reasoning
-    // round-tripping or the rebuilt request 400s — force the pass off regardless
-    // of config so a thinking-mode session can't be broken by default drop:true.
+    // [#361/#626] strict-echo upstreams (deepseek / glm / qwq / reasoner, matched on
+    // provider name, baseUrl, OR model id) must keep reasoning round-tripping or the
+    // rebuilt request 400s — force the pass off regardless of config so a
+    // thinking-mode session can't be broken by default drop:true.
     const gated = applyStrictReasoningGate(resolved, m?.provider, m?.baseUrl, m?.id);
     if (resolved.drop && !gated.drop) {
       const sid = ctx.sessionManager.getSessionId();
