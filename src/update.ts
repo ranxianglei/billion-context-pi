@@ -55,12 +55,20 @@ export const runNpm: NpmRunner = async (args, opts) => {
       "npm",
       args,
       { ...opts, shell: process.platform === "win32", maxBuffer: 4 * 1024 * 1024 },
-      (err, stdout, stderr) =>
-        resolve({
-          code: err ? 1 : 0,
-          stdout: String(stdout ?? ""),
-          stderr: String(stderr ?? ""),
-        }),
+      (err, stdout, stderr) => {
+        const stdoutStr = String(stdout ?? "");
+        let stderrStr = String(stderr ?? "");
+        if (err && !stderrStr) {
+          const e = err as NodeJS.ErrnoException & { stderr?: unknown };
+          stderrStr = String(e.stderr ?? e.message ?? "Command failed");
+        }
+        const code = err
+          ? typeof (err as { code?: unknown }).code === "number"
+            ? ((err as { code: number }).code)
+            : 1
+          : 0;
+        resolve({ code, stdout: stdoutStr, stderr: stderrStr });
+      },
     );
   });
 };
