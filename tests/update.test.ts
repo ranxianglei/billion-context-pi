@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { join, dirname } from "node:path";
 import { homedir, tmpdir } from "node:os";
-import { mkdtempSync, readFileSync, rmSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, mkdirSync, writeFileSync, existsSync, utimesSync } from "node:fs";
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 import type { NpmRunner } from "../src/update.js";
 
@@ -25,6 +25,7 @@ function withRealHome<T>(fn: () => Promise<T>): Promise<T> {
 
 const {
   checkForUpdate,
+  CHECK_INTERVAL_MS,
   findNpmRoot,
   setRunNpmForTest,
   setRunNodeForTest,
@@ -502,4 +503,97 @@ test("checkForUpdate: read-only marker present → skips npm view entirely + not
   assert.equal(npmCalls, 0, "no npm view when the install location is read-only");
   assert.equal(notes.length, 1, "notify emitted once per process, not once per check");
   assert.match(notes[0], /npm i -g billion-context-pi/);
+});
+
+
+// Cleanup runs inside the 3-minute check window, so these tests seed an OLD
+// throttle timestamp (passes the gate) and a fake npm reporting the current
+// version (no update → no install, no fetch fallback).
+function passGateHermetically(): void {
+  resetThrottle();
+  const dir = dirname(THROTTLE);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(THROTTLE, String(Date.now() - CHECK_INTERVAL_MS - 1));
+  const { impl } = makeFakeNpm(
+    { code: 0, stdout: `${REPO_VERSION}\n`, stderr: "" },
+    { code: 0, stdout: "", stderr: "" },
+  );
+  setRunNpmForTest(impl);
+}
+
+test("checkForUpdate: cleans up hash-suffixed update-check markers older than 24h, keeps active and unrelated files", async () => {
+  passGateHermetically();
+  const dir = dirname(THROTTLE);
+  const oldSecs = (Date.now() - 25 * 60 * 60 * 1000) / 1000;
+  const recentSecs = (Date.now() - 60 * 60 * 1000) / 1000;
+  const stale1 = join(dir, ".billion-context-pi-update-check-aaaaaaaaaaaa");
+  const stale2 = join(dir, ".billion-context-pi-update-check-bbbbbbbbbbbb");
+  const recent = join(dir, ".billion-context-pi-update-check-cccccccccccc");
+  const unrelated = join(dir, ".billion-context-pi-update-check-notahash");
+  const readonly = join(dir, ".billion-context-pi-readonly-dddddddddddd");
+  const other = join(dir, "other-file.txt");
+  for (const p of [stale1, stale2, recent, unrelated, readonly, other]) writeFileSync(p, "x");
+  for (const p of [stale1, stale2, unrelated, readonly, other]) utimesSync(p, oldSecs, oldSecs);
+  utimesSync(recent, recentSecs, recentSecs);
+
+  await checkForUpdate(true);
+
+  assert.ok(!existsSync(stale1), "stale hash-suffixed marker deleted");
+  assert.ok(!existsSync(stale2), "stale hash-suffixed marker deleted");
+  assert.ok(existsSync(recent), "recent hash-suffixed marker kept");
+  assert.ok(existsSync(unrelated), "non-hash-suffixed update-check file untouched even when old");
+  assert.ok(existsSync(readonly), "readonly marker untouched even when old");
+  assert.ok(existsSync(other), "unrelated file untouched even when old");
+  assert.ok(existsSync(THROTTLE), "active throttle marker kept");
+  for (const p of [recent, unrelated, readonly, other, THROTTLE]) rmSync(p, { force: true });
+});
+
+test("checkForUpdate: preserves active hash-suffixed throttle marker even if older than 24h", async () => {
+  resetThrottle();
+  const dir = dirname(THROTTLE);
+  mkdirSync(dir, { recursive: true });
+  const active = join(dir, ".billion-context-pi-update-check-ffffffffffff");
+  const prev = process.env.ACP_UPDATE_THROTTLE_FILE;
+  process.env.ACP_UPDATE_THROTTLE_FILE = active;
+  try {
+    // Old content → passes the throttle gate so cleanup actually runs; old
+    // mtime → would be unlinked by age if the active-marker skip were missing.
+    const oldTs = Date.now() - 25 * 60 * 60 * 1000;
+    writeFileSync(active, String(oldTs));
+    utimesSync(active, oldTs / 1000, oldTs / 1000);
+    const { impl } = makeFakeNpm(
+      { code: 0, stdout: `${REPO_VERSION}\n`, stderr: "" },
+      { code: 0, stdout: "", stderr: "" },
+    );
+    setRunNpmForTest(impl);
+    await checkForUpdate(true);
+    assert.ok(existsSync(active), "active hash-suffixed throttle marker must not be deleted");
+  } finally {
+    if (prev === undefined) delete process.env.ACP_UPDATE_THROTTLE_FILE; else process.env.ACP_UPDATE_THROTTLE_FILE = prev;
+    rmSync(active, { force: true });
+  }
+});
+
+test("checkForUpdate: marker cleanup matches the exact marker shape — near-miss names survive even when stale", async () => {
+  passGateHermetically();
+  const dir = dirname(THROTTLE);
+  const nearMisses = [
+    "Xbillion-context-pi-update-check-aaaaaaaaaaaa", // leading char swapped: the dot in the pattern must stay anchored
+    ".billion-context-pi-update-check-AAAAAAAAAAAA", // uppercase hex
+    ".billion-context-pi-update-check-ghghghghghgh", // non-hex chars
+    ".billion-context-pi-update-check-aaaaaaaaaaaaa", // 13 hex chars instead of 12
+  ];
+  const stale = join(dir, ".billion-context-pi-update-check-bbbbbbbbbbbb");
+  const paths = [...nearMisses.map((n) => join(dir, n)), stale];
+  const oldSecs = (Date.now() - 25 * 60 * 60 * 1000) / 1000;
+  for (const p of paths) {
+    writeFileSync(p, "x");
+    utimesSync(p, oldSecs, oldSecs);
+  }
+
+  await checkForUpdate(true);
+
+  for (const n of nearMisses) assert.ok(existsSync(join(dir, n)), `near-miss ${n} must survive`);
+  assert.ok(!existsSync(stale), "exact-shape stale marker deleted");
+  for (const n of nearMisses) rmSync(join(dir, n), { force: true });
 });

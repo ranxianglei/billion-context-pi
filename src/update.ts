@@ -1,5 +1,5 @@
-import { readFile, writeFile, mkdir, access } from "node:fs/promises";
-import { join, dirname } from "node:path";
+import { readFile, writeFile, mkdir, access, readdir, stat, unlink } from "node:fs/promises";
+import { join, dirname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
 import { homedir } from "node:os";
@@ -14,14 +14,21 @@ const registryUrl = (tag: string) =>
   `https://registry.npmjs.org/${PACKAGE_NAME}/${encodeURIComponent(tag)}`;
 const SEMVER_RE = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z-.]+)?$/;
 const CHECK_INTERVAL_MS = 3 * 60 * 1000;
+// Stale per-location update-check markers are removed after this window.
+const STALE_MARKER_MS = 24 * 60 * 60 * 1000;
+// Base name of update-check throttle markers (dotfile prefix added at use
+// sites); the stale-marker pattern below is derived from it so the two can't
+// drift apart.
+const MARKER_BASENAME = "billion-context-pi-update-check";
 // Short stable key for an install location, used to scope the throttle +
 // read-only marker files per copy. Two copies of the extension (e.g. an
 // `npm i -g` global install and pi's own npm dir) must not share these files:
 // a healthy copy refreshing the throttle would otherwise silently suppress a
 // failing copy's checks, and a read-only location's stop-retry marker would
 // wrongly apply to a writable one (issue #267).
+const LOCATION_KEY_LEN = 12;
 function locationKey(location: string): string {
-  return createHash("sha256").update(location).digest("hex").slice(0, 12);
+  return createHash("sha256").update(location).digest("hex").slice(0, LOCATION_KEY_LEN);
 }
 // Resolved lazily (not at module load) so tests can redirect it via env at any
 // time. Without this, parallel test processes race on the real file under the
@@ -31,7 +38,7 @@ function locationKey(location: string): string {
 const throttleFileFor = (extDir?: string): string => {
   if (process.env.ACP_UPDATE_THROTTLE_FILE) return process.env.ACP_UPDATE_THROTTLE_FILE;
   const base = join(homedir(), CONFIG_DIR_NAME, "agent");
-  return extDir ? join(base, `.billion-context-pi-update-check-${locationKey(extDir)}`) : join(base, ".billion-context-pi-update-check");
+  return extDir ? join(base, `.${MARKER_BASENAME}-${locationKey(extDir)}`) : join(base, `.${MARKER_BASENAME}`);
 };
 // Persistent marker for an install location that failed with a permission
 // error (EACCES/EPERM). Once set, auto-update stops retrying that location —
@@ -194,6 +201,36 @@ function parseSemVer(version: string): { parts: number[]; pre: string[] } | unde
     parts: [Number(match[1]), Number(match[2]), Number(match[3])],
     pre: match[4]?.split(".") ?? [],
   };
+}
+
+// Strict shape of a per-location throttle marker: dotfile prefix + exactly
+// LOCATION_KEY_LEN lowercase hex chars. Anything else in the dir is out of
+// scope for cleanup (issue #658: restrict deletion to these specific files).
+const STALE_MARKER_RE = new RegExp(`^\\.${MARKER_BASENAME}-[0-9a-f]{${LOCATION_KEY_LEN}}$`);
+
+async function cleanupStaleUpdateCheckMarkers(dir: string, activeMarker: string, now: number): Promise<void> {
+  let entries: string[];
+  try {
+    entries = await readdir(dir);
+  } catch {
+    return;
+  }
+  const cutoff = now - STALE_MARKER_MS;
+  // Compare by basename, not full path: ACP_UPDATE_THROTTLE_FILE may point
+  // anywhere, so a full-path equality could miss the active file under path
+  // normalization differences.
+  const activeName = basename(activeMarker);
+  await Promise.all(entries.map(async (name) => {
+    if (!STALE_MARKER_RE.test(name)) return;
+    if (name === activeName) return;
+    const full = join(dir, name);
+    try {
+      const st = await stat(full);
+      if (st.mtimeMs < cutoff) await unlink(full);
+    } catch {
+      // best-effort
+    }
+  }));
 }
 
 async function readLastCheck(throttle: string): Promise<number> {
@@ -469,6 +506,10 @@ export async function checkForUpdate(
     const lastCheck = await readLastCheck(throttle);
     if (now - lastCheck < CHECK_INTERVAL_MS) return;
 
+    // Piggyback on the 3-minute check window instead of scanning on every LLM
+    // call: markers only decay over 24h, and this runs inline in the context
+    // transform on headless hosts.
+    await cleanupStaleUpdateCheckMarkers(dirname(throttle), throttle, now).catch(() => {});
     await writeLastCheck(now, throttle);
 
     const runtimeVersion = await getRuntimeVersion();
