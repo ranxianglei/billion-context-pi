@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { join, dirname } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { mkdtempSync, readFileSync, rmSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
+import { createServer, type AddressInfo, type Socket } from "node:net";
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 import type { NpmRunner } from "../src/update.js";
 
@@ -35,6 +36,8 @@ const {
   isAutoUpdatableSpec,
   runNpm,
   runNode,
+  createRunNpm,
+  createRunNode,
   findExtensionDir,
   readOnlyMarkerFile,
   resetUpdateStateForTest,
@@ -189,9 +192,73 @@ test("runNpm captures stderr on failure (unreachable registry, no retries)", { t
       ["view", "billion-context-pi", "--registry", "http://127.0.0.1:9/", "--fetch-retries=0"],
       { timeout: 20_000 },
     );
-    assert.equal(r.code, 1);
+    assert.notEqual(r.code, 0);
     assert.ok(r.stderr.length > 0);
   });
+});
+
+test("runNpm falls back to err.message/stderr when callback stderr is empty", async () => {
+  const fakeExec = ((_cmd, _args, _opts, cb) => {
+    const err = Object.assign(new Error("Command timed out"), { code: null, stderr: "" });
+    cb(err, "", "");
+  }) as Parameters<typeof createRunNpm>[0];
+  const r = await createRunNpm(fakeExec)(["view", "x"], { timeout: 1 });
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /Command timed out/);
+});
+
+test("runNode captures stderr on timeout kill (deterministic)", async () => {
+  const r = await runNode(["-e", "setTimeout(() => {}, 30000)"], { timeout: 50 });
+  assert.notEqual(r.code, 0);
+  assert.ok(r.stderr.length > 0);
+});
+
+test("runNode falls back to err.message when callback stderr is empty", async () => {
+  const fakeExec = ((_cmd, _args, _opts, cb) => {
+    const err = Object.assign(new Error("spawn failed"), { code: "ENOENT", stderr: "" });
+    cb(err, "", "");
+  }) as Parameters<typeof createRunNode>[0];
+  const r = await createRunNode(fakeExec)(["-e", ""], { timeout: 1 });
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /spawn failed/);
+});
+
+// A registry that accepts TCP connections and then goes silent: npm hangs on
+// the socket until execFile's timeout kills it — the exact end-to-end path of
+// #681 (the unreachable-registry test above cannot pin it because most CI
+// networks refuse the connection immediately instead of hanging). Fully local.
+async function withStalledRegistry<T>(fn: (port: number) => Promise<T>): Promise<T> {
+  const sockets = new Set<Socket>();
+  const server = createServer((socket) => {
+    sockets.add(socket);
+    socket.pause();
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
+  try {
+    return await fn(port);
+  } finally {
+    // Destroy tracked connections explicitly so server.close() can fire even
+    // if a child never closes its side (no closeAllConnections dependency).
+    for (const socket of sockets) socket.destroy();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+}
+
+test("runNpm reports non-empty stderr when real npm dies by timeout kill", { timeout: 30_000 }, async () => {
+  await withStalledRegistry(async (port) => {
+    const r = await runNpm(
+      ["view", "billion-context-pi", "--registry", `http://127.0.0.1:${port}/`, "--fetch-retries=0"],
+      { timeout: 3000 },
+    );
+    assert.notEqual(r.code, 0);
+    assert.ok(r.stderr.length > 0, `expected fallback stderr, got ${JSON.stringify(r)}`);
+  });
+});
+
+test("runNode preserves the real numeric exit code instead of squashing to 1", { timeout: 30_000 }, async () => {
+  const r = await runNode(["-e", "process.exit(3)"], { timeout: 10_000 });
+  assert.equal(r.code, 3);
 });
 
 test("checkForUpdate queries npm view first with exact args", async () => {
