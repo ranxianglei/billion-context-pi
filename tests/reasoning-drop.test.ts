@@ -215,3 +215,26 @@ test("applyStrictReasoningGate: no-op for non-strict-echo and already-disabled c
   const off = resolveReasoningDrop({ drop: false });
   assert.equal(applyStrictReasoningGate(off, "deepseek", "https://api.deepseek.com/v1"), off);
 });
+
+
+test("isStrictReasoningEcho: deepseek detected via model id, case-insensitive (gateway env)", () => {
+  assert.equal(isStrictReasoningEcho("openai-compatible", "https://gateway.example.com/v1", "deepseek-chat"), true);
+  assert.equal(isStrictReasoningEcho(undefined, undefined, "DeepSeek-R1"), true);
+  assert.equal(isStrictReasoningEcho("anthropic", "https://api.anthropic.com", "my-deepseek-model"), true);
+});
+
+test("isStrictReasoningEcho: non-deepseek model id does not trigger auto-detection", () => {
+  assert.equal(isStrictReasoningEcho("openai-compatible", "https://gateway.example.com/v1", "gpt-4o"), false);
+  assert.equal(isStrictReasoningEcho(undefined, undefined, "claude-3-7-sonnet"), false);
+});
+
+test("applyStrictReasoningGate: forces drop off when model id indicates deepseek, preserves threshold", () => {
+  const base = resolveReasoningDrop(undefined);
+  assert.deepEqual(applyStrictReasoningGate(base, "openai-compatible", "https://gateway.example.com/v1", "deepseek-chat"), { drop: false, threshold: 2048 });
+  assert.deepEqual(applyStrictReasoningGate(base, undefined, undefined, "DeepSeek-R1"), { drop: false, threshold: 2048 });
+});
+
+test("applyStrictReasoningGate: no-op for non-deepseek model id (same reference)", () => {
+  const base = resolveReasoningDrop(undefined);
+  assert.equal(applyStrictReasoningGate(base, "openai-compatible", "https://gateway.example.com/v1", "gpt-4o"), base);
+});

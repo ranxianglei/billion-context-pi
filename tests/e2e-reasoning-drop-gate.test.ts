@@ -80,3 +80,20 @@ test("e2e gate: explicit drop:true in acp.json still loses to the safety gate", 
         assert.equal(plain.drop, true, "explicit drop:true honored for non-strict providers");
     });
 });
+
+
+test("e2e gate: model id with deepseek disables drop in gateway env even when provider/baseUrl are generic", async () => {
+    await withIsolatedHome(undefined, async (cwd) => {
+        const runtime = createRuntime({});
+        await runtime.reloadConfig(cwd);
+
+        const ctx = { model: { provider: "openai-compatible", id: "deepseek-chat", baseUrl: "https://gateway.example.com/v1" }, sessionManager: { getSessionId: () => "gw1" } } as unknown as ExtensionContext;
+        const gated = runtime.reasoningDropFor(ctx);
+        assert.equal(gated.drop, false, "default drop:true forced off when model id contains deepseek");
+        assert.equal(gated.threshold, 2048, "threshold preserved by the gate");
+
+        const plainCtx = { model: { provider: "openai-compatible", id: "gpt-4o", baseUrl: "https://gateway.example.com/v1" }, sessionManager: { getSessionId: () => "gw2" } } as unknown as ExtensionContext;
+        const plain = runtime.reasoningDropFor(plainCtx);
+        assert.equal(plain.drop, true, "non-deepseek model id keeps the pass in gateway env");
+    });
+});
