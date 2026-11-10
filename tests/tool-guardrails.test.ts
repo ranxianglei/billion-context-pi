@@ -96,6 +96,21 @@ test("capToolOutput is UTF-8 safe (never splits a multibyte sequence)", () => {
   }
 });
 
+test("capToolOutput returns undefined for non-array content (issue #668)", () => {
+  assert.equal(capToolOutput("not an array" as unknown as Content, 100), undefined);
+  assert.equal(capToolOutput({ text: "x" } as unknown as Content, 100), undefined);
+});
+
+test("detectBashTimeout returns undefined for non-array content (issue #668)", () => {
+  assert.equal(detectBashTimeout("not an array" as unknown as Content), undefined);
+  assert.equal(detectBashTimeout({ text: "x" } as unknown as Content), undefined);
+});
+
+test("appendTimeoutNotice returns undefined for non-array content (issue #668)", () => {
+  assert.equal(appendTimeoutNotice("not an array" as unknown as Content, 60), undefined);
+  assert.equal(appendTimeoutNotice({ text: "x" } as unknown as Content, 60), undefined);
+});
+
 test("detectBashTimeout extracts the seconds from Pi's timeout error text", () => {
   assert.equal(detectBashTimeout(text("Command timed out after 60 seconds")), 60);
   assert.equal(detectBashTimeout(text("partial output\nCommand timed out after 300 seconds")), 300);

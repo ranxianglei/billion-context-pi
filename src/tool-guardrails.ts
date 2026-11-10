@@ -41,6 +41,7 @@ export function capToolOutput(
   maxBytes: number | undefined,
   fullPath?: string,
 ): ToolResultEvent["content"] | undefined {
+  if (!Array.isArray(content)) return undefined;
   const max = maxBytes ?? DEFAULT_TOOL_OUTPUT_MAX_BYTES;
   if (!Number.isFinite(max) || max <= 0) return undefined;
   const kept: ContentPart[] = [];
@@ -62,6 +63,7 @@ export function capToolOutput(
 const TIMEOUT_RE = /Command timed out after (\d+) seconds/;
 
 export function detectBashTimeout(content: ToolResultEvent["content"]): number | undefined {
+  if (!Array.isArray(content)) return undefined;
   for (const c of content) {
     if (c.type !== "text") continue;
     const m = (c as { text: string }).text.match(TIMEOUT_RE);
@@ -73,7 +75,8 @@ export function detectBashTimeout(content: ToolResultEvent["content"]): number |
 function appendTrailingText(
   content: ToolResultEvent["content"],
   notice: string,
-): ToolResultEvent["content"] {
+): ToolResultEvent["content"] | undefined {
+  if (!Array.isArray(content)) return undefined;
   const next = [...content];
   for (let i = next.length - 1; i >= 0; i--) {
     const part = next[i];
@@ -89,7 +92,7 @@ function appendTrailingText(
 export function appendTimeoutNotice(
   content: ToolResultEvent["content"],
   secs: number,
-): ToolResultEvent["content"] {
+): ToolResultEvent["content"] | undefined {
   return appendTrailingText(content, buildTimeoutNotice(secs));
 }
 
@@ -237,6 +240,7 @@ export function wireToolGuardrails(pi: ExtensionAPI, runtime: AcpRuntime): void 
   });
 
   pi.on("tool_result", (event) => {
+    if (!Array.isArray(event.content)) return;
     const isBash = isBashToolResult(event);
     const fullPath = isBash ? event.details?.fullOutputPath : undefined;
     const timeoutSecs =
