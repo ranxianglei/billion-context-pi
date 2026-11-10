@@ -155,9 +155,11 @@ describe("Unsupported-host refusal (issue #234 / #364)", () => {
 
     assert.equal(notes.filter((m) => m === UNSUPPORTED_HOST_MESSAGE).length, 0, "no OMP warning on a pi host");
     assert.deepEqual(handlers.get("session_before_compact")![0]!({}, {}), { cancel: true });
-    const sp = handlers.get("before_agent_start")![0]!({ systemPrompt: "BASE" }, {});
-    assert.ok(sp.systemPrompt.startsWith("BASE"));
-    assert.ok(sp.systemPrompt.includes("compress"));
+    const spEvent: any = { systemPrompt: "BASE" };
+    const sp = handlers.get("before_agent_start")![0]!(spEvent, {});
+    assert.equal(sp, undefined);
+    assert.equal(spEvent.systemPrompt, "BASE");
+    assert.ok((spEvent.systemPromptOptions?.appendSystemPrompt ?? "").includes("compress"));
   });
 
   test("declared Pi-compatible fork (PI_ACP_FORK_HOST=1) is NOT refused (#364)", async () => {

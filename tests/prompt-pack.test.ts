@@ -285,13 +285,13 @@ test("readToolSurfaceWithPacks: home config fills, cwd config wins", async () =>
   }
 });
 
-type BeforeAgentStartHandler = (event: { systemPrompt: string }, ctx: unknown) => { systemPrompt: string };
+type BeforeAgentStartEvent = { systemPrompt: string | string[]; systemPromptOptions?: { appendSystemPrompt?: string } };
 
-function wireBeforeAgentStart(adapter: AdapterConfig): BeforeAgentStartHandler {
-  let handler: BeforeAgentStartHandler | null = null;
+function wireBeforeAgentStart(adapter: AdapterConfig): (event: BeforeAgentStartEvent, ctx: unknown) => string | undefined {
+  let handler: ((event: BeforeAgentStartEvent, ctx: unknown) => void) | null = null;
   const api = {
     on: (event: string, h: unknown): void => {
-      if (event === "before_agent_start") handler = h as BeforeAgentStartHandler;
+      if (event === "before_agent_start") handler = h as (event: BeforeAgentStartEvent, ctx: unknown) => void;
     },
     tools: [] as unknown[],
     commands: new Map<string, unknown>(),
@@ -300,9 +300,11 @@ function wireBeforeAgentStart(adapter: AdapterConfig): BeforeAgentStartHandler {
   };
   createAcpExtension(adapter)(api as ExtensionAPI);
   assert.ok(handler, "before_agent_start wired");
-  return handler!;
+  return (event, ctx) => {
+    handler!(event, ctx);
+    return event.systemPromptOptions?.appendSystemPrompt;
+  };
 }
-
 test("before_agent_start applies pack prompts per model and resets to defaults when switching away", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "acp-pack-wire-"));
   try {
@@ -319,13 +321,15 @@ test("before_agent_start applies pack prompts per model and resets to defaults w
     const beforeAgentStart = wireBeforeAgentStart(adapter);
     const defaultPhilo = defaultPrompts.compressPhilosophy.slice(0, 40);
 
-    const packed = beforeAgentStart({ systemPrompt: "" }, { model: { provider: "openai", id: "gpt-x" }, cwd: dir });
-    assert.ok(packed.systemPrompt.includes("PACK PHILO RULE"), "pack rules reach the system prompt for the pack's model");
-    assert.ok(!packed.systemPrompt.includes(defaultPhilo), "pack replaces the default philosophy");
+    const packedEvent: BeforeAgentStartEvent = { systemPrompt: "" };
+    const packed = beforeAgentStart(packedEvent, { model: { provider: "openai", id: "gpt-x" }, cwd: dir }) ?? "";
+    assert.ok(packed.includes("PACK PHILO RULE"), "pack rules reach the system prompt for the pack's model");
+    assert.ok(!packed.includes(defaultPhilo), "pack replaces the default philosophy");
 
-    const reset = beforeAgentStart({ systemPrompt: "" }, { model: { provider: "anthropic", id: "claude-x" }, cwd: dir });
-    assert.ok(!reset.systemPrompt.includes("PACK PHILO RULE"), "switching to a model without the pack must drop its rules");
-    assert.ok(reset.systemPrompt.includes(defaultPhilo), "kernel default rules restored after switch-away");
+    const resetEvent: BeforeAgentStartEvent = { systemPrompt: "" };
+    const reset = beforeAgentStart(resetEvent, { model: { provider: "anthropic", id: "claude-x" }, cwd: dir }) ?? "";
+    assert.ok(!reset.includes("PACK PHILO RULE"), "switching to a model without the pack must drop its rules");
+    assert.ok(reset.includes(defaultPhilo), "kernel default rules restored after switch-away");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -376,9 +380,10 @@ test("before_agent_start risk-gates pack prompts without acknowledgePromptsRisk"
       compress: { promptPack: "gated" },
     } satisfies AdapterConfig;
     const beforeAgentStart = wireBeforeAgentStart(adapter);
-    const result = beforeAgentStart({ systemPrompt: "" }, { model: { provider: "openai", id: "gpt-x" }, cwd: dir });
-    assert.ok(!result.systemPrompt.includes("GATED PHILO RULE"), "ungated pack prompts are dropped");
-    assert.ok(result.systemPrompt.includes(defaultPrompts.compressPhilosophy.slice(0, 40)), "defaults stay in force");
+    const event: BeforeAgentStartEvent = { systemPrompt: "" };
+    const result = beforeAgentStart(event, { model: { provider: "openai", id: "gpt-x" }, cwd: dir }) ?? "";
+    assert.ok(!result.includes("GATED PHILO RULE"), "ungated pack prompts are dropped");
+    assert.ok(result.includes(defaultPrompts.compressPhilosophy.slice(0, 40)), "defaults stay in force");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

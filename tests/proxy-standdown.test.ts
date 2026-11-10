@@ -157,9 +157,11 @@ describe("proxied baseUrl stand-down (#296)", () => {
 
     assert.equal(notes.filter((m) => m === PROXY_STAND_DOWN_MESSAGE).length, 0, "no stand-down warning on a direct endpoint");
     assert.deepEqual(handlers.get("session_before_compact")![0]!({}, {}), { cancel: true });
-    const sp = handlers.get("before_agent_start")![0]!({ systemPrompt: "BASE" }, {});
-    assert.ok(sp.systemPrompt.startsWith("BASE"));
-    assert.ok(sp.systemPrompt.includes("compress"));
+    const spEvent: any = { systemPrompt: "BASE" };
+    const sp = handlers.get("before_agent_start")![0]!(spEvent, {});
+    assert.equal(sp, undefined);
+    assert.equal(spEvent.systemPrompt, "BASE");
+    assert.ok((spEvent.systemPromptOptions?.appendSystemPrompt ?? "").includes("compress"));
   });
 
   test("falls back to the context event when session_start did not fire", async () => {
