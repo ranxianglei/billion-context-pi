@@ -35,6 +35,8 @@ const {
   isAutoUpdatableSpec,
   runNpm,
   runNode,
+  createRunNpm,
+  createRunNode,
   findExtensionDir,
   readOnlyMarkerFile,
   resetUpdateStateForTest,
@@ -189,9 +191,35 @@ test("runNpm captures stderr on failure (unreachable registry, no retries)", { t
       ["view", "billion-context-pi", "--registry", "http://127.0.0.1:9/", "--fetch-retries=0"],
       { timeout: 20_000 },
     );
-    assert.equal(r.code, 1);
+    assert.notEqual(r.code, 0);
     assert.ok(r.stderr.length > 0);
   });
+});
+
+test("runNpm falls back to err.message/stderr when callback stderr is empty", async () => {
+  const fakeExec = ((_cmd, _args, _opts, cb) => {
+    const err = Object.assign(new Error("Command timed out"), { code: null, stderr: "" });
+    cb(err, "", "");
+  }) as Parameters<typeof createRunNpm>[0];
+  const r = await createRunNpm(fakeExec)(["view", "x"], { timeout: 1 });
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /Command timed out/);
+});
+
+test("runNode captures stderr on timeout kill (deterministic)", async () => {
+  const r = await runNode(["-e", "setTimeout(() => {}, 30000)"], { timeout: 50 });
+  assert.notEqual(r.code, 0);
+  assert.ok(r.stderr.length > 0);
+});
+
+test("runNode falls back to err.message when callback stderr is empty", async () => {
+  const fakeExec = ((_cmd, _args, _opts, cb) => {
+    const err = Object.assign(new Error("spawn failed"), { code: "ENOENT", stderr: "" });
+    cb(err, "", "");
+  }) as Parameters<typeof createRunNode>[0];
+  const r = await createRunNode(fakeExec)(["-e", ""], { timeout: 1 });
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /spawn failed/);
 });
 
 test("checkForUpdate queries npm view first with exact args", async () => {

@@ -49,29 +49,47 @@ export type NpmRunner = (
   opts: { cwd?: string; timeout: number },
 ) => Promise<{ code: number; stdout: string; stderr: string }>;
 
-export const runNpm: NpmRunner = async (args, opts) => {
-  return new Promise((resolve) => {
-    execFile(
-      "npm",
-      args,
-      { ...opts, shell: process.platform === "win32", maxBuffer: 4 * 1024 * 1024 },
-      (err, stdout, stderr) => {
-        const stdoutStr = String(stdout ?? "");
-        let stderrStr = String(stderr ?? "");
-        if (err && !stderrStr) {
-          const e = err as NodeJS.ErrnoException & { stderr?: unknown };
-          stderrStr = String(e.stderr ?? e.message ?? "Command failed");
-        }
-        const code = err
-          ? typeof (err as { code?: unknown }).code === "number"
-            ? ((err as { code: number }).code)
-            : 1
-          : 0;
-        resolve({ code, stdout: stdoutStr, stderr: stderrStr });
-      },
-    );
-  });
-};
+export type ExecFileLike = typeof execFile;
+
+function resolveFailureStderr(err: unknown, stderr: unknown): string {
+  const stderrStr = String(stderr ?? "");
+  if (!err) return stderrStr;
+  if (stderrStr) return stderrStr;
+  const e = err as NodeJS.ErrnoException & { stderr?: unknown; message?: unknown };
+  const fallback = e.stderr;
+  if (typeof fallback === "string" && fallback.length > 0) return fallback;
+  if (fallback != null && typeof fallback !== "string") {
+    const s = String(fallback);
+    if (s.length > 0) return s;
+  }
+  return String(e.message ?? "Command failed");
+}
+
+function resolveExitCode(err: unknown): number {
+  if (!err) return 0;
+  const code = (err as { code?: unknown }).code;
+  return typeof code === "number" ? code : 1;
+}
+
+export function createRunNpm(exec: ExecFileLike = execFile): NpmRunner {
+  return (args, opts) =>
+    new Promise((resolve) => {
+      exec(
+        "npm",
+        args,
+        { ...opts, shell: process.platform === "win32", maxBuffer: 4 * 1024 * 1024 },
+        (err, stdout, stderr) => {
+          resolve({
+            code: resolveExitCode(err),
+            stdout: String(stdout ?? ""),
+            stderr: resolveFailureStderr(err, stderr),
+          });
+        },
+      );
+    });
+}
+
+export const runNpm: NpmRunner = createRunNpm();
 
 let runNpmImpl: NpmRunner = runNpm;
 
@@ -86,21 +104,25 @@ export type NodeRunner = (
 
 // Always shell:false: process.execPath is absolute, so no win32 shell quoting
 // hazards. Used to smoke-import a freshly installed extension entry.
-export const runNode: NodeRunner = (args, opts) => {
-  return new Promise((resolve) => {
-    execFile(
-      process.execPath,
-      args,
-      { ...opts, maxBuffer: 4 * 1024 * 1024 },
-      (err, stdout, stderr) =>
-        resolve({
-          code: err ? 1 : 0,
-          stdout: String(stdout ?? ""),
-          stderr: String(stderr ?? ""),
-        }),
-    );
-  });
-};
+export function createRunNode(exec: ExecFileLike = execFile): NodeRunner {
+  return (args, opts) =>
+    new Promise((resolve) => {
+      exec(
+        process.execPath,
+        args,
+        { ...opts, maxBuffer: 4 * 1024 * 1024 },
+        (err, stdout, stderr) => {
+          resolve({
+            code: resolveExitCode(err),
+            stdout: String(stdout ?? ""),
+            stderr: resolveFailureStderr(err, stderr),
+          });
+        },
+      );
+    });
+}
+
+export const runNode: NodeRunner = createRunNode();
 
 let runNodeImpl: NodeRunner = runNode;
 
