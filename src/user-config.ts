@@ -1,5 +1,7 @@
 import { promises as fs } from "node:fs";
-import { acpJsonFiles } from "./config-dir.js";
+import * as path from "node:path";
+import { homedir } from "node:os";
+import { acpJsonFiles, userConfigPath } from "./config-dir.js";
 import type { Prompts } from "acp-kernel";
 import type { AdapterConfig, CompressConfig, DelegateConfig, HostSessionConfig, RepetitionGuardConfig } from "./config.js";
 import type { PiPromptSections } from "./system-prompt.js";
@@ -31,6 +33,9 @@ export interface UserAcpConfig {
   displayUsage?: "merged" | "separate";
   prompts?: Partial<Prompts>;
   acknowledgePromptsRisk?: boolean;
+  /** Model ref (bare id or "provider/id") from models.json used for compression
+   *  summaries. Absent = main model writes summaries (default). */
+  compressionModelId?: string;
   promptSections?: PiPromptSections;
   nudgeSections?: NudgeSectionsConfig;
   toolPrompts?: ToolPromptsConfig;
@@ -135,7 +140,7 @@ const KNOWN = new Set([
   "delegate", "compress", "displayUsage", "throttleRetry",
   "outputHeadroomMaxPct",
   "repetitionGuard", "degenerationGuard",
-  "prompts", "acknowledgePromptsRisk",
+  "prompts", "acknowledgePromptsRisk", "compressionModelId",
   "promptSections", "nudgeSections", "toolPrompts", "delegatePrompt",
   "hostSession", "rules",
 ]);
@@ -212,4 +217,30 @@ function cleanProtectionList(key: string, value: unknown): string[] | undefined 
     return undefined;
   }
   return value.map((v) => v.trim());
+}
+
+/** Persist compressionModelId to the GLOBAL acp.json (~/.pi/acp.json under Pi;
+ *  other keys preserved). Pass null to clear it (reverts to main-model
+ *  compression). The path resolves through the same helper the loader uses,
+ *  and a malformed-but-repairable file is salvaged like on load (#467) —
+ *  never clobbered by a single-key rewrite. */
+export async function saveCompressionModelId(value: string | null): Promise<void> {
+  const file = userConfigPath(homedir(), "acp.json");
+  let current: Record<string, unknown>;
+  try {
+    const raw = await fs.readFile(file, "utf8");
+    const r = parseAcpJson(file, raw);
+    if (r.status === "failed") {
+      console.warn(`[bcp] refusing to update ${file}: ${r.reason}`);
+      return;
+    }
+    if (r.status === "repaired") console.warn(`[bcp] ${r.reason}`);
+    current = r.value ?? {};
+  } catch {
+    current = {}; // no acp.json yet — create it
+  }
+  if (value === null) delete current.compressionModelId;
+  else current.compressionModelId = value;
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, JSON.stringify(current, null, 2) + "\n", "utf8");
 }

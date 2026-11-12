@@ -15,8 +15,9 @@ import { applyStrictReasoningGate, resolveReasoningDrop, type CompressReasoningC
 import { entriesToCoreMessages, EntryProjectionCache, extractText, matchesStoredText, messageIdentity, messageRef } from "./messages.js";
 import { SessionStateStore, deriveChildState, type LiveRefOrigin } from "./state.js";
 import { hasCompressHistory, rebuildStateFromLog } from "./state-rebuild.js";
-import { loadUserConfig, applyUserConfig } from "./user-config.js";
+import { loadUserConfig, applyUserConfig, saveCompressionModelId } from "./user-config.js";
 import { sanitizeSurfaceConfig } from "./surface.js";
+import { CompressionModelClient } from "./compress-model.js";
 import { ThrottleEpisode } from "./throttle-retry.js";
 import { logInfo, logWarn, setDebugEnabled } from "./log.js";
 import { findPositionalPrefixRun, findUniqueLongestRun, type MatchRange } from "./sequence-match.js";
@@ -188,6 +189,22 @@ export interface AcpRuntime {
    *  the map entry so a long-lived process cycling through many sessions
    *  doesn't accumulate them. */
   overflowDrop(sid: string): void;
+  /** Client for the dedicated compression model (reads models.json). */
+  compressionModel: CompressionModelClient;
+  /** The configured compression model ref, or undefined (main model writes). */
+  getCompressionModelRef(): string | undefined;
+  /** Persist the compression model ref to ~/.pi/acp.json and update the
+   *  in-memory adapter so it takes effect immediately. null clears it. */
+  setCompressionModelRef(value: string | null): Promise<void>;
+  /** Store the exact transformed AgentMessage[] Pi sent in the last context
+   *  round. The dedicated compression model reuses this as a prompt prefix so
+   *  its call hits the provider's prompt cache (same system prompt + tools +
+   *  messages the main model just saw). */
+  setLastSentMessages(sid: string, messages: AgentMessage[]): void;
+  /** The transformed messages from the last context round, or null. */
+  getLastSentMessages(sid: string): AgentMessage[] | null;
+  /** Drop a session's stored last-sent messages (session_shutdown). */
+  clearLastSentMessages(sid: string): void;
   /** Record a compress call whose every requested range is dead (refs stale or
    *  unknown — the kernel cannot create a block from it no matter what summary
    *  is written). Returns the failure count for this exact range fingerprint
@@ -384,6 +401,8 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     countTokens: defaultCountTokens,
   });
   const store = new SessionStateStore();
+  const compressionModel = new CompressionModelClient();
+  const lastSentMessages = new Map<string, AgentMessage[]>();
   const locks = new Map<string, Promise<void>>();
   const factoryAdapter = adapter;
   let adapterRef = adapter;
@@ -759,6 +778,21 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     return resolveConfig(adapterRef, liveContextLimit(ctx), m?.provider, m?.id);
   }
 
+  function getCompressionModelRef(): string | undefined {
+    return adapterRef.compressionModelId;
+  }
+
+  async function setCompressionModelRef(value: string | null): Promise<void> {
+    await saveCompressionModelId(value);
+    const next: AdapterConfig = { ...adapterRef };
+    if (value === null) delete next.compressionModelId;
+    else next.compressionModelId = value;
+    adapterRef = next;
+    // Force the next reloadConfig to re-read (the file now differs from the
+    // cached key), keeping disk and memory in sync across sessions.
+    lastUserConfigKey = undefined;
+  }
+
   function reasoningDropFor(ctx: ExtensionContext): Required<CompressReasoningConfig> {
     const m = ctx.model as { provider?: string; id?: string; baseUrl?: string } | undefined;
     const resolved = resolveReasoningDrop(resolveCompress(adapterRef.compress, m?.provider, m?.id).reasoning);
@@ -885,6 +919,17 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     await store.save(state, sm.getSessionFile() ?? undefined, sm.getSessionId());
   }
 
+  function setLastSentMessages(sid: string, messages: AgentMessage[]): void {
+    lastSentMessages.set(sid, messages);
+  }
+  function getLastSentMessages(sid: string): AgentMessage[] | null {
+    return lastSentMessages.get(sid) ?? null;
+  }
+  function clearLastSentMessages(sid: string): void {
+    lastSentMessages.delete(sid);
+  }
+
+
   // Own-sidecar check (not cache/load) because load() may have already filled
   // the slot via implicit parentSession-header inheritance — that implicit
   // state is replaceable by an explicit derivation, but real self-compressed
@@ -918,4 +963,4 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   let refused = false;
   let refusalMessage: string | null = null;
   let delegateStoodDown = false;
-  return { core, store, get refused() { return refused; }, set refused(v: boolean) { refused = v; }, get refusalMessage() { return refusalMessage; }, set refusalMessage(v: string | null) { refusalMessage = v; }, get delegateStoodDown() { return delegateStoodDown; }, set delegateStoodDown(v: boolean) { delegateStoodDown = v; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown, nudgeShownFor, nudgeShownTokensFor, clearNudgeTracking, clearNudgeTokenStamps, markNudgeRecorded, nudgeRecordedFor, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reasoningDropFor, reloadConfig, stateFor, save, deriveChildState: deriveChild, acquireLock, overflowFor, overflowDrop, noteSentViewCount, peekSentViewCount, dropSentViewCount, dropProjectionCache, noteDeadCompress, clearDeadCompress, throttleFor, throttleDrop , noteTokenScale, dropTokenScale, noteKhatUsage, khatFor, setKhatPending, dropKhat, noteHostUsage, dropHostUsageSamples, noteSizeDivergence, dropSizeDivergence, noteTerminalEscape, dropTerminalEscape, noteTruncationSkipped, dropTruncationSkipped, stripImagesFor };}
+  return { core, store, get refused() { return refused; }, set refused(v: boolean) { refused = v; }, get refusalMessage() { return refusalMessage; }, set refusalMessage(v: string | null) { refusalMessage = v; }, get delegateStoodDown() { return delegateStoodDown; }, set delegateStoodDown(v: boolean) { delegateStoodDown = v; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown, nudgeShownFor, nudgeShownTokensFor, clearNudgeTracking, clearNudgeTokenStamps, markNudgeRecorded, nudgeRecordedFor, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reasoningDropFor, reloadConfig, stateFor, save, deriveChildState: deriveChild, acquireLock, overflowFor, overflowDrop, noteSentViewCount, peekSentViewCount, dropSentViewCount, dropProjectionCache, noteDeadCompress, clearDeadCompress, throttleFor, throttleDrop , noteTokenScale, dropTokenScale, noteKhatUsage, khatFor, setKhatPending, dropKhat, noteHostUsage, dropHostUsageSamples, noteSizeDivergence, dropSizeDivergence, noteTerminalEscape, dropTerminalEscape, noteTruncationSkipped, dropTruncationSkipped, stripImagesFor, compressionModel, getCompressionModelRef, setCompressionModelRef, setLastSentMessages, getLastSentMessages, clearLastSentMessages };}

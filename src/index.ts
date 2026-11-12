@@ -126,7 +126,7 @@ export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactor
     wireOverflowSelfHeal(pi, runtime);
     wireThrottleRetry(pi, runtime);
     const toolSurface = readToolSurfaceWithPacks(process.cwd());
-    pi.registerTool(makeCompressTool(runtime, toolSurface.compress));
+    pi.registerTool(makeCompressTool(runtime, pi, toolSurface.compress));
     pi.registerTool(makeDecompressTool(runtime, toolSurface.decompress));
     pi.registerTool(makeSearchTool(runtime, toolSurface.search_context));
     pi.registerTool(makeStatusTool(runtime, toolSurface.acp_status));
@@ -363,6 +363,7 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     runtime.dropTruncationSkipped(sid);
     runtime.dropSentViewCount(sid);
     runtime.dropProjectionCache(sid);
+    runtime.clearLastSentMessages(sid);
     dropLiveOnlyTailCache(sid);
     delegateStatusWidget.dispose();
     closeLogStream();
@@ -935,6 +936,12 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
       if (ctx.hasUI) ctx.ui.notify(msg);
     });
     if (!ctx.hasUI) await updateCheck;
+    // Capture the exact transformed messages Pi is about to send so the
+    // dedicated compression model (the "session" ref) can reuse them as a
+    // prompt prefix and hit the provider's prompt cache. Stored by session id;
+    // read by the compress tool during the same turn (before the next context
+    // round overwrites it).
+    runtime.setLastSentMessages(sid, rebuilt);
     return { messages: rebuilt };
     } catch (e) {
       logThrow("context", e, { sid, phase: "transform" });

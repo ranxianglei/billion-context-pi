@@ -356,6 +356,10 @@ export interface AdapterConfig {
    *  replacing the kernel's tuned compression rules may reduce summary quality
    *  (lost paths/signatures/decisions → worse retrieval). */
   acknowledgePromptsRisk?: boolean;
+  /** Model ref (bare id or "provider/id") from models.json used to write
+   *  compression summaries with a dedicated (usually cheaper) model. Absent =
+   *  the main model writes summaries (default). Set via `/acp compact <id>`. */
+  compressionModelId?: string;
   /** Override structural sections of the ACP system prompt (ACP TAGS, TOOLS,
    *  WHEN TO COMPRESS, ...). Tri-state per section: string = replace, null =
    *  remove, omitted = default. Not risk-gated — these are documentation
