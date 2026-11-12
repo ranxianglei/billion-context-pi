@@ -57,7 +57,10 @@ function sessionModel(baseUrl: string): any {
     reasoning: false,
     input: ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 4000,
+    // Large window on purpose: at >=95% usage the kernel's emergency
+    // truncation also chops user text messages (2000+2000 char keep window),
+    // which would shrink the range below minCompressRange and reject it.
+    contextWindow: 200_000,
     maxTokens: 2000,
     headers: { Authorization: "Bearer sk-test" },
   };
