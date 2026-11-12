@@ -89,6 +89,7 @@ let agentDir: string;
 let modelsJsonPath: string;
 let acpJsonPath: string;
 const prevHome = process.env.HOME;
+const prevUserProfile = process.env.USERPROFILE;
 const prevAgentDir = process.env.PI_CODING_AGENT_DIR;
 
 before(async () => {
@@ -97,13 +98,17 @@ before(async () => {
   await fs.mkdir(agentDir, { recursive: true });
   modelsJsonPath = path.join(agentDir, "models.json");
   acpJsonPath = path.join(tmp, ".pi", "acp.json");
+  // os.homedir() resolves USERPROFILE on Windows, HOME elsewhere — set both.
   process.env.HOME = tmp;
+  process.env.USERPROFILE = tmp;
   process.env.PI_CODING_AGENT_DIR = agentDir;
 });
 
 after(async () => {
   if (prevHome === undefined) delete process.env.HOME;
   else process.env.HOME = prevHome;
+  if (prevUserProfile === undefined) delete process.env.USERPROFILE;
+  else process.env.USERPROFILE = prevUserProfile;
   if (prevAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
   else process.env.PI_CODING_AGENT_DIR = prevAgentDir;
   await fs.rm(tmp, { recursive: true, force: true });

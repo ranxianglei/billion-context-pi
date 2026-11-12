@@ -1,6 +1,7 @@
 import type { SessionEntry, SessionMessageEntry } from "@earendil-works/pi-coding-agent";
-import type { CoreMessage } from "acp-kernel";
+import { defaultCountTokens, type CoreMessage } from "acp-kernel";
 import { rewriteTagTokens } from "./tag-tokens.js";
+import type { TurnBoundaryEntry } from "./turn-boundary.js";
 
 type AgentMessage = SessionMessageEntry["message"];
 
@@ -18,13 +19,58 @@ const REF_TAG_SOURCE = "(?:\x3cacp\\s[^>]*\x3em\\d{5}\x3c/acp\x3e|\\[m\\d{1,5}\\
 const REF_TAG = new RegExp(`^${REF_TAG_SOURCE}\\s?\\n?`);
 const TRAILING_REF_TAG = new RegExp(`\\n*${REF_TAG_SOURCE}\\s*$`);
 
+/** Host-injected status-panel custom messages (written by src/commands.ts) —
+ *  UI-only, never projected into LLM context, so never user-like entries. */
+export const ACP_STATUS_CUSTOM_TYPE = "acp-status";
+
+/** /acp-export handoff docs (src/export.ts) — UI-only transcript output,
+ *  persistent in the session but never projected into LLM context (#255). */
+export const ACP_EXPORT_CUSTOM_TYPE = "acp-export";
+
+/** /acp-rule outputs (src/commands.ts) — UI-only transcript output, same
+ *  exclusion as acp-status/acp-export (#526): the rules themselves already
+ *  reach the model through the feature's own channel, so the human-facing
+ *  report must never be re-billed as model context. */
+export const ACP_RULE_CUSTOM_TYPE = "acp-rule";
+
+/** Nudge persistence record (issue #326): written via pi.appendEntry as a
+ *  type:"custom" entry — never projected into the sent view (see above), so
+ *  the compact one-liner stays out of model context while surviving restarts. */
+export const ACP_NUDGE_CUSTOM_TYPE = "acp-nudge";
+export interface AcpNudgeRecord {
+  text: string;
+}
+
+/** Custom-message types excluded from LLM-context projection (#255, #380):
+ *  UI-only panels/docs that persist in the session but must not reach the model.
+ *  Shared by isCustomMessageEntry below and the turn-boundary predicate in
+ *  src/turn-boundary.ts so both views can never drift apart. */
+const CONTEXT_EXCLUDED_CUSTOM_TYPES = new Set<string>([ACP_STATUS_CUSTOM_TYPE, ACP_EXPORT_CUSTOM_TYPE, ACP_RULE_CUSTOM_TYPE]);
+
+/** True for host-injected custom_message entries that participate in LLM
+ *  context: non-empty custom_message except the UI-only types in
+ *  CONTEXT_EXCLUDED_CUSTOM_TYPES (acp-status panels, acp-export docs,
+ *  acp-rule reports)
+ *  (Pi-native projection semantics, session-manager.d.ts). The non-empty gate
+ *  uses the exact same extractText check as the projection below, so an entry
+ *  either enters context or it doesn't — and only entries that enter context
+ *  can delimit a turn (#364 acceptance c: empty control signals start none).
+ *  Shared by the turn-boundary predicate in src/turn-boundary.ts so the two
+ *  views can never drift apart; defined here (not there) because it needs
+ *  extractText — importing that back would create a cycle. */
+export function isCustomMessageEntry(entry: TurnBoundaryEntry): entry is TurnBoundaryEntry & { type: "custom_message" } {
+  if (entry.type !== "custom_message") return false;
+  if (entry.customType !== undefined && CONTEXT_EXCLUDED_CUSTOM_TYPES.has(entry.customType)) return false;
+  return extractText(entry.content).length > 0;
+}
+
 export function entriesToCoreMessages(entries: SessionEntry[]): CoreMessage[] {
   const out: CoreMessage[] = [];
   for (const entry of entries) {
     if (entry.type !== "message") {
       // custom_message participates in LLM context per Pi native semantics
       // (session-manager.d.ts) — project it as a user message.
-      if (entry.type === "custom_message") {
+      if (isCustomMessageEntry(entry)) {
         const text = extractText(entry.content);
         if (text.length > 0) {
           out.push({ id: entry.id, role: "user", contentType: "text", text });
@@ -36,6 +82,74 @@ export function entriesToCoreMessages(entries: SessionEntry[]): CoreMessage[] {
     out.push(...cores);
   }
   return out;
+}
+
+// Conservative cap on how many entries an incremental projection may append in
+// one turn: a healthy host appends a handful per turn, and anything larger means
+// the structural assumption misfired — fall back to a full projection instead of
+// extending a possibly-wrong cache (same posture as live-only-tail's tail cap).
+const MAX_INCREMENTAL_ENTRIES = 64;
+
+/** Append-only incremental cache for entriesToCoreMessages (issue #561).
+ *
+ *  Projection is a pure prefix-stable function: each entry contributes a fixed
+ *  slice of CoreMessages, so projecting entries[0..n) then appending the
+ *  projection of entries[n..m) equals projecting entries[0..m) — as long as the
+ *  first n entries are UNCHANGED. Hosts rebuild the entries array (and the entry
+ *  objects) from the append-only session jsonl every turn, so identity caching
+ *  is useless; validate structurally instead:
+ *    - count only ever GROWS (a drop = host rewind/truncate → full reproject),
+ *    - the first and last cached boundary entries still carry the same ids
+ *      (canaries against in-place rewrites the count check cannot see),
+ *    - at most MAX_INCREMENTAL_ENTRIES new entries per turn.
+ *  Any doubt → full entriesToCoreMessages, identical result, just slower. */
+export class EntryProjectionCache {
+  private count = 0;
+  private firstId: string | null = null;
+  private lastId: string | null = null;
+  private cores: CoreMessage[] = [];
+
+  /** Project `entries`, reusing the previous turn's work when the array is a
+   *  structural extension of the last one seen. Returns a defensive copy: the
+   *  internal array is shared across turns, and callers hand it to kernel code
+   * that must never observe (or mutate) cross-turn state. */
+  project(entries: SessionEntry[]): CoreMessage[] {
+    if (
+      this.count > 0 &&
+      entries.length >= this.count &&
+      entries.length - this.count <= MAX_INCREMENTAL_ENTRIES &&
+      this.firstId !== null &&
+      this.lastId !== null &&
+      entries[0]?.id === this.firstId &&
+      entries[this.count - 1]?.id === this.lastId
+    ) {
+      for (let i = this.count; i < entries.length; i++) {
+        const entry = entries[i]!;
+        if (entry.type === "message") {
+          this.cores.push(...projectMessage(entry.message, entry.id));
+        } else if (isCustomMessageEntry(entry)) {
+          const text = extractText(entry.content);
+          if (text.length > 0) this.cores.push({ id: entry.id, role: "user", contentType: "text", text });
+        }
+      }
+      this.count = entries.length;
+      this.lastId = entries[entries.length - 1]!.id;
+      return this.cores.slice();
+    }
+    this.cores = entriesToCoreMessages(entries);
+    this.count = entries.length;
+    this.firstId = entries[0]?.id ?? null;
+    this.lastId = entries[entries.length - 1]?.id ?? null;
+    return this.cores.slice();
+  }
+
+  /** Drop the cache (state rebuilt, session switched). */
+  reset(): void {
+    this.count = 0;
+    this.firstId = null;
+    this.lastId = null;
+    this.cores = [];
+  }
 }
 
 function projectMessage(message: AgentMessage, id: string): CoreMessage[] {
@@ -55,6 +169,11 @@ function projectMessage(message: AgentMessage, id: string): CoreMessage[] {
     }];
   }
   if (role === "assistant") {
+    // Thinking rides in every request but never into the text projection — meter
+    // it via CoreMessage.thinkingTokens (issue #353). Kernel contract: attach to
+    // exactly one core per turn — the first emitted one.
+    const thinking = thinkingTokenCount(msg.content);
+    const thinkingField = thinking > 0 ? { thinkingTokens: thinking } : {};
     const calls = allToolCalls(msg.content);
     if (calls.length > 0) {
       const textParts = extractText(msg.content);
@@ -62,9 +181,9 @@ function projectMessage(message: AgentMessage, id: string): CoreMessage[] {
         const call = calls[0]!;
         const argStr = stringifyArgs(call.arguments);
         const text = argStr && textParts ? `${textParts}\n${argStr}` : argStr || textParts;
-        return [{ id, role: "assistant", contentType: "tool-call", toolName: call.name, toolCallId: call.id, text }];
+        return [{ id, role: "assistant", contentType: "tool-call", toolName: call.name, toolCallId: call.id, text, ...thinkingField }];
       }
-      return calls.map((call) => {
+      return calls.map((call, i) => {
         const argStr = stringifyArgs(call.arguments);
         return {
           id: `${id}#${call.id}`,
@@ -73,6 +192,7 @@ function projectMessage(message: AgentMessage, id: string): CoreMessage[] {
           toolName: call.name,
           toolCallId: call.id,
           text: argStr || textParts,
+          ...(i === 0 ? thinkingField : {}),
         };
       });
     }
@@ -80,7 +200,7 @@ function projectMessage(message: AgentMessage, id: string): CoreMessage[] {
     // Drop thinking-only turns: empty assistant text makes OpenAI-compatible
     // providers (e.g. GLM) return 400 (no body), which Pi misreads as overflow.
     if (!text.trim()) return [];
-    return [{ id, role: "assistant", contentType: "text", text }];
+    return [{ id, role: "assistant", contentType: "text", text, ...thinkingField }];
   }
   const customText = extractText(msg.content) || fallbackText(msg);
   return customText.length > 0
@@ -113,6 +233,18 @@ export function extractText(content: unknown): string {
     if (b.type === "text" && typeof b.text === "string") parts.push(stripRefTag(b.text));
   }
   return parts.join("\n");
+}
+
+// Thinking blocks are invisible to extractText but resent with every request —
+// measure their volume so kernel counting sees the full payload (issue #353).
+export function thinkingTokenCount(content: unknown): number {
+  if (!Array.isArray(content)) return 0;
+  const parts: string[] = [];
+  for (const block of content) {
+    const b = block as { type?: string; thinking?: string };
+    if (b.type === "thinking" && typeof b.thinking === "string") parts.push(b.thinking);
+  }
+  return parts.length > 0 ? defaultCountTokens(parts.join("\n")) : 0;
 }
 
 function stripRefTag(text: string): string {
@@ -217,6 +349,12 @@ export function coreOutToAgentMessages(
 ): AgentMessage[] {
   const out: AgentMessage[] = [];
   const emittedSplit = new Set<string>();
+  const kernelTextByCallId = new Map<string, string>();
+  for (const core of coreOut) {
+    if (core.contentType === "tool-call" && core.toolCallId && core.text) {
+      kernelTextByCallId.set(core.toolCallId, core.text);
+    }
+  }
 
   for (const core of coreOut) {
     if (core.id.startsWith("acp_summary_")) continue;
@@ -242,16 +380,48 @@ export function coreOutToAgentMessages(
         .filter((id): id is string => !!id),
     );
 
-    out.push(reconstructToolCallMessage(original, core, survivingCallIds));
+    out.push(reconstructToolCallMessage(original, core, survivingCallIds, kernelTextByCallId));
   }
 
   return out;
+}
+
+function compactedArgsFrom(kernelText: string | undefined, originalArgs: unknown): unknown | null {
+  if (!kernelText) return null;
+  const start = kernelText.indexOf("{");
+  if (start < 0) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(kernelText.slice(start));
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  if (safeStringify(parsed) === safeStringify(originalArgs)) return null;
+  return parsed;
+}
+
+function syncToolCallArgs(
+  blocks: unknown[],
+  kernelTextFor: (callId: string) => string | undefined,
+): unknown[] {
+  let changed = false;
+  const out = blocks.map((block) => {
+    const b = block as { type?: string; id?: string; arguments?: unknown };
+    if (b.type !== "toolCall" || !b.id) return block;
+    const compacted = compactedArgsFrom(kernelTextFor(b.id), b.arguments);
+    if (compacted === null) return block;
+    changed = true;
+    return { ...b, arguments: compacted };
+  });
+  return changed ? out : blocks;
 }
 
 function reconstructToolCallMessage(
   original: AgentMessage,
   firstCore: CoreMessage,
   survivingCallIds: Set<string>,
+  kernelTextByCallId: Map<string, string>,
 ): AgentMessage {
   const base = original as AnyMessage;
   const match = firstCore.text ? firstCore.text.match(REF_TAG) : null;
@@ -268,7 +438,10 @@ function reconstructToolCallMessage(
       if (b.type === "toolCall") return survivingCallIds.has(b.id ?? "");
       return true;
     });
-    const peeled2 = peelRefTagBlocks(filtered2);
+    const peeled2 = syncToolCallArgs(
+      peelRefTagBlocks(filtered2),
+      (callId) => kernelTextByCallId.get(callId),
+    );
     return { ...(original as object), content: peeled2 } as AgentMessage;
   }
 
@@ -284,7 +457,10 @@ function reconstructToolCallMessage(
     return true;
   });
 
-  const peeled = peelRefTagBlocks(filtered);
+  const peeled = syncToolCallArgs(
+    peelRefTagBlocks(filtered),
+    (callId) => kernelTextByCallId.get(callId),
+  );
   const stableTag = rewriteTagTokens(tag, coreBodyOf(firstCore.text ?? "", tag));
   const lastTextIdx = [...peeled].reverse().findIndex((b) => (b as { type?: string }).type === "text");
   if (lastTextIdx >= 0) {
@@ -305,14 +481,25 @@ function coreBodyOf(coreText: string, tag: string): string {
 }
 
 function patchRefTag(original: AgentMessage, core: CoreMessage): AgentMessage {
-  const match = core.text ? core.text.match(REF_TAG) : null;
-  const tag = match ? match[0] : null;
-  if (!tag) return original;
   const base = original as AnyMessage;
   // Skip tag injection for assistant messages — the model sees tags on its own
   // previous responses and echoes them, causing visible tag fragments in the terminal.
   // The model can still reference assistant messages by inferring refs from context.
-  if (base.role === "assistant") return original;
+  if (base.role === "assistant") {
+    if (core.contentType === "tool-call" && core.toolCallId) {
+      const rawBlocks = Array.isArray(base.content) ? base.content : [];
+      const synced = syncToolCallArgs(rawBlocks, (callId) =>
+        callId === core.toolCallId ? core.text : undefined,
+      );
+      if (synced !== rawBlocks) {
+        return { ...(original as object), content: synced } as AgentMessage;
+      }
+    }
+    return original;
+  }
+  const match = core.text ? core.text.match(REF_TAG) : null;
+  const tag = match ? match[0] : null;
+  if (!tag) return original;
   // Honor kernel body mutations (emergency truncation of large tool-results,
   // future rewrites): if core.text's body differs from the original text,
   // rebuild from the kernel body — otherwise truncation never reaches the model.

@@ -2,8 +2,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { rm } from "node:fs/promises";
 import { createAcpExtension } from "../src/index.js";
+import { tmpPath } from "./tmp-path.js";
 
-const STATE_FILE = "/tmp/pai-acp-warnings-it.session.json";
+const STATE_FILE = tmpPath("pai-acp-warnings-it.session.json");
 
 function captureApi() {
   const handlers = new Map<string, ((event: any, ctx: any) => any)[]>();

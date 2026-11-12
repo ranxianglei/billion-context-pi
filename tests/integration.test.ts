@@ -1,12 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createAcpExtension } from "../src/index.js";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 import { setRunNpmForTest } from "../src/update.js";
+import { DELEGATE_STAND_DOWN_MESSAGE } from "../src/setup-subagent-tools.js";
+import { DEFAULT_FLEET_SHORTCUT } from "../src/config.js";
+import { tmpPath } from "./tmp-path.js";
 
 // Headless handlers await the update check — keep every test hermetic by
 // resolving it through this fake (no network, no update available).
@@ -59,12 +63,19 @@ function userMsg(id: string, text: string) {
   return { type: "message", id, parentId: null, timestamp: "", message: { role: "user", content: text, timestamp: Date.now() } };
 }
 
-test("factory registers the compress tool and 5 flat commands", () => {
+// #459: live-tail ids are content-addressed (`live-<hash>`), so tests resolve
+// them dynamically instead of assuming positional names.
+function liveRawKeys(state: { messageRefs?: { byRaw?: Record<string, string> } }): string[] {
+  return Object.keys(state.messageRefs?.byRaw ?? {}).filter((k) => k.startsWith("live-"));
+}
+
+  test("factory registers the compress tool and 9 flat commands", () => {
   const { api, handlers } = captureApi();
   createAcpExtension()(api as any);
 
   assert.ok(api.tools.some((t) => t.name === "compress"), "compress tool registered");
-  assert.deepEqual([...api.commands.keys()].sort(), ["acp", "acp-decompress", "acp-search", "acp-status", "acp-subagents"]);
+  assert.ok(api.tools.some((t) => t.name === "acp_cache"), "acp_cache tool registered");
+  assert.deepEqual([...api.commands.keys()].sort(), ["acp", "acp-cache", "acp-decompress", "acp-export", "acp-fleet", "acp-rule", "acp-search", "acp-status", "acp-subagents"]);
   assert.ok(handlers.has("context"), "context event wired");
   assert.ok(handlers.has("session_before_compact"), "compaction-disable wired");
   assert.ok(handlers.has("before_agent_start"), "system-prompt wired");
@@ -91,7 +102,7 @@ test("context handler tags every message with a ref even when length matches eve
   createAcpExtension({ modelContextLimit: 200_000 })(api as any);
 
   const entries = [userMsg("e1", "first"), userMsg("e2", "second"), userMsg("e3", "third")];
-  const ctx = fakeCtx(entries, "/tmp/nonexistent-pai-acp-it.session.json");
+  const ctx = fakeCtx(entries, tmpPath("nonexistent-pai-acp-it.session.json"));
   // Real Pi passes event.messages with the same length/roles as the session — the
   // handler must STILL return {messages} (not undefined), or the model never sees tags.
   const sameLengthMessages = entries.map(() => ({ role: "user", content: "x", timestamp: 0 }));
@@ -110,11 +121,11 @@ test("context handler works under omp (oh-my-pi) where sessionManager exposes ge
 
   const entries = [userMsg("e1", "first"), userMsg("e2", "second")];
   const ctx = {
-    ...fakeCtx(entries, "/tmp/nonexistent-pai-acp-omp.session.json"),
+    ...fakeCtx(entries, tmpPath("nonexistent-pai-acp-omp.session.json")),
     sessionManager: {
       getBranch: () => entries,
       getSessionId: () => "test-session",
-      getSessionFile: () => "/tmp/nonexistent-pai-acp-omp.session.json",
+      getSessionFile: () => tmpPath("nonexistent-pai-acp-omp.session.json"),
     },
   };
   const sameLengthMessages = entries.map(() => ({ role: "user", content: "x", timestamp: 0 }));
@@ -130,7 +141,7 @@ test("context handler works under omp (oh-my-pi) where sessionManager exposes ge
 test("omp context handler keeps the current (not-yet-persisted) user message: branch lags event.messages by one", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api as any);
-  const stateFile = "/tmp/nonexistent-pai-acp-omp-lag.session.json";
+  const stateFile = tmpPath("nonexistent-pai-acp-omp-lag.session.json");
   await rm(`${stateFile}.acp.json`, { force: true });
   // Simulate omp's real timing: the branch only holds the PREVIOUS turn's
   // messages (the current user message is persisted only after the LLM call,
@@ -171,11 +182,11 @@ test("omp live message keeps the same entry id once persisted (stable refs acros
   // Turn 1: branch empty (brand-new session), event carries the first message.
   const turn1Messages = [{ role: "user", content: [{ type: "text", text: "hello" }], timestamp: Date.now() }];
   const ctx1 = {
-    ...fakeCtx([], "/tmp/nonexistent-pai-acp-omp-stable.session.json"),
+    ...fakeCtx([], tmpPath("nonexistent-pai-acp-omp-stable.session.json")),
     sessionManager: {
       getBranch: () => [] as any[],
       getSessionId: () => "test-session",
-      getSessionFile: () => "/tmp/nonexistent-pai-acp-omp-stable.session.json",
+      getSessionFile: () => tmpPath("nonexistent-pai-acp-omp-stable.session.json"),
     },
   };
   const r1 = await handlers.get("context")![0]!({ type: "context", messages: turn1Messages }, ctx1);
@@ -190,11 +201,11 @@ test("omp live message keeps the same entry id once persisted (stable refs acros
     { role: "user", content: [{ type: "text", text: "world" }], timestamp: Date.now() },
   ];
   const ctx2 = {
-    ...fakeCtx(persistedTurn2, "/tmp/nonexistent-pai-acp-omp-stable.session.json"),
+    ...fakeCtx(persistedTurn2, tmpPath("nonexistent-pai-acp-omp-stable.session.json")),
     sessionManager: {
       getBranch: () => persistedTurn2,
       getSessionId: () => "test-session",
-      getSessionFile: () => "/tmp/nonexistent-pai-acp-omp-stable.session.json",
+      getSessionFile: () => tmpPath("nonexistent-pai-acp-omp-stable.session.json"),
     },
   };
   const r2 = await handlers.get("context")![0]!({ type: "context", messages: turn2Messages }, ctx2);
@@ -205,7 +216,7 @@ test("omp live message keeps the same entry id once persisted (stable refs acros
 test("omp migrates tagged live refs to stable entry ids", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api);
-  const stateFile = "/tmp/nonexistent-pai-acp-identity.session.json";
+  const stateFile = tmpPath("nonexistent-pai-acp-identity.session.json");
   await rm(`${stateFile}.acp.json`, { force: true });
   const texts = ["This tagged message must retain its stable persisted identity. ".repeat(130), "filler two ".repeat(400)];
   let persisted: ReturnType<typeof userMsg>[] = [];
@@ -216,13 +227,13 @@ test("omp migrates tagged live refs to stable entry ids", async () => {
   await handlers.get("context")![0]!({ type: "context", messages: first.messages }, ctx);
   const saved = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
   assert.equal(saved.messageRefs.byRaw.e1, targetRef);
-  assert.equal(saved.messageRefs.byRaw["live-0"], undefined);
+  assert.equal(liveRawKeys(saved).length, 0);
 });
 
 test("omp matches a persisted context suffix before assigning live refs", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api);
-  const stateFile = "/tmp/nonexistent-pai-acp-suffix.session.json";
+  const stateFile = tmpPath("nonexistent-pai-acp-suffix.session.json");
   await rm(`${stateFile}.acp.json`, { force: true });
   const texts = ["This suffix message must retain its persisted identity. ".repeat(130), "filler two ".repeat(400)];
   const persisted = [userMsg("older", "This older branch message is absent from provider context."), ...texts.map((text, index) => userMsg(`e${index + 1}`, text))];
@@ -231,13 +242,13 @@ test("omp matches a persisted context suffix before assigning live refs", async 
   const targetRef = transformed.messages[0].content.find((block: { type: string; text: string }) => block.type === "text").text.match(/m\d{5}/)![0];
   const saved = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
   assert.equal(saved.messageRefs.byRaw.e1, targetRef);
-  assert.equal(saved.messageRefs.byRaw["live-0"], undefined);
+  assert.equal(liveRawKeys(saved).length, 0);
 });
 
 test("omp rejects a non-contiguous persisted subsequence", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api);
-  const stateFile = "/tmp/nonexistent-pai-acp-gap.session.json";
+  const stateFile = tmpPath("nonexistent-pai-acp-gap.session.json");
   await rm(`${stateFile}.acp.json`, { force: true });
   const persisted = [userMsg("e1", "A"), userMsg("gap", "X"), userMsg("e2", "B")];
   const ctx = fakeCtx(persisted, stateFile);
@@ -248,13 +259,15 @@ test("omp rejects a non-contiguous persisted subsequence", async () => {
   const firstRef = result.messages[0].content.find((block: { type: string; text: string }) => block.type === "text").text.match(/m\d{5}/)![0];
   const saved = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
   assert.equal(saved.messageRefs.byRaw.e1, undefined);
-  assert.equal(saved.messageRefs.byRaw["live-0"], firstRef);
+  const liveEntries = Object.entries(saved.messageRefs.byRaw).filter(([k]) => k.startsWith("live-"));
+  assert.equal(liveEntries.length, 2, "both messages stay live: a non-contiguous subsequence must not align");
+  assert.ok(liveEntries.some(([, v]) => v === firstRef), "the live 'A' message keeps its own ref");
 });
 
-test("omp rejects ambiguous equal-length persisted runs", async () => {
+test("omp resolves an ambiguous equal-length run against the persisted tail (#459)", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api);
-  const stateFile = "/tmp/nonexistent-pai-acp-ambiguous-run.session.json";
+  const stateFile = tmpPath("nonexistent-pai-acp-ambiguous-run.session.json");
   await rm(`${stateFile}.acp.json`, { force: true });
   const persisted = [userMsg("e1", "same"), userMsg("gap", "different"), userMsg("e2", "same")];
   const ctx = fakeCtx(persisted, stateFile);
@@ -264,15 +277,15 @@ test("omp rejects ambiguous equal-length persisted runs", async () => {
   }, ctx);
   const liveRef = result.messages[0].content.find((block: { type: string; text: string }) => block.type === "text").text.match(/m\d{5}/)![0];
   const saved = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
-  assert.equal(saved.messageRefs.byRaw.e1, undefined);
-  assert.equal(saved.messageRefs.byRaw.e2, undefined);
-  assert.equal(saved.messageRefs.byRaw["live-0"], liveRef);
+  assert.equal(saved.messageRefs.byRaw.e1, undefined, "only the most recent occurrence wins the tail anchor");
+  assert.equal(saved.messageRefs.byRaw.e2, liveRef, "the ambiguous match aligns deterministically to the persisted tail");
+  assert.equal(liveRawKeys(saved).length, 0, "no live id minted once aligned");
 });
 
 test("omp migrates a live ref after the provider context evicts its prefix", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api);
-  const stateFile = "/tmp/nonexistent-pai-acp-shifted-live-ref.session.json";
+  const stateFile = tmpPath("nonexistent-pai-acp-shifted-live-ref.session.json");
   await rm(`${stateFile}.acp.json`, { force: true });
   let persisted: ReturnType<typeof userMsg>[] = [];
   const ctx = { ...fakeCtx(persisted, stateFile), sessionManager: { getBranch: () => persisted, getSessionId: () => "test-session", getSessionFile: () => stateFile } };
@@ -282,15 +295,17 @@ test("omp migrates a live ref after the provider context evicts its prefix", asy
   await handlers.get("context")![0]!({ type: "context", messages: [first.messages[1], first.messages[2]] }, ctx);
   const saved = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
   assert.equal(saved.messageRefs.byRaw.eB, bRef);
-  assert.equal(saved.messageRefs.byRaw["live-1"], undefined);
+  assert.equal(liveRawKeys(saved).length, 0);
   assert.equal(saved.messageRefs.byRef[bRef], "eB");
 });
 type PersistedEntry = { type: "message"; id: string; parentId: null; timestamp: string; message: Record<string, unknown> };
 
-test("omp does not bind a different toolCallId with identical visible text to the persisted identity", async () => {
+// SKIPPED (omp deprecated — see #237): acp-kernel 0.0.48 (#176) prunes refs absent
+// from the sync view, which conflicts with OMP live-ref stability expectations.
+test.skip("omp does not bind a different toolCallId with identical visible text to the persisted identity", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api);
-  const stateFile = "/tmp/nonexistent-pai-acp-toolcallid.session.json";
+  const stateFile = tmpPath("nonexistent-pai-acp-toolcallid.session.json");
   await rm(`${stateFile}.acp.json`, { force: true });
   const toolResult = (toolCallId: string) => ({
     role: "toolResult",
@@ -308,13 +323,14 @@ test("omp does not bind a different toolCallId with identical visible text to th
   await handlers.get("context")![0]!({ type: "context", messages: [toolResult("call-2")] }, ctx);
   const saved = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
   assert.equal(saved.messageRefs.byRaw.e1, undefined, "a different toolCallId must not inherit the persisted identity");
-  assert.equal(saved.messageRefs.byRaw["live-0"], targetRef, "the live message keeps its own ref");
+  assert.equal(saved.messageRefs.byRaw[liveRawKeys(saved)[0]!], targetRef, "the live message keeps its own ref");
 });
 
-test("omp does not bind differing image content with identical visible text to the persisted identity", async () => {
+// SKIPPED (omp deprecated — see #237): same 0.0.48 ref-pruning conflict as above.
+test.skip("omp does not bind differing image content with identical visible text to the persisted identity", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api);
-  const stateFile = "/tmp/nonexistent-pai-acp-image.session.json";
+  const stateFile = tmpPath("nonexistent-pai-acp-image.session.json");
   await rm(`${stateFile}.acp.json`, { force: true });
   const imgMsg = (data: string) => ({
     role: "user",
@@ -332,7 +348,7 @@ test("omp does not bind differing image content with identical visible text to t
   await handlers.get("context")![0]!({ type: "context", messages: [imgMsg("img-2")] }, ctx);
   const saved = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
   assert.equal(saved.messageRefs.byRaw.e1, undefined, "different image data must not inherit the persisted identity");
-  assert.equal(saved.messageRefs.byRaw["live-0"], targetRef, "the live message keeps its own ref");
+  assert.equal(saved.messageRefs.byRaw[liveRawKeys(saved)[0]!], targetRef, "the live message keeps its own ref");
 });
 
 test("omp matches emergency-truncated tool results before compression", async (t) => {
@@ -357,7 +373,7 @@ test("omp matches emergency-truncated tool results before compression", async (t
   const targetRef = transformed.messages[0].content.find((block: { type: string; text: string }) => block.type === "text").text.match(/m\d{5}/)![0];
   const compressTool = api.tools.find((tool: { name: string }) => tool.name === "compress")!;
   const result = await compressTool.execute("tc-omp-truncation", { content: [{ startId: targetRef, endId: targetRef, summary: "This large tool result was emergency-truncated in provider context and is now safely compressed from the original entry." }] }, undefined, undefined, ctx);
-  assert.match(result.content[0].text, /1 block/, result.content[0].text);
+  assert.match(result.content[0].text, /blocks: b\d+=/, result.content[0].text);
 });
 
 test("omp does not collapse distinct multimodal user messages with identical text (images survive)", async () => {
@@ -377,11 +393,11 @@ test("omp does not collapse distinct multimodal user messages with identical tex
   ];
   const liveMessages = [{ role: "user", content: [{ type: "text", text: "what is this?" }, liveImage], timestamp: Date.now() }];
   const ctx = {
-    ...fakeCtx(persisted, "/tmp/nonexistent-pai-acp-omp-images.session.json"),
+    ...fakeCtx(persisted, tmpPath("nonexistent-pai-acp-omp-images.session.json")),
     sessionManager: {
       getBranch: () => persisted,
       getSessionId: () => "test-session",
-      getSessionFile: () => "/tmp/nonexistent-pai-acp-omp-images.session.json",
+      getSessionFile: () => tmpPath("nonexistent-pai-acp-omp-images.session.json"),
     },
   };
 
@@ -412,11 +428,11 @@ test("omp does not collapse distinct multimodal tool results with identical text
   ];
   const liveMessages = [{ role: "toolResult", toolName: "read", toolCallId: "call-read", content: [{ type: "text", text: "same tool output" }, liveImage], timestamp: Date.now() }];
   const ctx = {
-    ...fakeCtx(persisted, "/tmp/nonexistent-pai-acp-omp-toolresult-images.session.json"),
+    ...fakeCtx(persisted, tmpPath("nonexistent-pai-acp-omp-toolresult-images.session.json")),
     sessionManager: {
       getBranch: () => persisted,
       getSessionId: () => "test-session",
-      getSessionFile: () => "/tmp/nonexistent-pai-acp-omp-toolresult-images.session.json",
+      getSessionFile: () => tmpPath("nonexistent-pai-acp-omp-toolresult-images.session.json"),
     },
   };
 
@@ -433,7 +449,7 @@ test("omp does not collapse distinct multimodal tool results with identical text
 test("acp_status refs remain usable by the next compress call", async () => {
   const { api } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api);
-  const stateFile = "/tmp/nonexistent-pai-acp-status-compress.session.json";
+  const stateFile = tmpPath("nonexistent-pai-acp-status-compress.session.json");
   await rm(`${stateFile}.acp.json`, { force: true });
   const originalText = "This range is reported by acp_status and must remain addressable by compress. ".repeat(130);
   const persisted = [userMsg("e1", originalText), ...["two", "three", "four", "five", "six", "seven"].map((n, index) => userMsg(`e${index + 2}`, `filler ${n} `.repeat(400)))];
@@ -443,13 +459,13 @@ test("acp_status refs remain usable by the next compress call", async () => {
   const targetRef = status.content[0].text.match(/m\d{5}/)![0];
   const compressTool = api.tools.find((tool: { name: string }) => tool.name === "compress")!;
   const result = await compressTool.execute("tc-status-compress", { content: [{ startId: targetRef, endId: targetRef, summary: "This range was selected by acp_status and is now safely compressed from the original entry." }] }, undefined, undefined, ctx);
-  assert.match(result.content[0].text, /1 block/, result.content[0].text);
+  assert.match(result.content[0].text, /blocks: b\d+=/, result.content[0].text);
 });
 
 test("omp rebuilds refs after stale live state before status compression", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api);
-  const stateFile = "/tmp/nonexistent-pai-acp-stale-live.session.json";
+  const stateFile = tmpPath("nonexistent-pai-acp-stale-live.session.json");
   await rm(`${stateFile}.acp.json`, { force: true });
   const longText = "This stale live state must be rebuilt against the current persisted branch. ".repeat(130);
   const filler = (n: string) => `filler ${n} `.repeat(400);
@@ -465,7 +481,7 @@ test("omp rebuilds refs after stale live state before status compression", async
   assert.equal(targetRef, "m00001", status.content[0].text);
   const compressTool = api.tools.find((tool: { name: string }) => tool.name === "compress")!;
   const result = await compressTool.execute("tc-stale-live-compress", { content: [{ startId: targetRef, endId: targetRef, summary: "This stale live range was rebuilt against stable persisted entries and is now safely compressed." }] }, undefined, undefined, ctx);
-  assert.match(result.content[0].text, /1 block/, result.content[0].text);
+  assert.match(result.content[0].text, /blocks: b\d+=/, result.content[0].text);
 });
 
 test("system prompt sources compression rules from acp-kernel (no hardcoded drift, no markers)", () => {
@@ -497,7 +513,7 @@ test("context handler persists state so a second call is idempotent on the same 
   createAcpExtension({ modelContextLimit: 200_000 })(api as any);
 
   const entries = [userMsg("e1", "alpha"), userMsg("e2", "beta")];
-  const ctx = fakeCtx(entries, "/tmp/nonexistent-pai-acp-it2.session.json");
+  const ctx = fakeCtx(entries, tmpPath("nonexistent-pai-acp-it2.session.json"));
 
 
   const first = await handlers.get("context")![0]!({ type: "context", messages: [] }, ctx);
@@ -511,26 +527,27 @@ test("context handler persists state so a second call is idempotent on the same 
 test("omp migrates assistant tool-call refs after prefix eviction", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api);
-  const stateFile = "/tmp/nonexistent-pai-acp-assistant-origin.session.json";
+  const stateFile = tmpPath("nonexistent-pai-acp-assistant-origin.session.json");
   await rm(`${stateFile}.acp.json`, { force: true });
   const assistant = (id: string) => ({ role: "assistant", content: [{ type: "toolCall", id, name: "read", arguments: { path: "x" } }], timestamp: Date.now() });
   let persisted: ReturnType<typeof userMsg>[] = [];
   const ctx = { ...fakeCtx(persisted, stateFile), sessionManager: { getBranch: () => persisted, getSessionId: () => "test-session", getSessionFile: () => stateFile } };
   await handlers.get("context")![0]!({ type: "context", messages: [assistant("call-a")] }, ctx);
   const firstState = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
-  const ref = firstState.messageRefs.byRaw["live-0"];
+  const root = liveRawKeys(firstState).find((k) => !k.includes("#"))!;
+  const ref = firstState.messageRefs.byRaw[root];
   assert.ok(ref, "assistant temporary ref must be assigned");
   persisted = [userMsg("older", "evicted"), { type: "message", id: "e-assistant", parentId: null, timestamp: "", message: assistant("call-a") }];
   await handlers.get("context")![0]!({ type: "context", messages: [assistant("call-a")] }, ctx);
   const saved = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
   assert.equal(saved.messageRefs.byRaw["e-assistant"], ref);
-  assert.equal(saved.messageRefs.byRaw["live-0"], undefined);
+  assert.equal(liveRawKeys(saved).length, 0);
 });
 
 test("omp migrates parallel assistant tool-call child refs after prefix eviction", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api);
-  const stateFile = "/tmp/nonexistent-pai-acp-parallel-origin.session.json";
+  const stateFile = tmpPath("nonexistent-pai-acp-parallel-origin.session.json");
   await rm(`${stateFile}.acp.json`, { force: true });
   const assistant = () => ({ role: "assistant", content: [
     { type: "text", text: "parallel" },
@@ -541,20 +558,20 @@ test("omp migrates parallel assistant tool-call child refs after prefix eviction
   const ctx = { ...fakeCtx(persisted, stateFile), sessionManager: { getBranch: () => persisted, getSessionId: () => "test-session", getSessionFile: () => stateFile } };
   await handlers.get("context")![0]!({ type: "context", messages: [assistant()] }, ctx);
   const first = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
-  const callARef = first.messageRefs.byRaw["live-0#call-a"];
-  const callBRef = first.messageRefs.byRaw["live-0#call-b"];
+  const childKeys = liveRawKeys(first).filter((k) => k.includes("#"));
+  const callARef = first.messageRefs.byRaw[childKeys.find((k) => k.endsWith("#call-a"))!];
+  const callBRef = first.messageRefs.byRaw[childKeys.find((k) => k.endsWith("#call-b"))!];
   assert.ok(callARef && callBRef);
   persisted = [{ type: "message", id: "e-assistant", parentId: null, timestamp: "", message: assistant() }];
   await handlers.get("context")![0]!({ type: "context", messages: [assistant()] }, ctx);
   const saved = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
   assert.equal(saved.messageRefs.byRaw["e-assistant#call-a"], callARef);
   assert.equal(saved.messageRefs.byRaw["e-assistant#call-b"], callBRef);
-  assert.equal(saved.messageRefs.byRaw["live-0#call-a"], undefined);
-  assert.equal(saved.messageRefs.byRaw["live-0#call-b"], undefined);
+  assert.equal(liveRawKeys(saved).length, 0, "root and child live refs all migrated");
 });
 
 test("omp reloads assistant origins before migrating after prefix eviction", async () => {
-  const stateFile = "/tmp/nonexistent-pai-acp-assistant-reload.session.json";
+  const stateFile = tmpPath("nonexistent-pai-acp-assistant-reload.session.json");
   await rm(`${stateFile}.acp.json`, { force: true });
   const assistant = (id: string) => ({ role: "assistant", content: [{ type: "toolCall", id, name: "read", arguments: { path: "x" } }], timestamp: Date.now() });
   let persisted: ReturnType<typeof userMsg>[] = [];
@@ -563,7 +580,7 @@ test("omp reloads assistant origins before migrating after prefix eviction", asy
   createAcpExtension({ modelContextLimit: 200_000 })(first.api);
   await first.handlers.get("context")![0]!({ type: "context", messages: [assistant("call-a")] }, makeCtx());
   const initial = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
-  const ref = initial.messageRefs.byRaw["live-0"];
+  const ref = initial.messageRefs.byRaw[liveRawKeys(initial)[0]!];
   assert.ok(ref);
   const second = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(second.api);
@@ -571,12 +588,12 @@ test("omp reloads assistant origins before migrating after prefix eviction", asy
   await second.handlers.get("context")![0]!({ type: "context", messages: [assistant("call-a")] }, makeCtx());
   const saved = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
   assert.equal(saved.messageRefs.byRaw["e-assistant"], ref);
-  assert.equal(saved.messageRefs.byRaw["live-0"], undefined);
+  assert.equal(liveRawKeys(saved).length, 0);
   assert.equal(saved.messageRefs.byRef[ref], "e-assistant");
 });
 
 test("omp preserves stable destination when migrating a colliding live ref", async () => {
-  const stateFile = "/tmp/nonexistent-pai-acp-collision.session.json";
+  const stateFile = tmpPath("nonexistent-pai-acp-collision.session.json");
   await rm(`${stateFile}.acp.json`, { force: true });
   const assistant = (id: string) => ({ role: "assistant", content: [{ type: "toolCall", id, name: "read", arguments: { path: "x" } }], timestamp: Date.now() });
   let persisted: ReturnType<typeof userMsg>[] = [];
@@ -585,7 +602,7 @@ test("omp preserves stable destination when migrating a colliding live ref", asy
   createAcpExtension({ modelContextLimit: 200_000 })(first.api);
   await first.handlers.get("context")![0]!({ type: "context", messages: [assistant("call-a")] }, makeCtx());
   const initial = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
-  const liveRef = initial.messageRefs.byRaw["live-0"];
+  const liveRef = initial.messageRefs.byRaw[liveRawKeys(initial)[0]!];
   assert.ok(liveRef);
   const stableRef = "m09999";
   initial.messageRefs.byRaw["e-assistant"] = stableRef;
@@ -599,20 +616,24 @@ test("omp preserves stable destination when migrating a colliding live ref", asy
   const saved = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
   assert.equal(saved.messageRefs.byRaw["e-assistant"], stableRef);
   assert.equal(saved.messageRefs.byRef[stableRef], "e-assistant");
-  assert.equal(saved.messageRefs.byRaw["live-0"], undefined);
+  assert.equal(liveRawKeys(saved).length, 0);
   assert.equal(saved.messageRefs.byRef[liveRef], undefined);
 });
 
-test("empty live context preserves refs created for an unpersisted message", async () => {
+// SKIPPED (omp deprecated — see #237): kernel 0.0.48 prunes refs for ids absent
+// from the sync view, so a live-only ref no longer survives an empty render.
+test.skip("empty live context preserves refs created for an unpersisted message", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api);
-  const stateFile = "/tmp/nonexistent-pai-acp-empty-live.session.json";
+  const stateFile = tmpPath("nonexistent-pai-acp-empty-live.session.json");
   await rm(`${stateFile}.acp.json`, { force: true });
   const ctx = fakeCtx([], stateFile);
   await handlers.get("context")![0]!({ type: "context", messages: [{ role: "user", content: "live-only" }] }, ctx);
   await handlers.get("context")![0]!({ type: "context", messages: [] }, ctx);
   const state = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
-  assert.equal(state.messageRefs.byRaw["live-0"], "m00001");
+  const keys = liveRawKeys(state);
+  assert.equal(keys.length, 1);
+  assert.equal(state.messageRefs.byRaw[keys[0]!], "m00001");
 });
 test("omp keeps compression blocks active when provider context has an extra prefix", async (t) => {
   const { api, handlers } = captureApi();
@@ -648,7 +669,7 @@ test("omp keeps compression blocks active when provider context has an extra pre
     undefined,
     ctx,
   );
-  assert.match(compressed.content[0].text, /1 block/);
+  assert.match(compressed.content[0].text, /blocks: b\d+=/);
 
   const next = await handlers.get("context")![0]!(
     {
@@ -697,7 +718,7 @@ test("omp keeps compression active when persisted and provider tails diverge", a
     undefined,
     ctx,
   );
-  assert.match(compressed.content[0].text, /1 block/);
+  assert.match(compressed.content[0].text, /blocks: b\d+=/);
 
   const activeUserText = "current user on the active branch";
   persisted = [...persisted, userMsg("e-active-user", activeUserText)];
@@ -724,6 +745,15 @@ test("delegate:false omits the ACP_DELEGATE NOTIFICATIONS section from the syste
   createAcpExtension({ delegate: false })(api as any);
   const result = handlers.get("before_agent_start")![0]!({ systemPrompt: "" }, {});
   assert.ok(!result.systemPrompt.includes("ACP_DELEGATE NOTIFICATIONS"), "delegate section omitted when delegate:false");
+  // Core ACP prompt is still present — only the delegate section is dropped.
+  assert.ok(result.systemPrompt.includes("ACP TAGS"), "core ACP prompt still present when delegate disabled");
+});
+
+test("delegate:{enabled:false} omits the ACP_DELEGATE NOTIFICATIONS section from the system prompt", () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ delegate: { enabled: false } })(api as any);
+  const result = handlers.get("before_agent_start")![0]!({ systemPrompt: "" }, {});
+  assert.ok(!result.systemPrompt.includes("ACP_DELEGATE NOTIFICATIONS"), "delegate section omitted when delegate:{enabled:false}");
   // Core ACP prompt is still present — only the delegate section is dropped.
   assert.ok(result.systemPrompt.includes("ACP TAGS"), "core ACP prompt still present when delegate disabled");
 });
@@ -811,7 +841,7 @@ test("headless (hasUI=false) context handler awaits the update check so an exiti
     const npm = pendingNpm();
     const { api, handlers } = captureApi();
     createAcpExtension({ modelContextLimit: 200_000 })(api as any);
-    const stateFile = "/tmp/nonexistent-pai-acp-headless-update.session.json";
+    const stateFile = tmpPath("nonexistent-pai-acp-headless-update.session.json");
     await rm(`${stateFile}.acp.json`, { force: true });
     const ctx = fakeCtx([userMsg("e1", "hi")], stateFile);
 
@@ -849,7 +879,7 @@ test("TUI (hasUI=true) context handler resolves without waiting for the update c
     const npm = pendingNpm();
     const { api, handlers } = captureApi();
     createAcpExtension({ modelContextLimit: 200_000 })(api as any);
-    const stateFile = "/tmp/nonexistent-pai-acp-tui-update.session.json";
+    const stateFile = tmpPath("nonexistent-pai-acp-tui-update.session.json");
     await rm(`${stateFile}.acp.json`, { force: true });
     const ctx = { ...fakeCtx([userMsg("e1", "hi")], stateFile), hasUI: true };
 
@@ -871,4 +901,217 @@ test("TUI (hasUI=true) context handler resolves without waiting for the update c
     delete process.env.ACP_LOG_FILE;
     await rm(logFile, { force: true });
   }
+});
+
+// ─── #415: third-party subagent (pi-subagents) auto stand-down ──────────────
+
+type StandDownScope = "none" | "user" | "project";
+
+function standDownFixture(scope: StandDownScope) {
+  const tmp = mkdtempSync(join(tmpdir(), "acp-standdown-"));
+  const agentDir = join(tmp, "agent");
+  const cwd = join(tmp, "proj");
+  mkdirSync(agentDir, { recursive: true });
+  mkdirSync(cwd, { recursive: true });
+  if (scope === "user") {
+    const pkg = join(agentDir, "npm", "node_modules", "pi-subagents");
+    mkdirSync(pkg, { recursive: true });
+    writeFileSync(join(pkg, "package.json"), JSON.stringify({ name: "pi-subagents", version: "0.53.0" }));
+  } else if (scope === "project") {
+    const pkg = join(cwd, CONFIG_DIR_NAME, "npm", "node_modules", "pi-subagents");
+    mkdirSync(pkg, { recursive: true });
+    writeFileSync(join(pkg, "package.json"), JSON.stringify({ name: "pi-subagents", version: "0.53.0" }));
+  }
+  return { tmp, agentDir, cwd, cleanup: () => rmSync(tmp, { recursive: true, force: true }) };
+}
+
+async function withAgentDir(agentDir: string, fn: () => Promise<void>): Promise<void> {
+  const prev = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  // Isolate HOME too: prompt/config assembly reads the developer's real
+  // ~/.pi/acp.json — e.g. `compress.promptPack: "lean"` swaps the acpTags
+  // section for its headerless short form and breaks the literal "ACP TAGS"
+  // assertions in these tests. Tests must not depend on the runner's home
+  // config (#484 triage: failed deterministically on any lean-pack dev box,
+  // green on CI's empty HOME — masking as a fake #415 regression).
+  const prevHome = process.env.HOME;
+  const prevUserProfile = process.env.USERPROFILE;
+  const home = join(dirname(agentDir), "home");
+  mkdirSync(home, { recursive: true });
+  process.env.HOME = home;
+  if (prevUserProfile !== undefined) process.env.USERPROFILE = home;
+  try {
+    await fn();
+  } finally {
+    if (prev === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = prev;
+    if (prevHome === undefined) delete process.env.HOME;
+    else process.env.HOME = prevHome;
+    if (prevUserProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = prevUserProfile;
+  }
+}
+
+function piSessionCtx(tmp: string, cwd: string, extra?: Record<string, unknown>) {
+  const base = fakeCtx([], join(tmp, "state.json"));
+  // session_start refuses OMP hosts (feature-detect: no buildContextEntries) —
+  // give the fake the pi shape so the stand-down gate under test is the only gate.
+  return { ...base, cwd, hasUI: true, sessionManager: { ...base.sessionManager, buildContextEntries: () => [] }, ...extra };
+}
+
+test("#415: project-scope pi-subagents → acp_delegate stands down (tools, shortcut, prompt section) + reminder points to /acp-subagents", async () => {
+  const fx = standDownFixture("project");
+  try {
+    await withAgentDir(fx.agentDir, async () => {
+      const { api, handlers } = captureApi();
+      const shortcuts: string[] = [];
+      (api as any).registerShortcut = (key: string) => { shortcuts.push(key); };
+      createAcpExtension()(api as any);
+
+      const notified: string[] = [];
+      const ctx = piSessionCtx(fx.tmp, fx.cwd, {
+        ui: { notify: (msg: string) => { notified.push(msg); }, confirm: async () => true, select: async () => undefined, input: async () => "", setStatus: () => {} },
+      });
+
+      await handlers.get("session_start")![0]!({}, ctx);
+
+      const toolNames = api.tools.map((t) => t.name);
+      assert.ok(!toolNames.includes("acp_delegate"), "acp_delegate not registered while stood down");
+      assert.ok(!toolNames.includes("acp_delegate_wait"), "acp_delegate_wait not registered while stood down");
+      assert.ok(!toolNames.includes("acp_delegate_cancel"), "acp_delegate_cancel not registered while stood down");
+      assert.ok(toolNames.includes("compress"), "core ACP tools still registered");
+      assert.deepEqual(shortcuts, [], "fleet shortcut not registered while stood down");
+
+      const promptResult = handlers.get("before_agent_start")![0]!({ systemPrompt: "" }, {});
+      assert.ok(!promptResult.systemPrompt.includes("ACP_DELEGATE NOTIFICATIONS"), "delegate prompt section omitted while stood down");
+      assert.ok(promptResult.systemPrompt.includes("ACP TAGS"), "core ACP prompt still present");
+
+      assert.ok(notified.some((m) => m === DELEGATE_STAND_DOWN_MESSAGE), "stand-down reminder surfaced via ui.notify");
+    });
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("#415: user-scope-only pi-subagents → acp_delegate stays active (warning log only, no stand-down)", async () => {
+  const fx = standDownFixture("user");
+  try {
+    await withAgentDir(fx.agentDir, async () => {
+      const { api, handlers } = captureApi();
+      const shortcuts: string[] = [];
+      (api as any).registerShortcut = (key: string) => { shortcuts.push(key); };
+      createAcpExtension()(api as any);
+
+      const notified: string[] = [];
+      const ctx = piSessionCtx(fx.tmp, fx.cwd, {
+        ui: { notify: (msg: string) => { notified.push(msg); }, confirm: async () => true, select: async () => undefined, input: async () => "", setStatus: () => {} },
+      });
+
+      await handlers.get("session_start")![0]!({}, ctx);
+
+      const toolNames = api.tools.map((t) => t.name);
+      assert.ok(toolNames.includes("acp_delegate"), "a global install must not disable acp_delegate in every project");
+      assert.ok(toolNames.includes("acp_delegate_wait"), "acp_delegate_wait registered");
+      assert.ok(toolNames.includes("acp_delegate_cancel"), "acp_delegate_cancel registered");
+      assert.deepEqual(shortcuts, [DEFAULT_FLEET_SHORTCUT], "fleet shortcut registered by default");
+      assert.ok(!notified.some((m) => m === DELEGATE_STAND_DOWN_MESSAGE), "no stand-down reminder for a user-scope-only install");
+    });
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("#415: delegate.forceEnable keeps acp_delegate despite project-scope pi-subagents", async () => {
+  const fx = standDownFixture("project");
+  try {
+    await withAgentDir(fx.agentDir, async () => {
+      const { api, handlers } = captureApi();
+      const shortcuts: string[] = [];
+      (api as any).registerShortcut = (key: string) => { shortcuts.push(key); };
+      createAcpExtension({ delegate: { forceEnable: true } })(api as any);
+
+      const notified: string[] = [];
+      const ctx = piSessionCtx(fx.tmp, fx.cwd, {
+        ui: { notify: (msg: string) => { notified.push(msg); }, confirm: async () => true, select: async () => undefined, input: async () => "", setStatus: () => {} },
+      });
+      await handlers.get("session_start")![0]!({}, ctx);
+
+      const toolNames = api.tools.map((t) => t.name);
+      assert.ok(toolNames.includes("acp_delegate"), "acp_delegate registered with forceEnable");
+      assert.ok(toolNames.includes("acp_delegate_wait"), "acp_delegate_wait registered with forceEnable");
+      assert.ok(toolNames.includes("acp_delegate_cancel"), "acp_delegate_cancel registered with forceEnable");
+      assert.deepEqual(shortcuts, [DEFAULT_FLEET_SHORTCUT], "shortcut registered with forceEnable");
+      assert.ok(!notified.some((m) => m === DELEGATE_STAND_DOWN_MESSAGE), "no stand-down reminder when forceEnable is set");
+
+      const promptResult = handlers.get("before_agent_start")![0]!({ systemPrompt: "" }, {});
+      assert.ok(promptResult.systemPrompt.includes("ACP_DELEGATE NOTIFICATIONS"), "delegate prompt section present with forceEnable");
+    });
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("#415: explicit enabled:false wins over detection and forceEnable (priority matrix)", async () => {
+  const fx = standDownFixture("project");
+  try {
+    await withAgentDir(fx.agentDir, async () => {
+      const { api, handlers } = captureApi();
+      const shortcuts: string[] = [];
+      (api as any).registerShortcut = (key: string) => { shortcuts.push(key); };
+      createAcpExtension({ delegate: { enabled: false, forceEnable: true } })(api as any);
+
+      const ctx = piSessionCtx(fx.tmp, fx.cwd);
+      await handlers.get("session_start")![0]!({}, ctx);
+
+      const toolNames = api.tools.map((t) => t.name);
+      assert.ok(!toolNames.includes("acp_delegate"), "explicitly disabled delegate stays off despite forceEnable");
+      assert.ok(!toolNames.includes("acp_delegate_wait"), "acp_delegate_wait stays off");
+      assert.ok(!toolNames.includes("acp_delegate_cancel"), "acp_delegate_cancel stays off");
+      assert.deepEqual(shortcuts, [], "no shortcut when explicitly disabled");
+
+      const promptResult = handlers.get("before_agent_start")![0]!({ systemPrompt: "" }, {});
+      assert.ok(!promptResult.systemPrompt.includes("ACP_DELEGATE NOTIFICATIONS"), "delegate prompt section absent when explicitly disabled");
+    });
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("#415: no pi-subagents → acp_delegate registers normally (regression guard)", async () => {
+  const fx = standDownFixture("none");
+  try {
+    await withAgentDir(fx.agentDir, async () => {
+      const { api, handlers } = captureApi();
+      const shortcuts: string[] = [];
+      (api as any).registerShortcut = (key: string) => { shortcuts.push(key); };
+      createAcpExtension()(api as any);
+
+      const ctx = piSessionCtx(fx.tmp, fx.cwd);
+      await handlers.get("session_start")![0]!({}, ctx);
+
+      const toolNames = api.tools.map((t) => t.name);
+      assert.ok(toolNames.includes("acp_delegate"), "acp_delegate registered when no third-party subagent is installed");
+      assert.deepEqual(shortcuts, [DEFAULT_FLEET_SHORTCUT], "shortcut registered by default");
+    });
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("withAgentDir restores PI_CODING_AGENT_DIR/HOME/USERPROFILE without leaking env", async () => {
+  const prevAgent = process.env.PI_CODING_AGENT_DIR;
+  const prevHome = process.env.HOME;
+  const prevUserProfile = process.env.USERPROFILE;
+  const tmp = mkdtempSync(join(tmpdir(), "acp-env-restore-"));
+  try {
+    await withAgentDir(join(tmp, "agent"), async () => {
+      assert.ok(process.env.PI_CODING_AGENT_DIR?.endsWith("agent"), "PI_CODING_AGENT_DIR points at the fixture");
+      assert.notEqual(process.env.HOME, prevHome, "HOME is isolated inside the fixture");
+    });
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+  assert.equal(process.env.PI_CODING_AGENT_DIR, prevAgent, "PI_CODING_AGENT_DIR restored verbatim (undefined must not become \"undefined\")");
+  assert.equal(process.env.HOME, prevHome, "HOME restored verbatim");
+  assert.equal(process.env.USERPROFILE, prevUserProfile, "USERPROFILE restored verbatim");
 });

@@ -1,8 +1,11 @@
 {
     "name": "nudge-triggered",
-    "description": "Nudge-triggered compression: the model emits growth text across turns until billion-context-pi's context-usage nudge is injected, then the fake LLM detects the nudge and compresses. A low modelContextLimit makes the nudge fire quickly. Validates the nudge detection + baseline-recording path.",
+    "description": "Nudge-triggered compression: the model emits growth text across turns until billion-context-pi's context-usage nudge is injected, then the fake LLM detects the nudge and compresses. A low modelContextLimit makes the nudge fire quickly. Validates the nudge detection + baseline-recording path. minPressureBenefitTokens=0 (kernel #198 escape hatch): the 1500-token window is smaller than the default 5000-token benefit floor, which would suppress every pressure nudge; this scenario validates nudge detection + baseline recording, not the floor itself (unit-tested).",
     "acpConfig": {
-        "modelContextLimit": 1500
+        "modelContextLimit": 1500,
+        "compress": {
+            "minPressureBenefitTokens": 0
+        }
     },
     "turns": [
         {

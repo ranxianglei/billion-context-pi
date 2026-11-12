@@ -23,8 +23,10 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck
-      - run: npm test
+      # build before test: tests/host-api.test.ts resolves "billion-context-pi"
+      # via Node self-reference to dist/index.js (package-name-only import contract)
       - run: npm run build
+      - run: npm test
 
   pr-validation:
     runs-on: ubuntu-latest

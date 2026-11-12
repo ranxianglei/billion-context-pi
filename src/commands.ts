@@ -1,12 +1,21 @@
-import type { ExtensionCommandContext, RegisteredCommand, SessionEntry } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, RegisteredCommand, SessionEntry } from "@earendil-works/pi-coding-agent";
+import * as path from "node:path";
 import type { AcpRuntime } from "./runtime.js";
-import { defaultCountTokens, parseBlockIdArg, collectBlockContent } from "acp-kernel";
+import { ACP_STATUS_CUSTOM_TYPE, ACP_EXPORT_CUSTOM_TYPE, ACP_RULE_CUSTOM_TYPE } from "./messages.js";
+import { exportSession, parseExportArgs } from "./export.js";
+import { defaultCountTokens, parseBlockIdArg, collectBlockContent, listRules, addRule, removeRule, clearRules, formatRulesList, resolveRuleLimits } from "acp-kernel";
 import { getSystemPromptText } from "./compat.js";
-import { collectCoveredMessageIds, estimateTokens, calibrateTokens, collectImageTokens, modelSupportsImages } from "./tokens.js";
+import { collectCoveredMessageIds, estimateTokens, collectImageTokens, modelSupportsImages, adjustedTokenCount } from "./tokens.js";
+import { usageAnchorPredatesCompression } from "./floor-stale.js";
+import { applyOutputHeadroom, resolveOutputHeadroomCap } from "./overflow-selfheal.js";
 import { buildStatusPanel } from "acp-kernel/panel";
+import { resolveSurfaceMeta } from "./prompt-pack.js";
 import { getDelegateUsage } from "./delegate-tool.js";
+import { openFleetInspector } from "./fleet-inspector.js";
+import { resolveDelegate } from "./config.js";
 import { ensureSubagentAcpTools } from "./setup-subagent-tools.js";
 import { SESSION_MODEL_REF } from "./compress-model.js";
+import { cacheReportText } from "./cache-tool.js";
 
 declare const CURRENT_VERSION: string;
 
@@ -35,7 +44,53 @@ function cacheUsageSamples(entries: SessionEntry[]): Array<{ input: number; cach
   return out;
 }
 
-export function makeCommands(runtime: AcpRuntime): Array<{ name: string; options: CommandOptions }> {
+type RuleCommandOp =
+  | { kind: "list" }
+  | { kind: "record"; text: string }
+  | { kind: "remove"; id: string }
+  | { kind: "clear" }
+  | { kind: "conflict"; reason: string };
+
+const RULE_ID_RE = /^rule\d+$/;
+
+const RULE_OP_CONFLICT = 'One operation per call — use "/acp-rule remove <id>" or "/acp-rule clear" separately.';
+
+/** /acp-rule arg parsing (#537): exact "clear" clears all; exactly two tokens
+ *  "remove ruleN" removes by id; anything else records verbatim — so plain
+ *  rule texts that merely start with remove/clear-like words stay recordable.
+ *  Mixed operations in one call are rejected without mutating state. */
+function parseRuleCommand(raw: string): RuleCommandOp {
+  const arg = raw.trim();
+  if (arg === "") return { kind: "list" };
+  const tokens = arg.split(/\s+/);
+  let clearTokens = 0;
+  let removePairs = 0;
+  for (let i = 0; i < tokens.length; i++) {
+    if (tokens[i] === "clear") clearTokens++;
+    if (tokens[i] === "remove" && RULE_ID_RE.test(tokens[i + 1] ?? "")) removePairs++;
+  }
+  if (clearTokens > 0 && removePairs > 0 || clearTokens > 1 || removePairs > 1) {
+    return { kind: "conflict", reason: RULE_OP_CONFLICT };
+  }
+  if (arg === "clear") return { kind: "clear" };
+  if (tokens.length === 2 && tokens[0] === "remove" && RULE_ID_RE.test(tokens[1]!)) {
+    return { kind: "remove", id: tokens[1]! };
+  }
+  return { kind: "record", text: arg };
+}
+
+export function makeCommands(runtime: AcpRuntime, pi?: ExtensionAPI): Array<{ name: string; options: CommandOptions }> {
+  // Persistent transcript output (rendered by TUI and web hosts like pi-web);
+  // notify() is a transient toast and only the fallback for hosts without
+  // sendMessage (issue #255).
+  const statusHandler = async (_args: string, ctx: ExtensionCommandContext) => {
+    const text = await statusReport(runtime, ctx);
+    if (typeof pi?.sendMessage === "function") {
+      pi.sendMessage({ customType: ACP_STATUS_CUSTOM_TYPE, content: text, display: true });
+      return;
+    }
+    ctx.ui.notify(text);
+  };
   return [
     {
       name: "acp",
@@ -50,7 +105,7 @@ export function makeCommands(runtime: AcpRuntime): Array<{ name: string; options
             ctx.ui.notify(await handleCompact(argStr, runtime, ctx));
             return;
           }
-          ctx.ui.notify(await statusReport(runtime, ctx));
+          await statusHandler(args, ctx);
         },
       },
     },
@@ -58,7 +113,123 @@ export function makeCommands(runtime: AcpRuntime): Array<{ name: string; options
       name: "acp-status",
       options: {
         description: "Detailed ACP status (block tiers, token breakdown, delegate usage).",
-        handler: async (_args, ctx) => ctx.ui.notify(await statusReport(runtime, ctx)),
+        handler: statusHandler,
+      },
+    },
+    {
+      name: "acp-cache",
+      options: {
+        description:
+          "Prompt-cache reconciliation: grand ledger (input/cached/hit rate) with every request's miss split into new content / compression re-pay / TTL expiry, plus per-fold economics. Append 'full' for the every-line listing.",
+        handler: async (args, ctx) => {
+          let text: string;
+          try {
+            const detail = /(^|\s)(--)?full(\s|$)/.test(args ?? "") ? "full" : "summary";
+            text = await cacheReportText(runtime, ctx, detail);
+          } catch (e) {
+            ctx.ui.notify(e instanceof Error ? e.message : String(e), "error");
+            return;
+          }
+          if (typeof pi?.sendMessage === "function") {
+            pi.sendMessage({ customType: ACP_STATUS_CUSTOM_TYPE, content: text, display: true });
+            return;
+          }
+          ctx.ui.notify(text);
+        },
+      },
+    },
+    {
+      name: "acp-rule",
+      options: {
+        description:
+          "Manage persistent session rules (same rules the acp_rule feature keeps): list, record, remove by id, or clear all. " +
+          'Usage: /acp-rule [text to record] | /acp-rule remove <id> | /acp-rule clear',
+        handler: async (args, ctx) => {
+          if (runtime.adapter.rules !== true) {
+            ctx.ui.notify(
+              'Rules are not enabled — set "rules": true in acp.json (~/.pi/acp.json or project .pi/acp.json) to turn on persistent rules.',
+              "warning",
+            );
+            return;
+          }
+          const op = parseRuleCommand(args ?? "");
+          if (op.kind === "conflict") {
+            ctx.ui.notify(op.reason, "error");
+            return;
+          }
+          let text: string;
+          try {
+            const { state } = await runtime.stateFor(ctx);
+            if (op.kind === "list") {
+              const rules = listRules(state);
+              text = rules.length === 0 ? "No rules recorded." : formatRulesList(rules);
+            } else if (op.kind === "remove") {
+              const result = removeRule(state, op.id);
+              if (!result.ok) {
+                ctx.ui.notify(result.error, "error");
+                return;
+              }
+              await runtime.save(state, ctx);
+              text = `Removed ${result.rule.id}: ${result.rule.text}`;
+            } else if (op.kind === "clear") {
+              const result = clearRules(state);
+              await runtime.save(state, ctx);
+              text = result.count === 0 ? "No rules to clear." : `Cleared ${result.count} rule(s).`;
+            } else {
+              const result = addRule(state, op.text, resolveRuleLimits(runtime.configFor(ctx)));
+              if (!result.ok) {
+                ctx.ui.notify(result.error, "error");
+                return;
+              }
+              await runtime.save(state, ctx);
+              text = `Recorded ${result.rule.id}: ${result.rule.text}`;
+            }
+          } catch (e) {
+            ctx.ui.notify(e instanceof Error ? e.message : String(e), "error");
+            return;
+          }
+          if (typeof pi?.sendMessage === "function") {
+            pi.sendMessage({ customType: ACP_RULE_CUSTOM_TYPE, content: text, display: true });
+            return;
+          }
+          ctx.ui.notify(text);
+        },
+      },
+    },
+    {
+      name: "acp-export",
+      options: {
+        description:
+          "Export a session as a handoff markdown doc (folded view by default). " +
+          "Usage: /acp-export [session-id|label] [--full] [--output handoff.md]",
+        handler: async (args, ctx) => {
+          const parsed = parseExportArgs(args);
+          if (parsed.error) {
+            ctx.ui.notify(parsed.error);
+            return;
+          }
+          const sessionDir = resolveSessionDir(ctx.sessionManager);
+          if (!sessionDir) {
+            ctx.ui.notify("No session directory available for export.");
+            return;
+          }
+          let result: string;
+          try {
+            result = await exportSession(parsed.selector, { full: parsed.full, output: parsed.output }, sessionDir);
+          } catch (e) {
+            ctx.ui.notify(e instanceof Error ? e.message : String(e), "error");
+            return;
+          }
+          if (parsed.output) {
+            ctx.ui.notify(result);
+            return;
+          }
+          if (typeof pi?.sendMessage === "function") {
+            pi.sendMessage({ customType: ACP_EXPORT_CUSTOM_TYPE, content: result, display: true });
+            return;
+          }
+          ctx.ui.notify(result);
+        },
       },
     },
     {
@@ -129,39 +300,67 @@ export function makeCommands(runtime: AcpRuntime): Array<{ name: string; options
         },
       },
     },
+    {
+      name: "acp-fleet",
+      options: {
+        description: "Inspect acp_delegate sub-agent runs: live list + transcript overlay (TUI), text snapshot elsewhere.",
+        handler: async (_args, ctx) => {
+          if (!resolveDelegate(runtime.adapter).enabled) {
+            ctx.ui.notify("acp_delegate is not enabled in this session's config.");
+            return;
+          }
+          await openFleetInspector(ctx);
+        },
+      },
+    },
   ];
+}
+
+function resolveSessionDir(sm: ExtensionCommandContext["sessionManager"]): string | undefined {
+  const dir = typeof sm.getSessionDir === "function" ? sm.getSessionDir() : undefined;
+  if (dir) return dir;
+  const file = sm.getSessionFile();
+  return file ? path.dirname(file) : undefined;
 }
 
 async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): Promise<string> {
   const { state, coreMessages, entries } = await runtime.stateFor(ctx);
-  const config = runtime.configFor(ctx);
+  // Measure every panel percentage against the SAME real request limit the live
+  // context transform uses (window − output headroom), not the full window
+  // (issue #267).
+  const config = applyOutputHeadroom(runtime.configFor(ctx), ctx.model, resolveOutputHeadroomCap(runtime.adapter.outputHeadroomMaxPct));
   // Use pi's real context usage (anchored on provider usage) only for the
   // panel's footer-scale display line; see sentTokens below for arbitration.
   const realUsage = ctx.getContextUsage?.();
+  const anchorStale = usageAnchorPredatesCompression(entries ?? []);
 
   // Nudge arbitration on the SENT-VIEW scale — must match the context
-  // transform and acp_status. pi's getContextUsage is anchored on the last
-  // assistant's provider-reported usage when available (≈ real sent view,
-  // fine), but falls back to summing the whole session tree when providers
-  // don't report usage — same class of false emergency as the omp 180K-
-  // window/366K-tree report (session keeps chatting while nudge screams
-  // EMERGENCY at 204%). The tree-scale number stays in the log only.
+  // transform and acp_status: sent-view estimate floored at the host's real
+  // context usage (issue #257).
   const systemPromptText = getSystemPromptText(ctx);
   const systemPromptTokens = systemPromptText ? defaultCountTokens(systemPromptText) : 0;
   const imageTokens = collectImageTokens(entries, modelSupportsImages(ctx.model));
   const imageTokensTotal = [...imageTokens.values()].reduce((a, b) => a + b, 0);
-  const sessionTokens = realUsage?.tokens && realUsage.tokens > 0 ? realUsage.tokens : defaultCountTokens(coreMessages.map((m) => m.text ?? "").join("\n")) + imageTokensTotal;
+  const thinkingTokensTotal = coreMessages.reduce((sum, m) => sum + (m.thinkingTokens ?? 0), 0);
+  const sessionTokens = !anchorStale && realUsage?.tokens && realUsage.tokens > 0 ? realUsage.tokens : defaultCountTokens(coreMessages.map((m) => m.text ?? "").join("\n")) + imageTokensTotal + thinkingTokensTotal;
   const coveredIds = collectCoveredMessageIds(state);
-  const modelId = (ctx.model as { id?: string } | undefined)?.id ?? "default";
   const sentTokens = estimateTokens(coreMessages, coveredIds, imageTokens) + systemPromptTokens;
-  const turn = runtime.core.processTurn({ messages: coreMessages, state, config, tokenCount: calibrateTokens(sentTokens, runtime.density.densityFor(modelId)) });
+  // View-based recount (issue #289): with active blocks the raw-view estimate
+  // can sit far above the sent view and mis-scale the panel's nudge — same
+  // arbitration as src/index.ts and acp_status.
+  const viewSentTokens = adjustedTokenCount(runtime.core, coreMessages, state, config, sentTokens, imageTokens, systemPromptTokens);
+  // issue #257: floor the meter at the host's real context usage so the
+  // panel's nudge matches the real decision (same as src/index.ts).
+  const turn = runtime.core.processTurn({ messages: coreMessages, state, config, tokenCount: anchorStale ? viewSentTokens : Math.max(viewSentTokens, realUsage?.tokens ?? 0) });
 
   // Shared kit surface renders the panel (dual accounting, viability
   // filtering, bars, block list with topic fallback). Host-specific inputs:
   // systemPromptTokens (measured) and unprunedTokens — the chars/4 estimate
   // of the full projection, so the kit derives Session-only on the same
   // estimation scale as the sent view (never cross-scale; omp issue #18).
-  const versionStr = CURRENT_VERSION ? `billion-context-pi@${CURRENT_VERSION}` : undefined;
+  const versionStr = CURRENT_VERSION
+    ? `billion-context-pi@${CURRENT_VERSION} · pack: ${resolveSurfaceMeta(runtime.adapter, ctx?.cwd ?? process.cwd(), (ctx?.model as { provider?: string; id?: string } | undefined)?.provider, (ctx?.model as { provider?: string; id?: string } | undefined)?.id).pack}`
+    : undefined;
   let text = buildStatusPanel({
     version: versionStr,
     tokenCount: sessionTokens,
@@ -169,7 +368,7 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
     state: turn.state,
     nudge: turn.nudge,
     modelContextLimit: config.modelContextLimit,
-    unprunedTokens: coreMessages.reduce((sum, m) => sum + defaultCountTokens(m.text ?? "") + (imageTokens.get(m.id) ?? 0), 0),
+    unprunedTokens: coreMessages.reduce((sum, m) => sum + defaultCountTokens(m.text ?? "") + (m.thinkingTokens ?? 0) + (imageTokens.get(m.id) ?? 0), 0),
     cacheUsages: cacheUsageSamples(entries ?? []),
   });
 

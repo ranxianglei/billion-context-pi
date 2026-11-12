@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { rm, readFile } from "node:fs/promises";
 import { createAcpExtension } from "../src/index.js";
+import { tmpPath } from "./tmp-path.js";
 
 const ZH = "概";
 const body = (n: number) => "body " + n + " " + ZH.repeat(6000);
@@ -57,10 +58,10 @@ function fakeCtx(entries: Array<ReturnType<typeof userMsg>>, stateFile: string) 
   };
 }
 
-async function setup(stateFile: string) {
+async function setup(stateFile: string, adapter: Record<string, unknown> = {}) {
   await rm(stateFile + ".acp.json", { force: true });
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as never);
+  createAcpExtension({ modelContextLimit: 200_000, ...adapter } as never)(api as never);
   const entries = Array.from({ length: 12 }, (_, i) => userMsg(i));
   const ctx = fakeCtx(entries, stateFile);
   await handlers.get("context")![0]!({ type: "context", messages: [] }, ctx);
@@ -75,7 +76,7 @@ async function setup(stateFile: string) {
 const stateOf = async (f: string) => JSON.parse(await readFile(f + ".acp.json", "utf8"));
 
 test("tier-3-only rewrite is rejected and state is rolled back (dog/billion-context-pi#3)", async () => {
-  const stateFile = "/tmp/pai-acp-t3-guard.session.json";
+  const stateFile = tmpPath("pai-acp-t3-guard.session.json");
   const { run } = await setup(stateFile);
   const sum = (t: string) => t + " " + ZH.repeat(80);
 
@@ -105,8 +106,35 @@ test("tier-3-only rewrite is rejected and state is rolled back (dog/billion-cont
   assert.equal(after.blocks.find((b: { active: boolean }) => b.active).tier, 3);
 });
 
+test("tier-3 rewrite rejection names the tier-ready alternative (#344)", async () => {
+  // Default triggers are count-off (kernel #379: tier2Trigger 1000), so this
+  // test pins the #344 hint MECHANISM with explicit low triggers — 5 tier-1
+  // blocks >= 3 still name the tier-2 alternative in the rejection.
+  const stateFile = tmpPath("pai-acp-t3-hint.session.json");
+  const { run } = await setup(stateFile, {
+    preserveRecentMessages: 0,
+    coreOverrides: { tiers: { enabled: true, tier2Trigger: 3, tier3Trigger: 6 } },
+  });
+  const sum = (t: string) => t + " " + ZH.repeat(80);
+
+  for (let i = 0; i < 6; i++) {
+    await run([{ startId: `m0000${1 + i * 2}`, endId: `m0000${2 + i * 2}`, summary: sum(`s${i}`) }]);
+  }
+  await run([{ startId: "b1", endId: "b1", summary: sum("t2") }]);
+  await run([{ startId: "b7", endId: "b7", summary: sum("t3") }]);
+  const st = await stateOf(stateFile);
+  assert.equal(st.blocks.filter((b: { active: boolean; tier: number }) => b.active && b.tier === 1).length, 5);
+
+  await assert.rejects(
+    () => run([{ startId: "b8", endId: "b8", summary: sum("rw") }]),
+    (err: Error) =>
+      /only re-condenses terminal tier-3 block/.test(err.message) &&
+      /Actionable now: distill tier-1 blocks b2\.\.b6 into a single tier-2 block/.test(err.message),
+  );
+});
+
 test("lower-tier distillation still allowed: T2 block condenses to T3", async () => {
-  const stateFile = "/tmp/pai-acp-t3-allow.session.json";
+  const stateFile = tmpPath("pai-acp-t3-allow.session.json");
   const { run } = await setup(stateFile);
   const sum = (t: string) => t + " " + ZH.repeat(80);
 

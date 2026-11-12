@@ -8,6 +8,24 @@
 
 ---
 
+## 社区
+
+QQ群:
+1056132097(已满)
+1108730198(未满)
+
+---
+
+## 📄 论文 / 预印本
+
+- **[模型驱动的分层增量压缩:面向长寿命编码 Agent 的免训练多代上下文管理](./paper/模型驱动的分层增量压缩-免训练多代上下文管理.md)**(中文版,v0.2)
+
+> 📝 **论文本身与代码一同以 MIT 许可开源(位于 `paper/` 目录),是代码库的一部分 —— 这是一份活文档,任何人都可以编辑,欢迎提 PR 改进。**
+
+生产规模纵向研究:四个半月、三宿主、174,327 次模型调用、187.6 亿累计输入 token(三宿主合计约 247 亿),204,800-token 窗口零违规,马拉松会话 8,584–12,049 次调用。
+
+---
+
 <p align="center">
 <a href="https://www.npmjs.com/package/billion-context-pi"><img src="https://img.shields.io/npm/v/billion-context-pi.svg?style=flat-square" alt="npm"></a>
 <a href="https://github.com/ranxianglei/billion-context-pi/blob/master/LICENSE"><img src="https://img.shields.io/npm/l/billion-context-pi.svg?style=flat-square" alt="license"></a>
@@ -19,6 +37,8 @@
 </p>
 
 ---
+
+> **宿主支持:** 本插件面向 **Pi**。它**不支持 OMP(oh-my-pi)** —— 在 OMP 宿主上会拒绝运行。OMP 用户请直接改用 [billion-context](https://github.com/ranxianglei/billion-context)(启动命令 bili omp);其他客户端的完整对照见[该选哪个?](#该选哪个)。OMP 详细说明:[docs/omp.zh-CN.md](./docs/omp.zh-CN.md)。
 
 ## 为什么选择 billion-context
 
@@ -36,6 +56,19 @@
 1. **一个会话即可支撑海量工作。** 根据三级压缩架构的模拟测试(见 [opencode-acp](https://github.com/ranxianglei/opencode-acp)),单会话累计可处理约 100 亿至 600 亿 token —— 同时对遥远的关键信息(路径、决策、签名)保持长久记忆。用户可以在**同一个会话里连续工作几个月**,而无需因为上下文膨胀而开新会话丢上下文。
 2. **上下文长期保持精简。** 实际运行中上下文通常稳定在 15 万 token 以下(opencode-acp 实测维持在 20 万以下),相比传统压缩方案动辄撑到 100 万上下文,**单会话累计可节省近 5 倍的 token 费用**。
 
+## 该选哪个?
+
+按客户端选:
+
+| 客户端 | 用这个 |
+|---|---|
+| **pi** | [`billion-context-pi`](https://github.com/ranxianglei/billion-context-pi)(进程内扩展) |
+| **opencode** | [`opencode-acp`](https://github.com/ranxianglei/opencode-acp)(进程内扩展) |
+| **omp** | [`billion-context`](https://github.com/ranxianglei/billion-context),`bili omp`(内置插件) |
+| **其余所有** | [`billion-context`](https://github.com/ranxianglei/billion-context) —— `bili <client>`(启动器,优先)或 `/bili/` 前缀 |
+
+> 为什么 OMP 不能用本进程内扩展、以及强行使用的后果:见下文[宿主支持](#宿主支持)与 [docs/omp.zh-CN.md](./docs/omp.zh-CN.md)。
+
 ## 安装
 
 ```bash
@@ -44,10 +77,11 @@ pi install npm:billion-context-pi
 
 完成。扩展在下次 Pi 启动时自动加载。无需配置 —— 它会自动读取模型的上下文窗口。
 
-> **建议先卸载 `pi-subagents`(可选,推荐)。** billion-context-pi 自带 `acp_delegate` 子代理工具(见下文),以极低的上下文成本(~600 tok vs ~7K tok/轮)替代 pi-subagents。如果你已安装 pi-subagents,卸载它以避免重复的委派工具:
-> ```bash
-> pi remove npm:pi-subagents
-> ```
+> **你另有子代理扩展?** billion-context-pi 自带 `acp_delegate` 子代理工具(见下文),上下文成本极低(~600 tok vs ~7K tok/轮)。同一会话里两套委派工具只会让模型的选择更混乱,二选一:
+> - **用 ACP 的 delegate** —— 卸载另一个扩展:`pi remove npm:pi-subagents`
+> - **保留你自己的子代理** —— 在 `acp.json` 里关掉 ACP 的 delegate:`{ "delegate": false }`(见下文*改用你自己的子代理*)
+>
+> 若保留已安装的 `pi-subagents`,billion-context-pi 会在会话启动时检测:**项目级**安装(`<cwd>/.pi/npm` 或项目内 extensions 目录)会自动停用该项目的 `acp_delegate`,并提醒你运行 `/acp-subagents` 让 pi-subagents 的子代理获得 ACP 压缩;仅**用户级**(全局)安装时只记一条警告日志,`acp_delegate` 保持启用。在 `acp.json` 中设置 `"delegate": { "forceEnable": true }` 可在检测到第三方子代理时仍强制保留 `acp_delegate`。
 
 ## 工作原理
 
@@ -71,6 +105,26 @@ billion-context 通过拦截 Pi 的 `context` 事件接管上下文管理。**Pi
 
 2. **即使只有一个压缩插件,在少数情况下仍可能出现干扰。** Pi 下的加载顺序由文件系统发现顺序(`fs.readdirSync` 遍历 `.pi/extensions/` → 全局 → 包)决定,并不完全确定。如果另一个(非压缩类)扩展也 hook 了 `context` 事件、且恰好加载在 billion-context-pi *之后*,它可能修改压缩后的输出。billion-context-pi 从会话日志重建工作集(而非链式输入),这让它对*排在它之前*的 handler 鲁棒 —— 但无法防御*排在它之后*的 handler。这是 Pi 扩展模型的固有限制;若你观察到上下文行为异常,请检查是否有其他已安装扩展拦截了 `context` 事件。
 
+## 宿主支持
+
+billion-context-pi 面向 **Pi** 编码代理(`@earendil-works/pi-coding-agent`)构建,并在会话开始时检测宿主——完整的「客户端 → 包」对照表见[该选哪个?](#该选哪个):
+
+- **Pi** — 完全支持。
+- **OMP(`can1357/oh-my-pi`)** — **不支持。** OMP 的进程内会话 API 与 Pi 不同,扩展注入的压缩引用可能与会话的真实引用漂移失步,导致 `compress` 调用失败,报错 `does not exist in this session`(issue [#234](https://github.com/ranxianglei/billion-context-pi/issues/234))。在 OMP 上,扩展现在会**拒绝服务**:打印警告、禁用 ACP 工具,并保持宿主自身的上下文处理不受影响。
+
+  **请改用 [billion-context](https://github.com/ranxianglei/billion-context)** — 它把同样的压缩流水线运行在服务端代理里,因此引用不会漂移:
+
+  ```bash
+  npm install -g billion-context
+  bili omp   # 让 OMP 通过代理运行
+  ```
+
+  完整说明:[docs/omp.zh-CN.md](./docs/omp.zh-CN.md)。
+
+- **与 [billion-context](https://github.com/ranxianglei/billion-context) 线代理共存** —— 两者同时作用于同一会话会对每个请求双重压缩(token 浪费、嵌套摘要、两套 ref 坐标系)。这会被自动防止:launcher 路径(`bili pi` 等)导出 `BILLION_CONTEXT_PROXY`;模型 `baseUrl` 经代理路由(`…/bili/https://upstream…`)时在会话开始即被检测到 —— 两种情况下 billion-context-pi 都会带警告让位,由代理独占压缩。一个例外:透明模式(流量经 `HTTPS_PROXY` 到达代理、URL 无 `/bili/` 前缀)无法从 URL 识别 —— 此时请在启动 pi 前导出 `BILLION_CONTEXT_PROXY=1`。
+
+- **反向冲突 —— `billion-context` 薄插件抢占 `/acp`。** 如果 [`billion-context`](https://github.com/ranxianglei/billion-context) 内置的 pi 插件也被安装了(`~/.pi/agent/settings.json` 的 `"packages"` 里存在指向某个 `billion-context` 安装目录的条目,例如来自 `bili plugin install pi`),它会注册自己的 `/acp` 命令,而 Pi 没有重复命令防护 —— 哪个生效取决于加载顺序。典型症状:在普通 `pi` 启动下输入 `/acp` 显示 ``bili: no proxy detected (run via `bili <client>` or set a /bili/ baseURL)`` —— 这行字符串由薄插件发出,**不是** billion-context-pi 发出的,而且 pi 并不需要运行 `bili`。修复:该冲突只在你用普通 `pi` 启动时才有实际影响 —— 移除薄插件(`bili plugin remove pi`,或从该设置文件中删除除 `npm:billion-context-pi` 之外的条目),让 `/acp` 由 billion-context-pi 接管;若改用 `bili pi` 启动则无需移除任何东西:launcher 会导出 `BILLION_CONTEXT_PROXY`,billion-context-pi 整体让位(见上一条),两个插件可以并存。注意:`bili plugin install pi` 会静默删除该文件中已有的 `npm:billion-context-pi` 条目且不提示([billion-context#788](https://github.com/ranxianglei/billion-context/issues/788))。
+
 ## 模型工具
 
 | 工具 | 作用 |
@@ -79,9 +133,12 @@ billion-context 通过拦截 Pi 的 `context` 事件接管上下文管理。**Pi
 | `decompress` | 恢复之前压缩的块内容 |
 | `search_context` | 按关键词搜索已压缩块摘要(及可见消息) |
 | `acp_status` | 显示上下文用量、已压缩块、可压缩范围 |
+| `acp_rule` | 记录一条简短、原则性的提醒,穿越压缩保留(可选:`"rules": true`) |
 | `acp_delegate` | 为某个任务派生一个干净上下文的子代理(审查 / 调研 / 实现 / 规划 / 建议) |
 | `acp_delegate_wait` | 阻塞等待委派任务完成(返回结果,否则超时) |
 | `acp_delegate_cancel` | 按 runId 取消正在运行的委派任务 |
+
+`acp_delegate*` 四个工具是可选的:如果你自带子代理扩展,一个 `acp.json` 键即可关闭 —— 见下文*改用你自己的子代理*。`acp_rule` 同样是可选项 —— 默认关闭,在 `acp.json` 中设置 `"rules": true` 启用。
 
 ### acp_delegate — 干净上下文委派
 
@@ -99,12 +156,26 @@ billion-context 通过拦截 Pi 的 `context` 事件接管上下文管理。**Pi
 
 Worker 运行在 Pi 的完整默认工具集上 - 不应用 `--tools` 白名单,因此任何已加载的扩展或自定义工具(如 ACP、LSP、MCP)保持可用。这确保主任务委派能力完整。上表中的 `read, edit, write, bash` 仅反映核心工具。
 
-委派的完整结果保存到文件(`/tmp/acp-delegate/<runId>.out`);工具结果和注入通知只携带**任务标题 + 文件路径**(无预览)- 需要细节时用 `read` 读取。这让父上下文保持精简。
+委派的完整结果保存到文件(`$TMPDIR/acp-delegate/<runId>.out`,默认 `/tmp/acp-delegate/<runId>.out`);工具结果和注入通知只携带**任务标题 + 文件路径**(无预览)- 需要细节时用 `read` 读取。这让父上下文保持精简。
 
 - **交互(TUI)与 RPC 模式**:`async:true`(默认)在后台运行子进程;完成时一条简短通知注入到聊天框。
 - **Print / JSON 模式**(`pi -p`、SDK):`async:true` 自动降级为**同步** — 结果在同一轮作为工具结果返回(父进程一轮后即退出,后台注入会丢失)。
 
 在**交互 TUI** 中,异步运行还会在编辑器下方显示一个实时状态 widget(角色、已运行秒数、任务预览),让你随时知道什么在跑、跑了多久。RPC/print/JSON 模式自动禁用。
+
+#### 改用你自己的子代理
+
+如果你已经在用别的子代理扩展(pi-subagents、pi-lens 等),关掉 ACP 的 delegate,让模型只有一条委派路径。在 `~/.pi/acp.json`(全局)或 `<项目>/.pi/acp.json`(项目级):
+
+```json
+{ "delegate": false }
+```
+
+- 等价对象写法:`{ "delegate": { "enabled": false } }`。
+- **关掉的是什么:**`acp_delegate`、`acp_delegate_wait`、`acp_delegate_cancel` 三个工具,`ACP_DELEGATE NOTIFICATIONS` 系统提示段,以及 `ctrl+alt+f` 快捷键(此时 `/acp-fleet` 会提示 delegate 未启用)。压缩本身不受影响 —— `compress`、`decompress`、`search_context`、`acp_status` 全部保留。
+- **生效时机:**三个工具在会话启动时注册,因此需要**新会话**(或重启 Pi)。系统提示段每回合实时解析,可能在工具之前先消失。
+- 只想去掉提示段、保留工具?设 `{ "delegatePrompt": null }`。
+- Pi 原生的 `--exclude-tools acp_delegate,acp_delegate_wait,acp_delegate_cancel` **不能**替代:它藏起工具,但模型仍会收到描述这些工具的 `ACP_DELEGATE NOTIFICATIONS` 段。请用 `delegate: false`。
 
 ## `/acp` 命令
 
@@ -158,8 +229,9 @@ billion-context-pi 会向 `~/.pi/acp.log`(可用 `ACP_LOG_FILE` 覆盖)写入结
 - `warn` — 值得注意的非致命情况:紧急 nudge 注入、配置加载失败、自动更新网络错误、工具输出被截断、委派结果注入被跳过。
 - `info` — 生命周期事件:会话启动、每轮上下文变换摘要(消息数/token/压缩比/活跃块数)、压缩/解压、delegate 派发与完成、自动更新检查。
 - `debug` —— 仅在 `debug: true` 时额外写入(细粒度的字段级事件)。
+- **Nudge 审计轨迹** — 无论何时注入上下文限制 nudge,一条紧凑的单行记录(如 `[ACP nudge] EMERGENCY 95% · T1 · top range m00120–m00168`)会作为*仅供显示*的会话条目写入——它跨进程重启存活,在 TUI 回滚历史和会话文件中可见,且永远不会发给模型。
 
-每行格式:`<ISO 时间戳> [<级别>] [<范围>] key=value key=value`。文件达到 10 MB 时轮转为 `~/.pi/acp.log.old`。
+每行格式:`<ISO 时间戳> [<级别>] [<范围>] key=value key=value`。多行字段值(如 `nudge-injected` 中的完整 nudge 正文)会被转义(`\n` → 字面量 `\\n`),保证每条日志恰好占**一行物理行**,便于 `grep`。文件达到 10 MB 时轮转为 `~/.pi/acp.log.old`。
 
 ```bash
 tail -f ~/.pi/acp.log                 # 实时观察会话
@@ -172,11 +244,53 @@ grep '\[error\]' ~/.pi/acp.log        # 汇总所有记录的失败
 
 ### 哪些内容会被保护
 
-billion-context 保护三类内容不被压缩:
+billion-context 保护四类内容不被压缩:
 
 1. **永久保护的工具** — `compress` 调用被硬保护(它们是承载关键元数据的;压缩它们会破坏 decompress 和"摘要是历史"的契约)。
 2. **软近期区** — 最后 N 条消息(默认 5)和最后约 5K token 被软保护,让模型保留工作集。来自 `decompress`、`search_context`、`read`、`bash` 的工具结果被**排除**出此区:它们体量大、消费后就该能压缩,所以不该占用保护预算。
 3. **最后一条用户消息** — 始终保护(用户意图必须存活)。
+4. **用户配置的工具保护** — `acp.json` 中的 `protectedTools` / `protectedLatestTools` 硬排除匹配的工具 call+result(全历史 vs 仅最近一次;见 [CONFIGURATION.zh-CN.md](./CONFIGURATION.zh-CN.md))。
+
+## 会话存储与迁移
+
+billion-context-pi 把每个会话的压缩状态持久化在会话转录文件旁边的一个**旁挂(sidecar)文件**里。每个会话在 Pi 的会话目录(`~/.pi/agent/sessions/`)下都有两个文件:
+
+| 文件 | 内容 |
+|------|------|
+| `<id>.jsonl` | 会话转录(消息、工具调用) |
+| `<id>.jsonl.acp.json` | ACP 压缩状态(压缩块、消息引用、nudge 与统计) |
+
+`.acp.json` 旁挂文件承载了你的压缩块。没有它,会话就会以完整原始历史运行,直到 ACP 再次压缩。
+
+### 旁挂文件契约(下游工具)
+
+直接读取 `<sessionFile>.acp.json` 的工具(跨会话检索、记忆层等)依赖以下契约:
+
+- 文件顶层携带 `schemaVersion` 与 `producer`。**缺失 `schemaVersion` 即视为 v1**(契约引入前的旧文件)。遇到未知的*更高*版本意味着字段可能已变化——跳过该文件、记一次日志、绝不改写它。
+- `blocks[]` 条目符合导出的 `BcpBlockV1` 类型(kernel `CompressionBlock` 原样存储);未知的额外字段是增量式的,读取方必须忽略。
+- 文件始终以**原子方式**替换(临时文件 + rename),并发读取方看到的要么是前一个完整文件、要么是后一个完整文件,绝不会读到半截写入。
+
+TypeScript 中通过 `import type { BcpBlockV1 } from "billion-context-pi/contract"` 导入契约;离线校验用的 JSON Schema 以 `billion-context-pi/contract/schema` 子路径发布。无需任何运行时依赖——文件本身仍是唯一事实来源。
+
+### 迁移会话(跨机器拷贝 / 备份恢复)
+
+Pi 内置的导出/导入只搬运**转录**,不搬 ACP 状态。会丢失两样东西:
+
+1. **`.acp.json` 旁挂文件不会被携带。** 因此导入后的会话*没有任何*压缩块:每次 LLM 调用都会重发完整原始历史,直到 nudge 重新压缩 —— 一次性全量重缓存成本 + 上下文膨胀回原始大小。超长会话可能在重新压缩生效前逼近甚至超出模型窗口(本插件激活时 Pi 的原生 compaction 被禁用,ACP 是唯一的上下文管理者)。
+2. **导出会丢弃 `parentSession` 头。** clone/fork 子会话依赖这个头字段来继承父会话的压缩状态;一旦导出,这条链接就断了 —— 即使目标机器上父会话的文件仍然存在。
+
+**要带着完整压缩状态迁移会话,请把两个文件一起拷贝**(它们共享同一基础名):
+
+```bash
+# 成对拷贝
+cp <id>.jsonl <id>.jsonl.acp.json  <目标目录>/
+# ... 或整体备份 / 恢复整个目录
+cp -r ~/.pi/agent/sessions  <备份>/pi-sessions
+```
+
+在目标机器上把它们放回彼此相邻的位置。对 clone/fork 子会话,还要带上父会话的那一对,以便 `parentSession` 能解析。
+
+> 根治方案 —— 让宿主在 import/export 时一并携带旁挂文件并保留 `parentSession` —— 属于上游 pi-coding-agent,已在 issue [#299](https://github.com/ranxianglei/billion-context-pi/issues/299) 跟踪。落地前请手动成对拷贝。
 
 ## 基于 acp-kernel
 

@@ -9,10 +9,17 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { Api, Context, Message, Model, Tool } from "@earendil-works/pi-ai";
 import type { AcpRuntime } from "./runtime.js";
+import { MAX_COMPRESS_ATTEMPTS, isPiHost, retryBreakerKey } from "./runtime.js";
+import { isDeclaredForkHost } from "./host.js";
 import { debug, logError, logInfo, logThrow, logWarn } from "./log.js";
-import { estimateTokens, collectCoveredMessageIds, calibrateTokens, collectImageTokens, modelSupportsImages } from "./tokens.js";
-import { defaultCountTokens, parseCompressArgs, resolveBoundaries, type CompressionBlock, type CompressParseDiagnostics, type CoreMessage, type CompressionState } from "acp-kernel";
+import { estimateTokens, collectCoveredMessageIds, collectImageTokens, modelSupportsImages, adjustedTokenCount } from "./tokens.js";
+import { applyToolPromptOverrides, type ToolPromptOverrides } from "./surface.js";
+import { resolveHostSession } from "./config.js";
+import { defaultCountTokens, parseCompressArgs, resolveBoundaries, viableRanges, formatRanges, type CompressionBlock, type CompressionState, type CompressParseDiagnostics, type CoreMessage, type NudgeDecision } from "acp-kernel";
+import { countUnicodeEscapes, findUnverifiableUserQuote, sanitizeSummary } from "./summary-sanitize.js";
+import { assertNotAborted } from "./abort.js";
 import { getSystemPromptText } from "./compat.js";
+import { UNSUPPORTED_HOST_MESSAGE } from "./omp.js";
 import { buildSummarizeSystemPrompt, truncateContent, SESSION_MODEL_REF, type ResolvedCompressionModel } from "./compress-model.js";
 
 function formatK(n: number): string {
@@ -63,8 +70,8 @@ function compressDescription(ref: string | undefined): string {
   );
 }
 
-export function makeCompressTool(runtime: AcpRuntime, pi: ExtensionAPI): ToolDefinition<typeof CompressParams> {
-  return {
+export function makeCompressTool(runtime: AcpRuntime, pi: ExtensionAPI, overrides?: ToolPromptOverrides): ToolDefinition<typeof CompressParams> {
+  return applyToolPromptOverrides({
     name: "compress",
     label: "Compress",
     get description() {
@@ -78,17 +85,18 @@ export function makeCompressTool(runtime: AcpRuntime, pi: ExtensionAPI): ToolDef
       "Never compress content the current step is actively using.",
     ],
     parameters: CompressParams,
-    async execute(toolCallId, params, _signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {
+    async execute(toolCallId, params, signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {
+      if (runtime.refused) return { details: undefined, content: [{ type: "text", text: runtime.refusalMessage ?? UNSUPPORTED_HOST_MESSAGE }] };
       let result: string;
       try {
-        result = await handleCompress(params as CompressArgs, runtime, ctx, toolCallId, collectActiveTools(pi));
+        result = await handleCompress(params as CompressArgs, runtime, ctx, toolCallId, signal, collectActiveTools(pi));
       } catch (e) {
         logThrow("compress", e, { sid: ctx.sessionManager.getSessionId(), ranges: typeof (params as CompressArgs).content === "string" ? "string" : ((params as CompressArgs).content?.length ?? 0) });
         throw e;
       }
       return { details: undefined, content: [{ type: "text", text: result }] };
     },
-  };
+  }, overrides);
 }
 
 /** The active tools as pi-ai Tool[] — reused as the dedicated compression
@@ -116,13 +124,128 @@ type RangeEntry = Static<typeof RangeSpec>;
 // the failure cap (a returned string would land as isError:false and count
 // as neutral). An empty array passes through (the call site returns "No
 // ranges provided.").
-function normalizeRanges(args: CompressArgs): RangeEntry[] | string {
-  const { ranges, diagnostics } = parseCompressArgs(args);
+export function normalizeRanges(args: CompressArgs): RangeEntry[] | string {
+  const effective = repairContentTail(repairBareRangeObjects(args));
+  const { ranges, diagnostics } = parseCompressArgs(effective);
   if (ranges.length === 0) {
-    if (Array.isArray(args.content) && args.content.length === 0) return [];
-    return describeDiagnostics(diagnostics, args.content);
+    if (Array.isArray(effective.content) && effective.content.length === 0) return [];
+    return describeDiagnostics(diagnostics, effective.content);
   }
   return ranges.map((r) => ({ startId: r.startRef, endId: r.endRef, summary: r.summary, topic: r.topic }));
+}
+
+// Qwen-family models in non-strict tool-call mode sometimes emit the `content`
+// array as a JSON-encoded string whose LAST entry object is missing its closing
+// `}` (tail `"]` instead of `"}]`). The kernel's lenient parser then drops that
+// last range — or every range, when it is the only one — and reports a
+// misleading "truncated"/"no-valid-ranges" diagnostic. Repair the brace before
+// delegating so the whole array parses. Args are returned unchanged when the
+// repair does not apply.
+function repairContentTail(args: CompressArgs): CompressArgs {
+  if (typeof args.content !== "string") return args;
+  const repaired = tailRepair(args.content);
+  return repaired === undefined ? args : { ...args, content: repaired };
+}
+
+// Deterministic tail-repair: if the trimmed string ends with `"]` and the char
+// before it is a closing `"`, retry the parse with `"}]` appended. A valid JSON
+// array never still parses after appending `}`, so this has no false positives.
+export function tailRepair(s: string): string | undefined {
+  const t = s.trimEnd();
+  if (!t.endsWith("]")) return undefined;
+  const body = t.slice(0, -1).trimEnd();
+  if (!body.endsWith('"')) return undefined;
+  const candidate = body + "}]";
+  try {
+    if (Array.isArray(JSON.parse(candidate))) return candidate;
+  } catch {
+    // not the missing-brace case
+  }
+  return undefined;
+}
+
+// Small models in non-strict tool-call mode sometimes emit `content` as a
+// string of bare range objects WITHOUT the wrapping array brackets — one
+// object (`{"startId":...}`) or several concatenated (`{...}{...}`, missing
+// the outer `[]` and/or the commas between entries). The kernel parser only
+// salvages entries from a `[`-anchored array, so these payloads die with a
+// misleading "must be an ARRAY" / "failed to parse" diagnostic that the model
+// cannot act on (#480). Extract the top-level objects and re-wrap them as a
+// proper array before delegating.
+function repairBareRangeObjects(args: CompressArgs): CompressArgs {
+  if (typeof args.content !== "string") return args;
+  const repaired = arrayWrapRepair(args.content);
+  return repaired === undefined ? args : { ...args, content: repaired };
+}
+
+// Deterministic re-wrap: collect the balanced `{...}` segments at depth 0
+// (outside strings), keep those that validate as range specs, and return them
+// as a JSON array string. Returns undefined when nothing range-shaped is
+// found at top level, leaving accurate error reporting to the normal path.
+export function arrayWrapRepair(s: string): string | undefined {
+  const objects = extractTopLevelObjects(s)
+    .map((candidate): unknown => {
+      try {
+        return JSON.parse(candidate);
+      } catch {
+        return undefined;
+      }
+    })
+    .filter((o): o is Record<string, unknown> => isRangeLikeObject(o));
+  if (objects.length === 0) return undefined;
+  return JSON.stringify(objects);
+}
+
+// Balanced `{...}` segments at depth 0 (outside strings). Stray closers
+// resync instead of aborting, so garbage between or before objects is skipped;
+// `[`-anchored arrays never yield candidates (their `{` sit at depth ≥ 1).
+function extractTopLevelObjects(s: string): string[] {
+  const out: string[] = [];
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  let start = -1;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s.charAt(i);
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+    if (ch === "{" || ch === "[") {
+      if (depth === 0 && ch === "{" && start === -1) start = i;
+      depth++;
+      continue;
+    }
+    if (ch === "}" || ch === "]") {
+      depth--;
+      if (depth < 0) {
+        depth = 0;
+        start = -1;
+        continue;
+      }
+      if (depth === 0 && start !== -1) {
+        out.push(s.slice(start, i + 1));
+        start = -1;
+      }
+    }
+  }
+  return out;
+}
+
+// Same field aliases the kernel's validateEntry accepts — the repair must not
+// reject shapes the parser would have accepted.
+function isRangeLikeObject(o: unknown): o is Record<string, unknown> {
+  if (o === null || typeof o !== "object" || Array.isArray(o)) return false;
+  const r = o as Record<string, unknown>;
+  const hasStart = typeof r.startId === "string" || typeof r.startRef === "string" || typeof r.messageId === "string";
+  const hasEnd = typeof r.endId === "string" || typeof r.endRef === "string" || typeof r.messageId === "string";
+  return hasStart && hasEnd && typeof r.summary === "string" && r.summary.length > 0;
 }
 
 function describeDiagnostics(diagnostics: CompressParseDiagnostics, content: CompressArgs["content"]): string {
@@ -136,14 +259,42 @@ function describeDiagnostics(diagnostics: CompressParseDiagnostics, content: Com
   if (diagnostics.invalidItems > 0) {
     return `${base}; ${diagnostics.invalidItems} entr${diagnostics.invalidItems === 1 ? "y was" : "ies were"} dropped as invalid. Each range must be an object with string fields startId, endId, summary.`;
   }
+  const parseErr = jsonParseError(content);
+  if (parseErr !== undefined) {
+    return `${base}; the JSON failed to parse: ${parseErr}. Fix the malformed JSON (e.g. a missing closing brace or quote) and retry.`;
+  }
   return `${base}. content must be an ARRAY of {startId, endId, summary} objects.`;
 }
 
-/** Panel block count ("… (~N reclaimed, B blocks)"), or -1 for non-panels. */
-function compressPanelBlocks(text: string): number {
+// Short diagnostic for why a JSON-shaped string fails to parse, or undefined
+// when it parses fine or is not JSON-shaped. Gives the model a retryable signal
+// (the parser's own position) instead of the misleading "must be an ARRAY".
+function jsonParseError(content: CompressArgs["content"]): string | undefined {
+  if (typeof content !== "string") return undefined;
+  const t = content.trim();
+  if (!t.startsWith("{") && !t.startsWith("[")) return undefined;
+  try {
+    JSON.parse(t);
+    return undefined;
+  } catch (e) {
+    return e instanceof Error ? e.message : String(e);
+  }
+}
+
+/** Panel block count, or -1 for non-panels. Accepts BOTH the legacy
+ *  "… B blocks)" form (0-block runs; historical transcripts replayed by
+ *  index/floor-stale) and the #376 "… blocks: b3=m00044–m00097*, …" form. */
+export function compressPanelBlocks(text: string): number {
   if (!text.trimStart().startsWith("▣ ACP |")) return -1;
   const m = text.match(/, (\d+) blocks?\)/);
-  return m ? Number(m[1]) : -1;
+  if (m) return Number(m[1]);
+  // Count span-form entries by their label tokens (bN= / bN(Tn)=), NOT by
+  // capturing to the next ")" — tier labels carry a ")" that would truncate a
+  // naive capture and undercount any batch whose first new block is T2/T3.
+  const idx = text.indexOf(", blocks: ");
+  if (idx === -1) return -1;
+  const header = text.slice(idx).split("\n", 1)[0] ?? "";
+  return header.match(/\bb\d+(?:\(T\d+\))?=/g)?.length ?? 0;
 }
 
 /** Success = completed run that created >= 1 block (partial range errors
@@ -159,6 +310,149 @@ export function isCompressSuccessText(text: string): boolean {
  *  the retry cap applies. Non-panels ("No ranges provided.") stay neutral. */
 export function isCompressNoopText(text: string): boolean {
   return compressPanelBlocks(text) === 0;
+}
+
+// Issue #250 loop breaker: small models repeat an identical compress call with
+// refs that can NEVER resolve (stale/consumed/unknown) — the kernel rejects
+// every time and the model just retries the same dead refs for minutes. A
+// range is "dead" when the kernel's boundary resolver will reject it no matter
+// what summary is written, so repeating the same dead range set is guaranteed
+// to fail. After DEAD_REPEAT_REJECT identical failures we stop running the
+// kernel and return a hard rejection that lists the LIVE compressible ranges
+// (from the nudge decision already computed in this call), so the model gets
+// usable refs without having to call acp_status.
+const DEAD_REPEAT_REJECT = 2;
+
+function paddedRef(n: number): string {
+  return `m${String(n).padStart(5, "0")}`;
+}
+
+// issue #376: report each new block's ACTUAL coverage, not the requested
+// startId/endId — kernel protection exclusions and turn-integrity rollback
+// can shrink a range post-hoc, so inferring coverage from the request drifts
+// the model's block ledger against nudge ranges. Span = first/last ref of
+// effectiveMessageIds; `*` marks spans containing still-existing refs the
+// block does not cover (excluded — see the ⚠️ warnings line); tier ≥ 2 marked.
+export function blockSpanLabel(block: CompressionBlock, state: CompressionState): string {
+  const nums: number[] = [];
+  for (const id of block.effectiveMessageIds) {
+    const ref = state.messageRefs.byRaw[id];
+    if (!ref || !ref.startsWith("m")) continue;
+    const n = Number(ref.slice(1));
+    if (Number.isInteger(n) && n > 0) nums.push(n);
+  }
+  const tierMark = block.tier >= 2 ? `(T${block.tier})` : "";
+  if (nums.length === 0) return `${block.blockId}${tierMark}`;
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (const n of nums) {
+    if (n < lo) lo = n;
+    if (n > hi) hi = n;
+  }
+  const present = new Set(nums);
+  let star = "";
+  for (let n = lo; n <= hi; n++) {
+    if (!present.has(n) && state.messageRefs.byRef[paddedRef(n)] !== undefined) {
+      star = "*";
+      break;
+    }
+  }
+  const span = lo === hi ? paddedRef(lo) : `${paddedRef(lo)}–${paddedRef(hi)}`;
+  return `${block.blockId}${tierMark}=${span}${star}`;
+}
+
+// #535 P1: one-line integrity fingerprint per new/updated block — cheap
+// head/tail excerpt + char length so the model can verify its summary was
+// stored intact without decompressing.
+export function summaryFingerprintLine(blockId: string, summary: string): string {
+  const head = summary.slice(0, 30).replace(/\r?\n/g, " ");
+  const tail = summary.slice(-100).replace(/\r?\n/g, " ");
+  return ` · ${blockId} summary ${summary.length}ch · head "${head}" … tail "${tail}"`;
+}
+
+function blockHasVisibleAnchor(block: CompressionBlock, visibleIds: Set<string>): boolean {
+  if (visibleIds.has(`acp_summary_${block.blockId}`)) return true;
+  return block.effectiveMessageIds.some((id) => visibleIds.has(id));
+}
+
+function hasActiveOwner(state: CompressionState, ownedIds: string[], visibleIds: Set<string>): boolean {
+  const owned = new Set(ownedIds);
+  for (const block of state.blocks) {
+    if (!block.active) continue;
+    const inheritsOwned = block.directBlockIds.some((childId) => {
+      const child = state.blocks.find((c) => c.blockId === childId);
+      return child !== undefined && child.effectiveMessageIds.some((id) => owned.has(id));
+    });
+    if (inheritsOwned && blockHasVisibleAnchor(block, visibleIds)) return true;
+  }
+  return false;
+}
+
+function refIsDead(ref: string, state: CompressionState, visibleIds: Set<string>): boolean {
+  const trimmed = ref.trim();
+  if (/^b\d+$/i.test(trimmed)) {
+    const block = state.blocks.find((b) => b.blockId.toLowerCase() === trimmed.toLowerCase());
+    if (!block) return true;
+    if (block.active && blockHasVisibleAnchor(block, visibleIds)) return false;
+    return !hasActiveOwner(state, block.effectiveMessageIds, visibleIds);
+  }
+  const m = trimmed.match(/^m(\d+)$/i);
+  if (!m) return true;
+  const rawId = state.messageRefs.byRef[trimmed] ?? state.messageRefs.byRef[paddedRef(Number(m[1]))];
+  if (!rawId) return true;
+  if (visibleIds.has(rawId)) return false;
+  return !hasActiveOwner(state, [rawId], visibleIds);
+}
+
+// #532: classify one failed range boundary for fork-drift attribution.
+// "live": ref resolves to a content-addressed live-* id (unpersisted tail) —
+// host-view churn territory (#459). "unknown": ref absent from the persisted
+// byRef (pruned stale live ref or cross-generation) — also #459 territory.
+// "persistent-dangling": stable-id ref whose message left the sent view
+// (hide-consumed / orphan hiding, acp-kernel#396) — NOT fork drift.
+// "alive": still resolvable; the range failed for another reason.
+function refDriftSignal(ref: string, state: CompressionState, visibleIds: Set<string>): "live" | "unknown" | "persistent-dangling" | "alive" {
+  const trimmed = ref.trim();
+  if (/^b\d+$/i.test(trimmed)) return "alive";
+  const m = trimmed.match(/^m(\d+)$/i);
+  if (!m) return "unknown";
+  const rawId = state.messageRefs.byRef[trimmed] ?? state.messageRefs.byRef[paddedRef(Number(m[1]))];
+  if (!rawId) return "unknown";
+  if (rawId.startsWith("live-")) return "live";
+  if (!visibleIds.has(rawId) && !hasActiveOwner(state, [rawId], visibleIds)) return "persistent-dangling";
+  return "alive";
+}
+
+function compressibleSnapshotText(nudge: NudgeDecision | undefined): string {
+  const ranges = viableRanges(nudge?.compressibleRanges ?? []);
+  if (ranges.length === 0) {
+    return "No compressible ranges remain — the context is already at its minimum; continue the task without compressing.";
+  }
+  return formatRanges(ranges, []);
+}
+
+function deadRepeatRejectionText(spans: string[], count: number, snapshot: string): string {
+  return [
+    "▣ ACP | 0 → 0 tokens (~0 reclaimed, 0 blocks)",
+    `[ACP] REJECTED — this exact compress call has now failed ${count}× (ranges ${spans.join(", ")}). Those refs are stale: they point at content already compressed into an active block, or at refs that no longer exist. Repeating this call cannot succeed — do not retry it.`,
+    "",
+    "Current compressible ranges (use these refs exactly as listed):",
+    snapshot,
+    "",
+    "If none of these fit, call acp_status for the full picture — or continue the task without compressing.",
+  ].join("\n");
+}
+
+function cappedRejectionText(snapshot: string): string {
+  return [
+    "▣ ACP | 0 → 0 tokens (~0 reclaimed, 0 blocks)",
+    `[ACP] PAUSED — ${MAX_COMPRESS_ATTEMPTS} compress attempts already failed this turn; further compress calls are rejected until the next user message.`,
+    "",
+    "Current compressible ranges (use these refs exactly as listed):",
+    snapshot,
+    "",
+    "Continue the task; compress becomes available again on the next user message.",
+  ].join("\n");
 }
 
 function tier3OnlyRewrite(newBlocks: CompressionBlock[], allBlocks: CompressionBlock[]): string[] | null {
@@ -180,7 +474,28 @@ function tier3OnlyRewrite(newBlocks: CompressionBlock[], allBlocks: CompressionB
   return spans;
 }
 
-async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: ExtensionContext, toolCallId: string | undefined, tools: Tool[]): Promise<string> {
+// #344: the rewrite guard stops the loop but its recovery hint only covers
+// message-type ranges. When the session's actionable mass is tier blocks, name
+// them so repetition-prone models get a concrete next action instead of
+// hunting (and re-hitting the guard).
+export function tierReadyHint(state: CompressionState, config: ReturnType<AcpRuntime["configFor"]>): string {
+  if (!config.tiers.enabled) return "";
+  const active = state.blocks.filter((b) => b.active);
+  const first = (bs: CompressionBlock[]) => bs[0]?.blockId ?? "";
+  const last = (bs: CompressionBlock[]) => bs[bs.length - 1]?.blockId ?? "";
+  const t2 = active.filter((b) => b.tier === 2);
+  if (t2.length >= config.tiers.tier3Trigger) {
+    return `Actionable now: condense tier-2 blocks ${first(t2)}..${last(t2)} into a single tier-3 block (compress({ content: [{ startId: "${first(t2)}", endId: "${last(t2)}", summary: "..." }] })).`;
+  }
+  const t1 = active.filter((b) => b.tier === 1);
+  if (t1.length >= config.tiers.tier2Trigger) {
+    return `Actionable now: distill tier-1 blocks ${first(t1)}..${last(t1)} into a single tier-2 block (compress({ content: [{ startId: "${first(t1)}", endId: "${last(t1)}", summary: "..." }] })).`;
+  }
+  return "";
+}
+
+async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: ExtensionContext, toolCallId?: string, signal?: AbortSignal, tools: Tool[] = []): Promise<string> {
+  assertNotAborted(signal);
   const maybeRanges = normalizeRanges(args);
   // Argument errors throw (not return): pi-agent-core only sets isError:true
   // on THROWN tool errors, and the failure counter keys off isError. A
@@ -190,6 +505,7 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
   const ranges = maybeRanges;
   if (ranges.length === 0) return "No ranges provided.";
   const { state: initialState, coreMessages, entries } = await runtime.stateFor(ctx);
+  assertNotAborted(signal);
   const config = runtime.configFor(ctx);
   // Sent-view arbitration — the same scale as the context transform and
   // acp_status (see src/index.ts): never the session-tree tokenCount.
@@ -198,19 +514,51 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
   const systemPromptTokens = systemPromptText ? defaultCountTokens(systemPromptText) : 0;
   const imageTokens = collectImageTokens(entries, modelSupportsImages(ctx.model));
   const sentTokens = estimateTokens(coreMessages, collectCoveredMessageIds(initialState), imageTokens) + systemPromptTokens;
+  // Same view-based recount as the context transform (issue #289): with blocks
+  // present, the raw-view count can sit far above the sent view and mis-scale
+  // this pass's emergency-truncate band before boundary resolution.
+  const firstTokenCount = adjustedTokenCount(runtime.core, coreMessages, initialState, config, sentTokens, imageTokens, systemPromptTokens);
   const turn = runtime.core.processTurn({
     messages: coreMessages,
     state: initialState,
     config,
-    tokenCount: calibrateTokens(sentTokens, runtime.density.densityFor(modelId)),
+    tokenCount: firstTokenCount,
   });
   const state = turn.state;
   const messages = turn.messages;
-  // Display-layer density alignment (doc §3.3): beforeTokens is calibrated to
-  // the same scale as the kernel's injected countTokens (which already carries
-  // density), so the numbers the model sees match real usage.
-  const density = runtime.density.densityFor(modelId);
-  const beforeTokens = calibrateTokens(estimateTokens(messages, collectCoveredMessageIds(state), imageTokens), density);
+  const sid = ctx.sessionManager.getSessionId();
+  // Issue #309: normalize at ingest — the kernel stores/renders summaries
+  // verbatim, so double-escaped \uXXXX runs would persist into every future
+  // prompt. Unverifiable user-quote claims are logged as evidence only.
+  const sanitizedRanges = ranges.map((r) => {
+    const span = `${r.startId}..${r.endId}`;
+    const s = sanitizeSummary(r.summary);
+    if (s.unescaped) {
+      debug.event("compress", { sid, event: "summary-unescaped", span, escapes: countUnicodeEscapes(r.summary), beforeLen: r.summary.length, afterLen: s.text.length });
+    }
+    const unverifiedQuote = findUnverifiableUserQuote(s.text);
+    if (unverifiedQuote !== null) {
+      logWarn("compress", { sid, event: "summary-unverifiable-quote", span, claim: unverifiedQuote });
+    }
+    return s.text === r.summary ? r : { ...r, summary: s.text };
+  });
+  // #453: stable persisted-boundary key — must match the key the context
+  // transform records outcomes under (retryBreakerKey); a merged-view key
+  // churns under fork hosts and would never see the latched cap.
+  const turnKey = retryBreakerKey(ctx.sessionManager, resolveHostSession(runtime.adapter)) ?? sid;
+  const snapshot = compressibleSnapshotText(turn.nudge);
+  if (runtime.compressRetryCappedFor(sid, turnKey)) {
+    logWarn("compress", { sid, event: "capped-reject", turnKey });
+    return cappedRejectionText(snapshot);
+  }
+  const visibleIds = new Set(messages.map((m) => m.id));
+  const deadSpans = ranges
+    .filter((r) => refIsDead(r.startId, state, visibleIds) || refIsDead(r.endId, state, visibleIds))
+    .map((r) => `${r.startId}..${r.endId}`);
+  const allDead = deadSpans.length === ranges.length;
+  // beforeTokens on the same CJK-aware scale as the kernel's countTokens, so
+  // "X → Y (~Z reclaimed)" compares like-for-like.
+  const beforeTokens = estimateTokens(messages, collectCoveredMessageIds(state), imageTokens);
   const summaryMaxChars = args.summaryMaxChars;
   const topLevelTopic = args.topic;
 
@@ -296,7 +644,6 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
   debug.event("compress-in", {
     sid: ctx.sessionManager.getSessionId(),
     modelId,
-    density,
     ranges: ranges.length,
     spans: ranges.map((r) => ({ span: `${r.startId}..${r.endId}`, summaryLen: r.summary.length, summary: r.summary, topic: r.topic ?? topLevelTopic ?? null })),
     blocksBefore: state.blocks.length,
@@ -304,14 +651,22 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
     beforeMsgCount: messages.length,
     beforeTokens,
   });
+  // #540: select changed blocks by before/after runId diff — every
+  // applyCompression assigns a fresh runId to both NEW and REFOLDED blocks,
+  // while a refold keeps its original array position. A tail slice
+  // (slice(-blocksCreated)) mislabels a non-tail refolded block (e.g. refold
+  // of b1 in [b1,b2,b3] would present b3's stale summary as the new one).
+  const beforeRunIds = new Map(state.blocks.map((b) => [b.blockId, b.runId]));
   const applied = runtime.core.applyCompression({
-    ranges: ranges.map((r) => ({ startRef: r.startId, endRef: r.endId, summary: r.summary, topic: r.topic ?? topLevelTopic, summaryMaxChars, compressCallId: toolCallId })),
+    ranges: sanitizedRanges.map((r) => ({ startRef: r.startId, endRef: r.endId, summary: r.summary, topic: r.topic ?? topLevelTopic, summaryMaxChars, compressCallId: toolCallId })),
     messages,
     state,
     config,
   });
+  assertNotAborted(signal);
+  const changedBlocks = applied.state.blocks.filter((b) => beforeRunIds.get(b.blockId) !== b.runId);
   const rewriteSpans = applied.result.blocksCreated > 0
-    ? tier3OnlyRewrite(applied.state.blocks.slice(-applied.result.blocksCreated), applied.state.blocks)
+    ? tier3OnlyRewrite(changedBlocks, applied.state.blocks)
     : null;
   if (rewriteSpans) {
     await runtime.save(state, ctx);
@@ -320,28 +675,43 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
       event: "tier3-rewrite-rejected",
       spans: rewriteSpans,
     });
+    const hint = tierReadyHint(state, config);
     throw new Error(
       `Range ${rewriteSpans.join(", ")} only re-condenses terminal tier-3 block(s) — T3 is the highest tier, so rewriting it reclaims nothing and can repeat forever (dog/billion-context-pi#3). Nothing was compressed. ` +
+        (hint ? `${hint} ` : "") +
         `Use search_context or decompress to retrieve details, or pick a range containing uncompressed messages (acp_status lists compressible ranges).`,
     );
   }
   await runtime.save(applied.state, ctx);
   const { blocksCreated, tokensCompressed, errors, warnings } = applied.result;
+  if (blocksCreated > 0) {
+    runtime.clearDeadCompress(sid);
+  } else if (allDead) {
+    const count = runtime.noteDeadCompress(sid, ranges.map((r) => `${r.startId}..${r.endId}`).join("|"));
+    if (count >= DEAD_REPEAT_REJECT) {
+      logWarn("compress", { sid, event: "dead-range-reject", count, spans: deadSpans });
+      return deadRepeatRejectionText(deadSpans, count, snapshot);
+    }
+  }
 
   // Re-measure the post-compression sent view on the SAME scale as beforeTokens
   // (post-processTurn view: visible text + every active block's summary anchor
   // + ref-tag overhead), so "X → Y (~Z reclaimed)" compares like-for-like —
   // including the new block's own summary, which the model will pay for next.
+  // Post-compression count: feeding the stale pre-compression sentTokens would
+  // mis-scale this pass's emergency-truncate band (threshold 0.95) and skew
+  // afterTokens (issue #289).
+  const postSentTokens = adjustedTokenCount(runtime.core, coreMessages, applied.state, config, estimateTokens(coreMessages, collectCoveredMessageIds(applied.state), imageTokens) + systemPromptTokens, imageTokens, systemPromptTokens);
   const afterTurn = runtime.core.processTurn({
     messages: coreMessages,
     state: applied.state,
     config,
-    tokenCount: calibrateTokens(sentTokens, density),
+    tokenCount: postSentTokens,
   });
-  const afterTokens = calibrateTokens(estimateTokens(afterTurn.messages, collectCoveredMessageIds(applied.state), imageTokens), density);
+  const afterTokens = estimateTokens(afterTurn.messages, collectCoveredMessageIds(applied.state), imageTokens);
   const reclaimed = Math.max(0, beforeTokens - afterTokens);
 
-  const newBlocks = applied.state.blocks.slice(-blocksCreated);
+  const newBlocks = changedBlocks;
   debug.event("compress-out", {
     sid: ctx.sessionManager.getSessionId(),
     blocksCreated,
@@ -370,15 +740,50 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
   });
   if (errors.length > 0) {
     logError("compress", { sid: ctx.sessionManager.getSessionId(), event: "errors", count: errors.length, errors: errors.slice(0, 5) });
+    // Residual drift signal (#454/#459): with content-stable live ids,
+    // ref-resolution failures on a declared fork host mean the host rewrote or
+    // shrank its in-flight view (see mergeLiveEntries in runtime.ts). Attribute
+    // it in support logs so "does not exist" spam is not misread as model
+    // misbehavior. #532: only live-*/unresolvable refs implicate the host view;
+    // persistent refs left dangling by sent-view hiding (acp-kernel#396) get
+    // their own event so kernel-side orphan hiding is not counted as #459.
+    if (blocksCreated === 0 && isDeclaredForkHost() && !isPiHost(ctx.sessionManager)
+      && /does not exist|cannot be anchored|is unknown|unknown refs/i.test(errors.join(" "))) {
+      const signals = ranges.flatMap((r) => [
+        refDriftSignal(r.startId, state, visibleIds),
+        refDriftSignal(r.endId, state, visibleIds),
+      ]);
+      if (signals.includes("live") || signals.includes("unknown")) {
+        logWarn("compress", { sid, event: "fork-ref-drift-suspected", seeIssue: "#459", errors: errors.slice(0, 3) });
+      } else if (signals.includes("persistent-dangling")) {
+        logWarn("compress", { sid, event: "anchor-rejected-hidden-orphan", errors: errors.slice(0, 3) });
+      }
+    }
   }
   if (warnings.length > 0) {
     logWarn("compress", { sid: ctx.sessionManager.getSessionId(), event: "warnings", count: warnings.length, warnings: warnings.slice(0, 5) });
   }
 
-  const lines = [`▣ ACP | ${formatK(beforeTokens)} → ${formatK(afterTokens)} tokens (~${formatK(reclaimed)} reclaimed, ${blocksCreated} block${blocksCreated > 1 ? "s" : ""})`];
+  const spanClause = blocksCreated > 0
+    ? `blocks: ${newBlocks.map((b) => blockSpanLabel(b, applied.state)).join(", ")}`
+    : "0 blocks";
+  const lines = [`▣ ACP | ${formatK(beforeTokens)} → ${formatK(afterTokens)} tokens (~${formatK(reclaimed)} reclaimed, ${spanClause})`];
+  if (blocksCreated > 0) {
+    for (const b of newBlocks) lines.push(summaryFingerprintLine(b.blockId, b.summary));
+  }
   if (compressionNote) lines.push((compressionWarn ? "⚠️ " : "ℹ️ ") + compressionNote);
   if (warnings.length > 0) lines.push("⚠️ " + warnings.join("; "));
   if (errors.length > 0) lines.push("Errors: " + errors.join("; "));
+  // #420: carry the post-compression snapshot so a same-turn follow-up
+  // compress has its refs without a planning acp_status call. Computed from
+  // afterTurn (processTurn over the applied state), so the list reflects
+  // what actually remains — not the pre-fold view.
+  if (blocksCreated > 0) {
+    const afterSnapshot = compressibleSnapshotText(afterTurn.nudge);
+    if (!afterSnapshot.startsWith("No compressible")) {
+      lines.push("Current compressible ranges (use these refs exactly as listed):\n" + afterSnapshot);
+    }
+  }
   return lines.join("\n");
 }
 

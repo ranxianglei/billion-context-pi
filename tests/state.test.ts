@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { SessionStateStore, readParentSessionPath } from "../src/state.js";
@@ -249,6 +249,51 @@ test("no parentSession in header → fresh state even with empty blocks", async 
   await rm(dir, { recursive: true, force: true });
 });
 
+// issue #322: file-less (in-memory) sessions — pi-subagents SessionManager.inMemory()
+// with rememberAgents:false → getSessionFile() === undefined. save() used to return
+// before updating the in-process cache, so every successful compress was dropped and
+// the next turn reloaded the pristine initial state (blocks=0, nextBlockId=1).
+test("in-memory session: save then load round-trips state without a session file", async () => {
+  const store = new SessionStateStore();
+  const initial = await store.load(undefined, "in-memory-sid");
+  assert.equal(initial.blocks.length, 0);
+  assert.equal(initial.nextBlockId, 1);
+
+  const compressed = { ...initial };
+  compressed.blocks.push(makeBlock("b1"));
+  compressed.nextBlockId = 2;
+
+  await store.save(compressed, undefined, "in-memory-sid");
+  const reloaded = await store.load(undefined, "in-memory-sid");
+
+  assert.equal(reloaded.blocks.length, 1);
+  assert.equal(reloaded.blocks[0]!.blockId, "b1");
+  assert.equal(reloaded.nextBlockId, 2, "nextBlockId must not reset across reloads");
+});
+
+test("in-memory sessions: distinct sessionIds stay isolated", async () => {
+  const store = new SessionStateStore();
+  const stateA = await store.load(undefined, "sid-A");
+  const stateB = await store.load(undefined, "sid-B");
+
+  const updatedA = { ...stateA };
+  updatedA.blocks.push(makeBlock("bA"));
+  updatedA.nextBlockId = 2;
+  const updatedB = { ...stateB };
+  updatedB.blocks.push(makeBlock("bB"));
+  updatedB.nextBlockId = 3;
+
+  await store.save(updatedA, undefined, "sid-A");
+  await store.save(updatedB, undefined, "sid-B");
+
+  const reA = await store.load(undefined, "sid-A");
+  const reB = await store.load(undefined, "sid-B");
+  assert.deepEqual(reA.blocks.map((b) => b.blockId), ["bA"]);
+  assert.deepEqual(reB.blocks.map((b) => b.blockId), ["bB"]);
+  assert.equal(reA.nextBlockId, 2);
+  assert.equal(reB.nextBlockId, 3);
+});
+
 test("live ref origins remain isolated across interleaved sessions", async () => {
   const dir = await tempDir();
   const fileA = path.join(dir, "a.session.json");
@@ -266,4 +311,45 @@ test("live ref origins remain isolated across interleaved sessions", async () =>
   assert.deepEqual(store.getLiveRefOrigins(fileA, "a"), [{ rawId: "live-1", identity: "A" }]);
   assert.deepEqual(store.getLiveRefOrigins(fileB, "b"), [{ rawId: "live-0", identity: "B" }]);
   await rm(dir, { recursive: true, force: true });
+});
+
+test("SessionStateStore round-trips activePack through the sidecar", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "acp-state-pack-"));
+  const file = path.join(dir, "session.jsonl");
+  try {
+    const store = new SessionStateStore();
+    await store.load(file, "s1");
+    store.setActivePack(file, "s1", "lean");
+    await store.save(createInitialState(), file, "s1");
+    const raw = JSON.parse(await readFile(file + ".acp.json", "utf8")) as { activePack?: string };
+    assert.equal(raw.activePack, "lean");
+    const reloaded = new SessionStateStore();
+    await reloaded.load(file, "s1");
+    assert.equal(reloaded.getActivePack(file, "s1"), "lean");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("SessionStateStore reload preserves rules, nextRuleId, absorbed, terminalStreak (kernel 0.0.80+ fields)", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "acp-state-fields-"));
+  const file = path.join(dir, "session.jsonl");
+  try {
+    const state = createInitialState();
+    state.rules.push({ id: "rule1", text: "keep exact file paths" });
+    state.nextRuleId = 2;
+    state.absorbed.push({ toolCallId: "call-1", callMessageId: "msg-1", resultMessageId: "msg-2", summary: "tool output absorbed", tokensReclaimed: 1234 });
+    state.terminalStreak = 3;
+    const store = new SessionStateStore();
+    await store.save(state, file, "s1");
+    const reloaded = new SessionStateStore();
+    const loaded = await reloaded.load(file, "s1");
+    assert.deepEqual(loaded.rules, [{ id: "rule1", text: "keep exact file paths" }], "persisted acp_rule records must survive reload");
+    assert.equal(loaded.nextRuleId, 2, "rule-id cursor must survive reload (never re-issued)");
+    assert.equal(loaded.absorbed?.length, 1, "absorb records must survive reload");
+    assert.equal(loaded.absorbed?.[0]?.tokensReclaimed, 1234);
+    assert.equal(loaded.terminalStreak, 3, "terminal-escape streak must survive reload");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

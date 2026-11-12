@@ -86,8 +86,11 @@ test("e2e compress config: a single runtime resolves differently per model (prov
 
 test("e2e compress config: without a config file the kernel defaults apply", async () => {
     const savedHome = process.env.HOME;
+    const savedUserProfile = process.env.USERPROFILE;
     await withConfigDir(undefined, async (cwd) => {
+        // os.homedir() resolves USERPROFILE on Windows, HOME elsewhere — set both.
         process.env.HOME = cwd;
+        process.env.USERPROFILE = cwd;
         const user = await loadUserConfig(cwd);
         assert.deepEqual(user, {}, "no acp.json anywhere (HOME + cwd) → empty user config");
         const runtime = createRuntime({});
@@ -98,11 +101,15 @@ test("e2e compress config: without a config file the kernel defaults apply", asy
         assert.equal(cfg.nudge.growthFloor, 50000, "kernel default growthFloor");
     });
     process.env.HOME = savedHome;
+    process.env.USERPROFILE = savedUserProfile;
 });
 
 // Behavioral: feed the real configFor() output into runtime.core.processTurn()
 // (src/index.ts:142) and assert shouldInject flips with the limit. The nudge
-// needs recommendedRanges > 0, not just a high usage ratio — hence the bulk text.
+// needs EFFECTIVE pending (merged ranges ≥ minCompressRange chars) over the
+// kernel's min-pressure-benefit floor (max(5000, limit×1%) — kernel #198),
+// not just a high usage ratio — hence the bulk text (8K chars/msg keeps every
+// range effective and the 2w-limit pending ≈24K tokens above the 5K floor).
 function compressibleMessages(): CoreMessage[] {
     const msgs: CoreMessage[] = [];
     for (let i = 0; i < 12; i++) {
@@ -110,7 +117,7 @@ function compressibleMessages(): CoreMessage[] {
             id: `h_${i}`,
             role: i % 2 === 0 ? "user" : "assistant",
             contentType: "text",
-            text: `historical detail ${i}. ${"x".repeat(3000)}`,
+            text: `historical detail ${i}. ${"x".repeat(8000)}`,
         });
     }
     return msgs;
@@ -118,8 +125,11 @@ function compressibleMessages(): CoreMessage[] {
 
 test("e2e compress config: a 2w limit fires the compress nudge at 2w tokens; a 100w limit does not", async () => {
     const savedHome = process.env.HOME;
+    const savedUserProfile = process.env.USERPROFILE;
     await withConfigDir(ACP_JSON, async (cwd) => {
+        // os.homedir() resolves USERPROFILE on Windows, HOME elsewhere — set both.
         process.env.HOME = cwd;
+        process.env.USERPROFILE = cwd;
         const runtime = createRuntime({});
         await runtime.reloadConfig(cwd);
         const tokenCount = 20_000;
@@ -145,4 +155,5 @@ test("e2e compress config: a 2w limit fires the compress nudge at 2w tokens; a 1
         assert.ok(!largeTurn.nudge?.shouldInject, "2w tokens at a 100w limit stays under threshold → no compression");
     });
     process.env.HOME = savedHome;
+    process.env.USERPROFILE = savedUserProfile;
 });

@@ -10,7 +10,7 @@
 //      fires before the overflow).
 //   2. ARM an emergency: we force the next context event's usage to >=95% so
 //      the kernel's emergency nudge + tool-result truncate fire immediately,
-//      even if the density-calibrated estimate under-reports the sent view.
+//      even if the estimate under-reports the sent view.
 //
 // This is the extension-side mirror of the proxy's overflow self-heal
 // (billion-context PR #172). Unlike throttle-retry we do NOT rewrite the error
@@ -20,6 +20,8 @@
 // NOTE: the OVERFLOW_MARKER below is deliberately a superset of the
 // OVERFLOW_GUARD in src/throttle-retry.ts (which uses it to AVOID treating an
 // overflow as a throttle). Keep the two in sync when either changes.
+
+import { parsePercent } from "./config.js";
 
 // Detect a context-overflow error. Deliberately does NOT match Bedrock's
 // "too many tokens" throttle (a 429, handled by throttle-retry) — only
@@ -49,6 +51,40 @@ export function inspectOverflowMessage(haystack: string | undefined | null): Ove
   return { isOverflow: true, window: parseOverflowWindow(body), message: body };
 }
 
+// Pi surfaces a provider 4xx whose response body is empty verbatim as the
+// errorMessage: "400 status code (no body)" / "413 (no body)". sglang and
+// other OpenAI-compatible backends return exactly this when the request busts
+// a hard input+max_tokens cap (incident 2026-08-23: a 50k-char bash tool
+// result pushed every subsequent request past the cap; each retry came back
+// "400 status code (no body)" forever, the model never got a successful turn
+// to compress, and the text-marker path above never matched). pi's own
+// classifier DOES treat the text as overflow (pi-stable-ai OVERFLOW_PATTERNS
+// ends with the same anchored regex), but OVERFLOW_MARKER deliberately does
+// not: the SAME no-body text is returned for NON-overflow 4xx (invalid model,
+// malformed request — see the note in messages.ts), so it is a POSSIBLE
+// overflow only, armed by the wiring when OverflowEpisode.onNoBody4xx()
+// corroborates it (usage ratio or consecutive count).
+export const NO_BODY_4XX_MARKER = /^4(?:00|13)\s*(?:status code)?\s*\(no body\)/i;
+
+export function isNoBody4xxError(haystack: string | undefined | null): boolean {
+  const body = (haystack ?? "").trim();
+  return body.length > 0 && NO_BODY_4XX_MARKER.test(body);
+}
+
+/** Corroboration threshold for arming on an ambiguous no-body 4xx: the
+ *  calibrated sent-view estimate must be at least this fraction of the
+ *  effective limit (same basis as the turn log's `pct`). */
+export const NO_BODY_ARM_RATIO = 0.5;
+
+/** Decision returned by OverflowEpisode.onNoBody4xx(). */
+export interface NoBodyDecision {
+  arm: boolean;
+  /** Consecutive no-body 4xx errors since the last successful assistant turn. */
+  consecutive: number;
+  /** Recorded sent-view estimate / effective limit, when both were seen. */
+  ratio: number | null;
+}
+
 function parseOverflowWindow(text: string): number | undefined {
   // Anthropic: "prompt is too long: 130000 tokens > 128000 maximum" -> 128000
   let m = />\s*(\d[\d,]*)\s*(?:tokens?)?\s*maximum/i.exec(text);
@@ -73,16 +109,46 @@ function toTokenNumber(raw: string | undefined): number | undefined {
   return Number.isFinite(n) && n >= 1000 ? n : undefined;
 }
 
+/** Default cap on the output-headroom reservation, as a fraction of the
+ *  context window (issue #207). Reserving the FULL registered max output
+ *  capability halves the effective input budget on models whose maxTokens is a
+ *  large share of the window (e.g. 131072 on a 262144 window → the 75% force-
+ *  compress band fires at ~37% of the full window), while real per-turn
+ *  replies rarely approach that. Capping at 25% keeps the guarantee where it
+ *  matters — any single-turn reply up to the reserved amount still fits at the
+ *  95% emergency threshold — while bounding the budget loss. A reply longer
+ *  than the reservation overflows once; the overflow self-heal (learned window
+ *  + armed emergency) recovers it on the next turn. */
+export const DEFAULT_OUTPUT_HEADROOM_MAX_PCT = 0.25;
+
+/** Resolve the user's `outputHeadroomMaxPct` (ratio or "N%" string) to a
+ *  numeric cap, falling back to DEFAULT_OUTPUT_HEADROOM_MAX_PCT when unset.
+ *  Shared by every headroom call site (context transform, /acp, acp_status)
+ *  so they all measure against the SAME capped limit (issue #207/#267). */
+export function resolveOutputHeadroomCap(value: number | string | undefined): number {
+  return value === undefined ? DEFAULT_OUTPUT_HEADROOM_MAX_PCT : parsePercent(value);
+}
+
 /**
  * Reserve the model's output budget from the context window, so the kernel's
- * nudge/truncate bands sit below (window - maxOutput) and the context always
- * leaves room for the model's reply. This prevents the "context + output >
- * window" overflow on a small window (agents routinely set a large max output).
+ * nudge/truncate bands sit below (window - reserved) and the context leaves
+ * room for the model's reply. This prevents the "context + output > window"
+ * overflow on a small window (agents routinely set a large max output).
+ *
+ * `capPct` bounds the reservation as a fraction of the window: reserved =
+ * min(maxOutput, capPct * window). The default (1) preserves the original
+ * full-capability reservation; the adapter passes DEFAULT_OUTPUT_HEADROOM_MAX_PCT
+ * (or the user's `outputHeadroomMaxPct`) so oversized registered capabilities
+ * no longer eat most of the input budget (issue #207). capPct semantics:
+ *   - 0            → no reservation (window returned unchanged)
+ *   - (0, 1)       → reservation capped at capPct * window
+ *   - >= 1         → legacy behavior (full maxOutput reserved)
+ *   - non-finite   → legacy behavior (treated as "not provided")
  * Returns the window unchanged when maxOutput is not usable (non-positive,
  * non-finite, or >= window — a maxOutput >= window request is degenerate and is
  * left to the overflow self-heal).
  */
-export function reserveOutputHeadroom(window: number, maxOutput: number): number {
+export function reserveOutputHeadroom(window: number, maxOutput: number, capPct: number = 1): number {
   if (
     Number.isFinite(window) &&
     window > 0 &&
@@ -90,7 +156,9 @@ export function reserveOutputHeadroom(window: number, maxOutput: number): number
     maxOutput > 0 &&
     maxOutput < window
   ) {
-    return window - maxOutput;
+    const cap = Number.isFinite(capPct) ? Math.max(0, Math.min(capPct, 1)) : 1;
+    const reserved = Math.min(maxOutput, cap * window);
+    return reserved > 0 ? window - reserved : window;
   }
   return window;
 }
@@ -111,6 +179,34 @@ export function shouldReserveOutputHeadroom(api: string | undefined): boolean {
   return api !== "anthropic-messages";
 }
 
+/**
+ * Apply the output-headroom reservation to a resolved config's modelContextLimit
+ * (see reserveOutputHeadroom / shouldReserveOutputHeadroom). Returns a NEW config
+ * (never mutates the input) so the shared resolved config stays untouched. Used
+ * by BOTH the live context transform and the read-only panel surfaces (/acp,
+ * acp_status) so every percentage is measured against the SAME real request
+ * limit — otherwise the panel reports against the full window while the nudge
+ * bands run against (window − maxOutput) (issue #267).
+ *
+ * `capPct` bounds the reservation as a fraction of the window (see
+ * reserveOutputHeadroom); callers pass resolveOutputHeadroomCap(
+ * adapter.outputHeadroomMaxPct) so the panel and the nudge bands share the
+ * same capped limit (issue #207). The default (1) preserves the legacy
+ * full-capability reservation for callers that don't pass a cap.
+ */
+export function applyOutputHeadroom<T extends { modelContextLimit: number }>(
+  config: T,
+  model: { maxTokens?: number; api?: string } | undefined,
+  capPct: number = 1,
+): T {
+  const maxOutput = model?.maxTokens ?? 0;
+  if (shouldReserveOutputHeadroom(model?.api)) {
+    const reserved = reserveOutputHeadroom(config.modelContextLimit, maxOutput, capPct);
+    if (reserved !== config.modelContextLimit) return { ...config, modelContextLimit: reserved };
+  }
+  return config;
+}
+
 // Per-session overflow self-heal state. Keyed by session id so concurrent
 // sessions in one extension instance cannot share a learned window or an
 // armed emergency (same rationale as the throttle episode).
@@ -129,9 +225,66 @@ export class OverflowEpisode {
   /** When true, the next context event forces usage >=95% (emergency). Kept
    *  session-scoped (not per-model): the context did not shrink, so the next
    *  turn needs the emergency regardless of which model answers it. */
-  armed = false;
+   armed = false;
+
+  // --- Ambiguous no-body 4xx corroboration (incident 2026-08-23) ---
+  // Runtime/in-memory like `armed` above, NOT persisted to acp.json: the
+  // count and the sent-view basis describe the live request loop of the
+  // current process. A resumed session re-establishes both within one turn
+  // (the context event re-records the sent view; the next error re-counts),
+  // while a persisted count would arm an emergency against a fresh session
+  // whose first request may succeed.
+  /** Sent-view estimate + effective limit recorded by the context event —
+   *  the numbers of the request that just ended. */
+  private sentTokens: number | null = null;
+  private sentLimit: number | null = null;
+  /** Consecutive no-body 4xx errors since the last successful assistant
+   *  turn. 0 at session start (the episode is created per session). */
+  private noBody4xx = 0;
+
+  noteSentView(tokens: number, limit: number): void {
+    this.sentTokens = tokens > 0 ? tokens : null;
+    this.sentLimit = limit > 0 ? limit : null;
+  }
+
+  /** A successful assistant turn unwedged the request loop: the consecutive
+   *  no-body count restarts from zero. */
+  noteSuccess(): void {
+    this.noBody4xx = 0;
+  }
+
+  /**
+   * Record one ambiguous no-body 4xx and decide whether it corroborates a
+   * probable context overflow. Guards against the false positive (the same
+   * text serves non-overflow 4xx): arm only when the current sent-view
+   * estimate is >= NO_BODY_ARM_RATIO of the effective limit, OR this is the
+   * >=2nd consecutive no-body since the last success. The consecutive guard
+   * recovers the dead-loop even at a low ratio (the incident ran at ~24%:
+   * the estimate under-reported vs the input+max_tokens cap) — a genuine
+   * overflow fails identically while the context is unchanged, so repeated
+   * no-body errors with no successful turn in between are size-dependent by
+   * construction. No window can be parsed from a bodyless error, so when
+   * this arms, the emergency uses the already-resolved effective limit (no
+   * window is learned).
+   */
+  onNoBody4xx(): NoBodyDecision {
+    this.noBody4xx += 1;
+    const ratio =
+      this.sentTokens !== null && this.sentLimit !== null && this.sentLimit > 0
+        ? this.sentTokens / this.sentLimit
+        : null;
+    return {
+      arm: (ratio !== null && ratio >= NO_BODY_ARM_RATIO) || this.noBody4xx >= 2,
+      consecutive: this.noBody4xx,
+      ratio,
+    };
+  }
+
   reset(): void {
     this.learned.clear();
     this.armed = false;
+    this.sentTokens = null;
+    this.sentLimit = null;
+    this.noBody4xx = 0;
   }
 }

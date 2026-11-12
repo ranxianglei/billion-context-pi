@@ -2,17 +2,28 @@ import { promises as fs } from "node:fs";
 import * as path from "node:path";
 import { createInitialState, type CompressionState } from "acp-kernel";
 import { logError, logInfo, logWarn } from "./log.js";
+import { SIDECAR_SCHEMA_VERSION, sidecarProducer } from "./contract.js";
 
-const STATE_SUFFIX = ".acp.json";
+export const STATE_SUFFIX = ".acp.json";
 
 export interface LiveRefOrigin {
   rawId: string;
   identity: string;
 }
 
+/** One-time marker persisted in a child sidecar when deriveChildState ran
+ *  (#364): proves this session's state was explicitly derived from a parent,
+ *  so later loads never re-derive. */
+export interface DerivedFrom {
+  parentSessionId: string;
+  derivedAt: number;
+}
+
 interface StateCacheSlot {
   state: CompressionState;
   liveRefOrigins: LiveRefOrigin[];
+  derivedFrom: DerivedFrom | null;
+  activePack?: string;
 }
 
 function stateFileFor(sessionFile: string | undefined): string | null {
@@ -57,13 +68,23 @@ export class SessionStateStore {
     if (cached) return cached.state;
     let state = createInitialState();
     let liveRefOrigins: LiveRefOrigin[] = [];
+    let derivedFrom: DerivedFrom | null = null;
+    let activePack: string | undefined;
     if (file) {
       try {
         const raw = await fs.readFile(file, "utf8");
-        const parsed = JSON.parse(raw) as CompressionState & { liveRefOrigins?: unknown };
+        const parsed = JSON.parse(raw) as CompressionState & { liveRefOrigins?: unknown; derivedFrom?: unknown; activePack?: unknown; schemaVersion?: unknown; producer?: unknown };
+        // #368: an unknown NEWER schema means a future writer touched the
+        // file. Best-effort read (same producer family), one warning — but we
+        // never rewrite structures we do not understand beyond the v1 fields.
+        if (typeof parsed.schemaVersion === "number" && parsed.schemaVersion > SIDECAR_SCHEMA_VERSION) {
+          logWarn("state", { event: "schema-newer", file, schemaVersion: parsed.schemaVersion, known: SIDECAR_SCHEMA_VERSION });
+        }
         if (parsed && Array.isArray(parsed.blocks)) {
           state = mergeInitialState(parsed);
           liveRefOrigins = parseLiveRefOrigins(parsed.liveRefOrigins);
+          derivedFrom = parseDerivedFrom(parsed.derivedFrom);
+          if (typeof parsed.activePack === "string" && parsed.activePack) activePack = parsed.activePack;
         }
       } catch (e) {
         const code = (e as NodeJS.ErrnoException).code;
@@ -80,23 +101,51 @@ export class SessionStateStore {
         if (parentState) state = parentState;
       }
     }
-    this.cache.set(key, { state, liveRefOrigins });
+    this.cache.set(key, { state, liveRefOrigins, derivedFrom, activePack });
     return state;
+  }
+
+  /** Stamp the effective prompt pack for the live session (audit trail:
+   *  persisted into the sidecar on the next save). */
+  setActivePack(sessionFile: string | undefined, sessionId: string, activePack: string): void {
+    const key = cacheKey(sessionFile, sessionId);
+    const slot = this.cache.get(key);
+    if (slot) this.cache.set(key, { ...slot, activePack });
+  }
+
+  getActivePack(sessionFile: string | undefined, sessionId: string): string | undefined {
+    return this.cache.get(cacheKey(sessionFile, sessionId))?.activePack;
   }
 
   async save(state: CompressionState, sessionFile: string | undefined, sessionId: string): Promise<void> {
     const file = stateFileFor(sessionFile);
-    if (!file) return;
     const key = cacheKey(sessionFile, sessionId);
-    const liveRefOrigins = this.cache.get(key)?.liveRefOrigins ?? [];
-    this.cache.set(key, { state, liveRefOrigins });
+    const prev = this.cache.get(key);
+    const liveRefOrigins = prev?.liveRefOrigins ?? [];
+    const derivedFrom = prev?.derivedFrom ?? null;
+    const activePack = prev?.activePack;
+    // Cache update is unconditional: file-less (in-memory) sessions have no
+    // sidecar to persist, but their state must still survive across turns in
+    // this process — otherwise every compress result is dropped and the model
+    // re-compresses the same original context forever (issue #322).
+    this.cache.set(key, { state, liveRefOrigins, derivedFrom, activePack });
+    if (!file) return;
     const dir = path.dirname(file);
     await fs.mkdir(dir, { recursive: true }).catch((e: unknown) => {
       logError("state", { event: "save-mkdir-failed", dir, error: e instanceof Error ? e.message : String(e) });
     });
     const tmp = path.join(dir, `.acp-tmp-${path.basename(file)}`);
     try {
-      await fs.writeFile(tmp, JSON.stringify({ ...state, liveRefOrigins }), "utf8");
+      // #368 contract headers last: state fields can never clobber them.
+      const payload: Record<string, unknown> = {
+        ...state,
+        liveRefOrigins,
+        schemaVersion: SIDECAR_SCHEMA_VERSION,
+        producer: sidecarProducer(),
+      };
+      if (derivedFrom) payload.derivedFrom = derivedFrom;
+      if (activePack) payload.activePack = activePack;
+      await fs.writeFile(tmp, JSON.stringify(payload), "utf8");
       await fs.rename(tmp, file);
     } catch (e) {
       logError("state", { event: "save-failed", file, error: e instanceof Error ? e.message : String(e) });
@@ -110,7 +159,17 @@ export class SessionStateStore {
   setLiveRefOrigins(sessionFile: string | undefined, sessionId: string, origins: LiveRefOrigin[]): void {
     const key = cacheKey(sessionFile, sessionId);
     const slot = this.cache.get(key);
-    if (slot) this.cache.set(key, { state: slot.state, liveRefOrigins: [...origins] });
+    if (slot) this.cache.set(key, { state: slot.state, liveRefOrigins: [...origins], derivedFrom: slot.derivedFrom });
+  }
+
+  getDerivedFrom(sessionFile: string | undefined, sessionId: string): DerivedFrom | null {
+    return this.cache.get(cacheKey(sessionFile, sessionId))?.derivedFrom ?? null;
+  }
+
+  setDerivedFrom(sessionFile: string | undefined, sessionId: string, mark: DerivedFrom | null): void {
+    const key = cacheKey(sessionFile, sessionId);
+    const slot = this.cache.get(key);
+    if (slot) this.cache.set(key, { state: slot.state, liveRefOrigins: slot.liveRefOrigins, derivedFrom: mark });
   }
 
   invalidate(): void {
@@ -146,7 +205,48 @@ export class SessionStateStore {
   }
 }
 
-function parseLiveRefOrigins(value: unknown): LiveRefOrigin[] {
+function parseDerivedFrom(value: unknown): DerivedFrom | null {
+  if (!value || typeof value !== "object") return null;
+  const mark = value as { parentSessionId?: unknown; derivedAt?: unknown };
+  if (typeof mark.parentSessionId !== "string" || typeof mark.derivedAt !== "number") return null;
+  return { parentSessionId: mark.parentSessionId, derivedAt: mark.derivedAt };
+}
+
+/** #364: derive an INLINE child session's compression state from its parent's
+ *  (same-process sub-sessions, e.g. Prime RLM). Inherits exactly what makes
+ *  inherited blocks usable — blocks (deep-copied: they carry mutable fields),
+ *  message refs, the per-message token snapshot, the id counters so new
+ *  child blocks cannot collide with inherited ids, and the persistent
+ *  acp_rule reminders (kernel cloneState precedent: never silently drop
+ *  model-set rules) — and resets every rhythm ledger (nudge cadence
+ *  baseline, stats counters, absorb records) so the
+ *  child starts its own clock. Separate-process pi-native delegates must NOT
+ *  use this: their session files carry a parentSession header that already
+ *  inherits the parent state verbatim. */
+export function deriveChildState(parent: CompressionState): CompressionState {
+  const fresh = createInitialState();
+  return {
+    blocks: structuredClone(parent.blocks),
+    messageRefs: { byRaw: { ...parent.messageRefs.byRaw }, byRef: { ...parent.messageRefs.byRef } },
+    tokenSnapshot: { ...parent.tokenSnapshot },
+    nudge: fresh.nudge,
+    stats: fresh.stats,
+    absorbed: [],
+    rules: structuredClone(parent.rules ?? []),
+    nextRuleId: parent.nextRuleId ?? fresh.nextRuleId,
+    // Ref space is NOT re-issued on derive (byRaw/byRef carry verbatim), so the
+    // image ledgers stay valid for inherited content: imageShrinks gates
+    // image_full for inherited shrunk refs, imageFullRestored keeps
+    // parent-restored refs at full resolution. The kernel's MUST-clear
+    // (resetImageFullState) applies only to ref-reissue resets.
+    imageFullRestored: structuredClone(parent.imageFullRestored ?? []),
+    imageShrinks: structuredClone(parent.imageShrinks ?? []),
+    nextBlockId: parent.nextBlockId,
+    nextRunId: parent.nextRunId,
+  };
+}
+
+export function parseLiveRefOrigins(value: unknown): LiveRefOrigin[] {
   if (!Array.isArray(value)) return [];
   return value.filter((item): item is LiveRefOrigin => {
     if (!item || typeof item !== "object") return false;
@@ -163,6 +263,10 @@ function mergeInitialState(parsed: CompressionState): CompressionState {
     tokenSnapshot: parsed.tokenSnapshot ?? fresh.tokenSnapshot,
     nudge: { ...fresh.nudge, ...(parsed.nudge ?? {}) },
     stats: { ...fresh.stats, ...(parsed.stats ?? {}) },
+    absorbed: parsed.absorbed ?? fresh.absorbed,
+    rules: parsed.rules ?? fresh.rules,
+    nextRuleId: parsed.nextRuleId ?? fresh.nextRuleId,
+    ...(parsed.terminalStreak !== undefined ? { terminalStreak: parsed.terminalStreak } : {}),
     nextBlockId: parsed.nextBlockId ?? fresh.nextBlockId,
     nextRunId: parsed.nextRunId ?? fresh.nextRunId,
   };

@@ -19,6 +19,8 @@ Settings are read from JSON files named `acp.json`. The global file applies to e
 
 > **Precedence:** Environment variable &gt; Project file &gt; Global file &gt; Built-in default.
 
+On a Pi fork, `.pi` is the fork's own config directory — `~/.prime/acp.json` and `<project>/.prime/acp.json` on Prime. Until that file exists, the `.pi` path above is still read. See [docs/host-adapter.md §4](./docs/host-adapter.md#4-config-directory-config_dir_name).
+
 Files are loaded at session start. Missing files, malformed JSON, and unknown keys are silently ignored — the extension never fails to start because of a config issue. Only the documented keys are read; everything else is discarded.
 
 ---
@@ -32,8 +34,9 @@ Create `~/.pi/acp.json` (or `<project>/.pi/acp.json`) and drop in whichever keys
   "debug": false,
   "autoUpdate": true,
   "modelContextLimit": 200000,
+  "outputHeadroomMaxPct": 0.25,
   "toolBashDefaultTimeout": 60,
-  "toolOutputMaxBytes": 200000,
+  "toolOutputMaxBytes": 50000,
 
   "throttleRetry": {
     "enabled": true,
@@ -48,7 +51,8 @@ Create `~/.pi/acp.json` (or `<project>/.pi/acp.json`) and drop in whichever keys
   "compress": {
     "maxContextLimit": "75%",
     "emergencyThresholdPercent": "95%",
-    "nudgeGrowthTokens": 50000
+    "nudgeGrowthTokens": 50000,
+    "reasoning": { "drop": true, "threshold": 2048 }
   }
 }
 ```
@@ -61,7 +65,32 @@ A minimal config enabling only debug logging:
 }
 ```
 
-An advanced config overriding the kernel's compression prompt rules (requires the risk acknowledgement). Set only the fields you want to change; the rest inherit the kernel defaults:
+### Tune the compression prompts
+
+Three levels, from least to most invasive — stop at the first one that fits:
+
+**1. Pick a prompt pack — one line, no risk gate.** A [prompt pack](#prompt-packs) bundles a complete tuned surface (system-prompt sections, nudge texts, tool descriptions, compression rules):
+
+```json
+{ "compress": { "promptPack": "lean" } }
+```
+
+Built-ins: `default` (full surface) and `lean` (≈76% smaller — best for small models that copy tool schemas verbatim into their answers). The same key also selects a pack per-provider or per-model through the standard `compress` cascade.
+
+**2. Tune individual items — tri-state, no risk gate.** `promptSections`, `nudgeSections`, and `toolPrompts` override single pieces of the surface: a **string replaces**, `null` **deletes**, omitting a key keeps the default. Inline values win over pack values:
+
+```json
+{
+  "compress": { "promptPack": "lean" },
+  "promptSections": { "whenToCompress": "(your replacement text)" },
+  "nudgeSections": { "efficiencyNote": null },
+  "toolPrompts": { "compress": { "description": "Compress a range of the conversation into a summary." } }
+}
+```
+
+Per-key reference: [Prompts Customization](#prompts-customization).
+
+**3. Replace the kernel's compression rules verbatim — risk-gated.** The four `prompts.*` fields are the load-bearing rules that control *how* summaries are written; replacing them can silently degrade summary quality, so they require an explicit acknowledgement. Set only the fields you want to change; the rest inherit the kernel defaults:
 
 ```json
 {
@@ -93,20 +122,39 @@ All keys below are currently **ACTIVE**.
 
 | Key | Type | Default | Status | Description |
 |-----|------|---------|--------|-------------|
+| `enabled` | boolean | `true` | 🟢 ACTIVE | Master switch. `false` turns the whole adapter off (no tools, no system prompt, no context transform) — for models too small to handle ACP. Requires a Pi restart. |
 | `debug` | boolean | `false` | 🟢 ACTIVE | Enable verbose debug-level events in the log. |
 | `autoUpdate` | boolean | `true` | 🟢 ACTIVE | Check npm for a newer version on startup and auto-install it. |
 | `modelContextLimit` | number | *(auto)* | 🟢 ACTIVE | Override the context limit (in tokens). |
+| `outputHeadroomMaxPct` | number \| string | `0.25` | 🟢 ACTIVE | Cap on the output-headroom reservation, as a fraction of the context window. |
 | `toolBashDefaultTimeout` | number | `60` | 🟢 ACTIVE | Default `bash` tool timeout in seconds when the model omits it. |
-| `toolOutputMaxBytes` | number | `200000` | 🟢 ACTIVE | Hard byte cap on tool result text. |
+| `toolOutputMaxBytes` | number | `50000` | 🟢 ACTIVE | Hard byte cap on tool result text. |
+| `protectedTools` | string\[\] | `none` | 🟢 ACTIVE | Tool-name patterns (glob suffix allowed) whose **every** call+result pair is hard-excluded from compression (refs render `BLOCKED`). For low-frequency, high-value tools with independent outputs — see the ⚠ note below. |
+| `protectedLatestTools` | string\[\] | `none` | 🟢 ACTIVE | Tool-name patterns (glob suffix allowed) whose **latest** call+result pair is hard-excluded from compression; older pairs remain compressible. For cumulative-snapshot tools. |
+| `neverPreserveRecentTools` | string\[\] | kernel built-in (`["decompress", "search_context", "read", "bash"]`, acp-kernel >= 0.0.92) | 🟢 ACTIVE | Tool-name patterns **removed from** the soft-protected recent zone so their results fold immediately. Default keeps `read`/`bash` compressible; remove only `read` (keep `decompress`/`search_context`) to stop the batch-read fold→re-read loop. **Empty array `[]` is valid** (max-protection escape hatch). |
+| `preserveRecentTools` | string\[\] | unset (no subtraction; requires `acp-kernel` >= 0.0.93) | 🟢 ACTIVE | The **positive counterpart**: tool-name patterns **kept protected** in the recent zone — removed from the effective exclusion list computed by the kernel. The one-entry #1198/#1277 remedy: `["read"]`, no built-in list restating. **Empty array `[]` is invalid** (pure no-op — typo for `neverPreserveRecentTools: []`). |
 | `throttleRetry` | boolean \| object | `true` | 🟢 ACTIVE | Auto-retry provider token rate-limit errors with progressive backoff. |
 | `compressionModelId` | string | *(unset)* | 🟢 ACTIVE | How `compress` summaries are produced: `session` (the session model, shared prefix) or a `models.json` id (`provider/id`). Usually set via `/acp compact [session\|<id>]`. |
+| `repetitionGuard` | boolean \| object | `true` | 🟢 ACTIVE | Break infinite loops of byte-identical tool calls (warn at 3 consecutive, block + abort at 5). |
+| `degenerationGuard` | boolean \| object | `true` | 🟢 ACTIVE | Collapse degenerate single-codepoint runs (e.g. 4655×「【」) in assistant text/thinking of the outgoing view and inject a one-shot recovery notice — breaks the abort loop where pi replays degenerated thinking back to the provider on every request (#351). |
+| `hostSession` | boolean \| object | `false` | 🟢 ACTIVE | Turn-boundary policy for multi-session hosts: count injected `custom_message` entries as turn starts. Off by default (pi-native behavior). |
+| `rules` | boolean | `false` | 🟢 ACTIVE | Register the opt-in `acp_rule` record tool: short, principle-level reminders hard-protected from compression. Off by default. |
 
 **Delegate keys**
 
 | Key | Type | Default | Status | Description |
 |-----|------|---------|--------|-------------|
 | `delegate.enabled` | boolean | `true` | 🟢 ACTIVE | Enable the `acp_delegate` tools and their system-prompt section. |
+| `delegate.forceEnable` | boolean | `false` | 🟢 ACTIVE | Keep `acp_delegate` active even when a **project-scope** `pi-subagents` install is detected (default: auto stand-down; a user-scope-only install just logs a warning). Overridden by `PI_ACP_DELEGATE_FORCE_ENABLE`. |
 | `delegate.displayUsage` | string | `"separate"` | 🟢 ACTIVE | Controls how delegate sub-agent token usage is reported. |
+| `delegate.maxDepth` | number | `2` | 🟢 ACTIVE | Max nesting depth for `acp_delegate` (main session = depth 0; a session *at* this depth is a leaf and cannot delegate again). Set `1` so delegates never nest. |
+| `delegate.syncTimeoutMinutes` | number | `5` | 🟢 ACTIVE | Hard timeout for **synchronous** `acp_delegate` calls, in minutes. `0` / `null` disables it. |
+| `delegate.idleTimeoutMinutes` | number | `5` | 🟢 ACTIVE | Idle watchdog for async delegate children — force-finish after this many minutes without output. `0` / `null` disables it. |
+| `delegate.asyncTimeoutMinutes` | number | `30` | 🟢 ACTIVE | Absolute hard limit for async delegate children, in minutes. `0` / `null` disables it. |
+| `delegate.maxConcurrent` | number | unlimited | 🟢 ACTIVE | Max background (`async`) delegates running at once; extra launches queue FIFO and start as slots free. `1` = forced serial. Overridden by `PI_ACP_DELEGATE_MAX_CONCURRENT`. |
+| `delegate.thinkingLevel` | string | _(unset)_ | 🟢 ACTIVE | Global default thinking level for delegates (per-call > role > global > Pi default). |
+| `delegate.agents` | object | _(unset)_ | 🟢 ACTIVE | Per-role default model + thinking level, keyed by role name. |
+| `delegate.fleetShortcut` | string | `ctrl+alt+d` | 🟢 ACTIVE | TUI shortcut for the `acp_delegate` fleet inspector; set `""` to disable registration. |
 
 **Provider throttle retry keys**
 
@@ -118,6 +166,16 @@ All keys below are currently **ACTIVE**.
 | `throttleRetry.maxDelayMs` | number | `300000` | 🟢 ACTIVE | Cap for paced kick delays. |
 | `throttleRetry.backoffMode` | string | `"exponential"` | 🟢 ACTIVE | Delay progression: `"exponential"` (×2 per kick) or `"fixed"`. |
 
+**Repetition guard keys**
+
+| Key | Type | Default | Status | Description |
+|-----|------|---------|--------|-------------|
+| `repetitionGuard.enabled` | boolean | `true` | 🟢 ACTIVE | Enable the repetition breaker. `false` disables it entirely. |
+| `repetitionGuard.warn` | number | `3` | 🟢 ACTIVE | Consecutive byte-identical calls before a strong warning is appended to the tool result. |
+| `repetitionGuard.abort` | number | `5` | 🟢 ACTIVE | Consecutive byte-identical calls before the call is blocked (not executed) and the turn is aborted. Must exceed `warn`. |
+| `degenerationGuard.enabled` | boolean | `true` | 🟢 ACTIVE | Enable the degenerate-repeat guard. `false` disables it entirely. |
+| `degenerationGuard.minRun` | number | `200` | 🟢 ACTIVE | Minimum length of a single-codepoint run before it is treated as degeneration and collapsed. Values below 8 are raised to 8. |
+
 **Compression keys**
 
 | Key | Type | Default | Status | Description |
@@ -125,6 +183,9 @@ All keys below are currently **ACTIVE**.
 | `compress.maxContextLimit` | number \| string | `"75%"` | 🟢 ACTIVE | Context threshold that triggers forced compression nudges. |
 | `compress.emergencyThresholdPercent` | number \| string | `"95%"` | 🟢 ACTIVE | Context threshold that triggers emergency truncation. |
 | `compress.nudgeGrowthTokens` | number | `50000` | 🟢 ACTIVE | Token growth step for soft compression nudges. |
+| `compress.reasoning` | object | `{ "drop": true, "threshold": 2048 }` | 🟢 ACTIVE | Drop oversized thinking from historical `compress` calls (request-time; persisted history untouched). |
+| `compress.stripImages` | boolean | `false` | 🟢 ACTIVE | **Opt-in** wire-level strip of historical image payloads (issue #321). When `true`, every message older than the most recent `stripImagesKeepRecent` has its image parts dropped from the outbound provider body; image-only messages collapse to a `"[image]"` text placeholder. Supported wire dialects: anthropic-messages, openai-completions, openai-responses (incl. azure/codex variants). |
+| `compress.stripImagesKeepRecent` | number | `5` | 🟢 ACTIVE | How many of the most recent messages keep their image payloads when `stripImages` is on. |
 
 **Prompts keys**
 
@@ -132,6 +193,7 @@ All keys below are currently **ACTIVE**.
 |-----|------|---------|--------|-------------|
 | `prompts` | object | *(kernel defaults)* | 🟢 ACTIVE | Override acp-kernel's 4 load-bearing compression prompt rules. Each set field replaces the default verbatim. |
 | `acknowledgePromptsRisk` | boolean | `false` | 🟢 ACTIVE | Must be `true` for `prompts` overrides to take effect; otherwise overrides are dropped and defaults are used. |
+| `promptPack` | string | `default` | 🟢 ACTIVE | Select a named [prompt pack](#prompt-packs) (e.g. the built-in `lean`) — one line instead of a block of inline `promptSections`/`toolPrompts` JSON; applied as the base layer under your inline overrides. |
 
 **Environment variables**
 
@@ -141,12 +203,25 @@ All keys below are currently **ACTIVE**.
 | `ACP_MODEL_CONTEXT_LIMIT` | Override the context limit (takes highest precedence). |
 | `ACP_DEBUG` | Set to `1` / `true` to enable debug logging. |
 | `ACP_LOG_FILE` | Override the log file path (default `~/.pi/acp.log`). |
+| `PI_ACP_FORK_HOST` | Set to `1` / `true` to declare a Pi-compatible fork host (no `buildContextEntries()`) as supported. OMP stays refused by default. See [docs/host-adapter.md](./docs/host-adapter.md). |
+| `PI_ACP_DELEGATE_MAX_DEPTH` | Override `delegate.maxDepth`. |
+| `PI_ACP_DELEGATE_SYNC_TIMEOUT_MINUTES` | Override `delegate.syncTimeoutMinutes`; `0` disables the sync hard timeout. |
+| `PI_ACP_DELEGATE_IDLE_TIMEOUT_MINUTES` | Override `delegate.idleTimeoutMinutes`; `0` disables the idle watchdog. |
+| `PI_ACP_DELEGATE_ASYNC_TIMEOUT_MINUTES` | Override `delegate.asyncTimeoutMinutes`; `0` disables the async hard limit. |
+| `PI_ACP_DELEGATE_FORCE_ENABLE` | Override `delegate.forceEnable`; takes `true` / `false`. |
 
-> **Only the documented keys are read from `acp.json`.** Other tuning knobs (`preserveRecentMessages`, `protectedTools`) are code-level and not user-overridable. The three compression thresholds form a three-tier escalation: growth-driven soft nudges → forced nudges at `compress.maxContextLimit` → emergency truncation at `compress.emergencyThresholdPercent`.
+> **Only the documented keys are read from `acp.json`.** Other tuning knobs (`preserveRecentMessages`) are code-level and not user-overridable. The three compression thresholds form a three-tier escalation: growth-driven soft nudges → forced nudges at `compress.maxContextLimit` → emergency truncation at `compress.emergencyThresholdPercent`.
 
 ---
 
 ## General
+
+### `enabled`
+
+- **Type:** `boolean`
+- **Default:** `true`
+- **Status:** 🟢 ACTIVE
+- **Description:** Master switch for the entire adapter. Set to `false` to turn ACP off completely: no `compress`/`decompress`/`search_context`/`acp_status` tools, no ACP system prompt, no context transformation, and no suppression of Pi's built-in auto-compaction — Pi's native context management runs instead. Intended for small local models (e.g. quantized 27B) that cannot reliably drive ACP's compression loop. Checked once at extension load, so it requires restarting Pi after editing `acp.json`. Project-local `acp.json` overrides the global one.
 
 ### `debug`
 
@@ -161,13 +236,22 @@ All keys below are currently **ACTIVE**.
 - **Default:** `true`
 - **Status:** 🟢 ACTIVE
 - **Description:** On Pi startup, check the npm registry for a newer version of `billion-context-pi` and auto-install it. Set to `false` to avoid all startup network calls. Can also be disabled via the `ACP_AUTO_UPDATE` environment variable (`ACP_AUTO_UPDATE=0` or `ACP_AUTO_UPDATE=false`), which overrides this setting.
+  - **Read-only install location:** when the copy's install prefix is not writable (e.g. a root-owned `npm i -g` global prefix), auto-update stops retrying that location after the first `EACCES`/permission failure and shows a one-time hint to run `npm i -g billion-context-pi` (or remove the global copy if you rely on pi's bundled install) instead of looping. The check throttle and the stop-retry marker are keyed per install location, so a healthy copy never suppresses a failing one's checks.
+  - **Two parallel mechanisms:** this extension-side auto-update is independent of pi's own core update banner — both can appear, and disabling one does not disable the other.
 
 ### `modelContextLimit`
 
 - **Type:** `number`
 - **Default:** *(auto)* — the model's `contextWindow` read live each turn
 - **Status:** 🟢 ACTIVE
-- **Description:** Override the context limit, in tokens. By default the limit is read from the active model's `ctx.model.contextWindow` on every turn, so it stays correct when you switch models. Set an explicit value for deterministic test runs or headless/non-interactive sessions where the model metadata may be unavailable. The `ACP_MODEL_CONTEXT_LIMIT` environment variable takes precedence over this value.
+- **Description:** Override the context limit, in tokens. By default the limit is read from the active model's `ctx.model.contextWindow` on every turn, so it stays correct when you switch models. Set an explicit value for deterministic test runs or headless/non-interactive sessions where the model metadata may be unavailable. The `ACP_MODEL_CONTEXT_LIMIT` environment variable takes precedence over this value. Note this value is also the **denominator of all percentage compression thresholds** (`maxContextLimit`, `emergencyThresholdPercent`) — lowering it moves every trigger point down proportionally. To keep day-to-day context small without shrinking this denominator, see [Soft target with elastic headroom](#soft-target-with-elastic-headroom-1122).
+
+### `outputHeadroomMaxPct`
+
+- **Type:** `number | string` (ratio or percent string)
+- **Default:** `0.25`
+- **Status:** 🟢 ACTIVE
+- **Description:** Caps the output-headroom reservation as a fraction of the context window: reserved = min(model.maxTokens, pct × window). The reservation keeps the kernel's nudge/truncate bands below (window − reserved) so a long reply cannot push input + output past the window on APIs that count output against the window (all except Anthropic Messages, which enforces its input limit independently and is exempt). Without a cap, models whose registered max output is a large share of the window (e.g. 131072 on a 262144 window) lose most of their input budget — the 75% force-compress band then fires at roughly a third of the full window. The 0.25 default bounds that loss while still guaranteeing any single-turn reply up to 25% of the window fits at the 95% emergency threshold; longer replies overflow once and are recovered by the overflow self-heal on the next turn. Accepts a ratio (`0.25`) or percent string (`"25%"`). Set `0` to disable the reservation entirely; `1` (or greater) restores the legacy full-capability reservation.
 
 ### `toolBashDefaultTimeout`
 
@@ -179,9 +263,63 @@ All keys below are currently **ACTIVE**.
 ### `toolOutputMaxBytes`
 
 - **Type:** `number`
-- **Default:** `200000`
+- **Default:** `50000`
 - **Status:** 🟢 ACTIVE
-- **Description:** A hard byte cap (~200 KB, roughly 5000 lines) applied to tool result text via the `tool_result` hook. It stops runaway output that Pi's own caps cannot catch (for example, from tools Pi does not cap). When the cap fires, the oversized text is head-truncated with a notice telling the model how to see the full output. Set lower (e.g. `8192`) for a tighter context budget, or set to `0` to disable the cap entirely.
+- **Description:** A hard byte cap (~50 KB, roughly 1250 lines) applied to tool result text via the `tool_result` hook. Aligned with Pi's own bash/read/grep cap so every tool path lands under one ceiling; the net still catches runaway output from tools Pi does not cap (MCP/custom). When the cap fires, the oversized text is head-truncated with a notice telling the model how to see the full output. Set higher for large MCP outputs, lower (e.g. `8192`) for a tighter context budget, or set to `0` to disable the cap entirely.
+
+### `protectedTools`
+
+- **Type:** `string[]`
+- **Default:** `none` (empty)
+- **Status:** 🟢 ACTIVE
+- **Description:** Tool-name patterns (glob suffix allowed, e.g. `"skill"`, `"read_*"`) whose **every** call+result pair is hard-excluded from compression: matching refs render as `BLOCKED` in every view, in both compression modes and across all wires. Intended for low-frequency, high-value tools whose outputs are **independent content** rather than cumulative snapshots (e.g. opencode/pi `skill` loads, one-shot references). Malformed values (non-array, empty array, non-string or blank entries) are rejected with a loud warning and ignored — they never fail the session.
+- **⚠ When to use which knob:** protecting ALL instances of a chatty tool grows context unboundedly — never put high-frequency tools here. Independent-content tools → `protectedTools`; cumulative-snapshot tools (each call supersedes the last) → `protectedLatestTools`; chatty tools → neither (rely on the soft recent-zone instead). Rule of thumb: if you would be annoyed to keep every single output forever, do not protect it fully.
+
+### `protectedLatestTools`
+
+- **Type:** `string[]`
+- **Default:** `none` (empty)
+- **Status:** 🟢 ACTIVE
+- **Description:** Tool-name patterns (glob suffix allowed) whose **latest** call+result pair is hard-excluded from compression (matching refs render as `BLOCKED`); older pairs remain compressible. Intended for cumulative-snapshot tools where each call supersedes the last. Same validation rules as `protectedTools`. See the ⚠ note under `protectedTools` for when to use which knob.
+
+### `neverPreserveRecentTools`
+
+- **Type:** `string[]` (tool-name patterns, glob suffix allowed)
+- **Default:** unset → kernel built-in `["decompress", "search_context", "read", "bash"]` (requires `acp-kernel` >= 0.0.92)
+- **Status:** 🟢 ACTIVE
+- **Description:** Tool-name patterns **excluded from the soft-protected recent zone** (`preserveRecentMessages` window): matching tool results inside the recent window become compressible immediately instead of aging out first. The kernel built-in keeps `read`/`bash` compressible because they are the largest reclaimable mass — but that same default folds freshly-read files right away in batch-read workflows and can descend into the fold→re-read death loop (upstream billion-context #1198/#1277). **Recommended remedy — remove only `read`:**
+
+  ```json
+  { "neverPreserveRecentTools": ["decompress", "search_context", "bash"] }
+  ```
+
+  Fresh read results then stay in the recent zone and age out by position later (unlike `protectedLatestTools`, which would pin the newest read forever, or `protectedTools`, which would never fold any read). **Keep `decompress`/`search_context` in the list**: re-including them pins just-restored blocks in the recent zone where they become unreclaimable — a different disease. **⚠ Empty array `[]` is VALID** here (unlike the two protection keys): it excludes nothing and gives every tool recent-zone protection — the max-protection escape hatch. An explicit array replaces the default verbatim. Prefer the simpler positive form below unless you need verbatim-replace semantics.
+
+### `preserveRecentTools`
+
+- **Type:** `string[]` (tool-name patterns, glob suffix allowed)
+- **Default:** unset → no subtraction (the `neverPreserveRecentTools` ?? kernel built-in list governs verbatim; requires `acp-kernel` >= 0.0.93)
+- **Status:** 🟢 ACTIVE
+- **Description:** The **positive counterpart** of `neverPreserveRecentTools`: tool-name patterns **removed from the effective recent-zone exclusion list**. Effective exclusion = `(neverPreserveRecentTools ?? built-in) minus preserveRecentTools`, computed in the kernel — so the #1198/#1277 batch-read fold→re-read remedy is one entry:
+
+  ```json
+  { "preserveRecentTools": ["read"] }
+  ```
+
+  without restating (or freezing a stale hand-copy of) the built-in list, and it keeps following built-in evolution. Composable with an explicit `neverPreserveRecentTools` (subtraction applies to the explicit list too); glob-suffix patterns subtract matching entries (`"bash*"` removes `bash`). **⚠ Empty array `[]` is INVALID** here — it is a pure no-op, so a bare `[]` is almost certainly a typo for `neverPreserveRecentTools: []` (the max-protection escape hatch); malformed values warn and fall back to the adapter value.
+
+---
+
+## Rules
+
+The `rules` key controls the `acp_rule` record tool — an opt-in way to persist short, principle-level reminders in the session so they survive context compression.
+
+### `rules`
+
+- **Type:** `boolean`
+- **Default:** `false`
+- **Status:** 🟢 ACTIVE
+- **Description:** When `true`, registers the `acp_rule` tool on session start. Call it with a short reminder to record it (echoes `Recorded ruleN: …`); call it with no argument to list all recorded rules. Rules live in the session's ACP state sidecar (persisted across restarts) and are **hard-protected from compression** — their tool call and result stay visible even when everything around them is compressed away. There is no system-prompt involvement: usage guidance lives entirely in the tool description, and nothing is re-injected per turn. Validation errors (empty / over-length / duplicate / limit reached) are returned verbatim to the model. Defaults: up to 50 rules × 300 chars each.
 
 ---
 
@@ -198,7 +336,18 @@ The `delegate` sub-object controls the `acp_delegate` sub-agent tool family (`ac
 - **Type:** `boolean`
 - **Default:** `true`
 - **Status:** 🟢 ACTIVE
-- **Description:** Enable the `acp_delegate` tools (`acp_delegate`, `acp_delegate_wait`, `acp_delegate_cancel`) and the system-prompt section that describes them. Set to `false` to skip registering them entirely — for example, if you use a different sub-agent extension, or when running headless where async result injection adds no value.
+- **Description:** Enable the `acp_delegate` tools (`acp_delegate`, `acp_delegate_wait`, `acp_delegate_cancel`) and the system-prompt section that describes them. Set to `false` to skip registering them entirely — for example, if you use a different sub-agent extension, or when running headless where async result injection adds no value. See **Using your own sub-agent instead** in [README.md](./README.md) for the "I keep my own sub-agent" walkthrough.
+- **When it applies:** the three tools are registered at session start, so a change takes effect on the **next session** (or a Pi restart). The system-prompt section is resolved live on every turn and can disappear mid-session before the tools do.
+- **Only the prompt section:** `delegatePrompt: null` removes the `ACP_DELEGATE NOTIFICATIONS` block while keeping the tools.
+- **Not a substitute:** Pi's `--exclude-tools acp_delegate,acp_delegate_wait,acp_delegate_cancel` hides the tools but **not** the prompt section, which would leave the model told about tools it cannot call.
+
+### `delegate.forceEnable`
+
+- **Type:** `boolean`
+- **Default:** `false`
+- **Status:** 🟢 ACTIVE
+- **Description:** Keep `acp_delegate` active even when the third-party [`pi-subagents`](https://github.com/nicobailon/pi-subagents) extension is installed at project scope. By default (`false`), a **project-scope** `pi-subagents` install (`<cwd>/.pi/npm/node_modules/pi-subagents` or `<cwd>/.pi/extensions/`) detected at session start makes `acp_delegate` stand down automatically — both extensions ship overlapping sub-agent systems (own fleet checker, spawn path, and the inspector shortcut clash behind #412), and running two fleets confuses the model. A **user-scope-only** install (`~/.pi/npm`, user extensions dir) does NOT disable `acp_delegate`; it logs a warning instead, so a global install can't silently turn it off in every project. When it stands down, a reminder explains that `pi-subagents`' agents do NOT get ACP context compression by default, and that running `/acp-subagents` injects `compress` / `decompress` / `search_context` / `acp_status` into its agent overrides. Precedence: an explicit `delegate.enabled: false` always wins over `forceEnable`; the env var `PI_ACP_DELEGATE_FORCE_ENABLE` overrides this key.
+- **When it applies:** same timing as `delegate.enabled` — tools and the shortcut register at session start, so a change takes effect on the **next session**; the system-prompt section is resolved live on every turn and can disappear mid-session before the tools do.
 
 ### `delegate.displayUsage`
 
@@ -206,6 +355,78 @@ The `delegate` sub-object controls the `acp_delegate` sub-agent tool family (`ac
 - **Default:** `"separate"`
 - **Status:** 🟢 ACTIVE
 - **Description:** Controls how delegate sub-agent token usage is reported back to the main session. `"separate"` (default) tracks delegate tokens in a separate accumulator — the main session totals stay clean and delegate usage shows as its own block in `acp_status` (excluded from main totals). `"merged"` folds delegate token usage into the tool-result `usage` field so it is counted as part of the main session totals. Only meaningful when `delegate.enabled` is `true`.
+
+### `delegate.maxDepth`
+
+- **Type:** integer ≥ 1
+- **Default:** `2`
+- **Status:** 🟢 ACTIVE
+- **Description:** Maximum nesting depth for `acp_delegate`. Depth counts how far a session sits below the main session (main = 0); a session may only spawn a delegate while its own depth is **below** this limit, so a session *at* the limit becomes a leaf and cannot delegate again. The default `2` allows main → delegate → sub-delegate; set `1` for an orchestrator / leaf-worker pattern where delegates never nest further. The resolved limit is propagated to children via the internal `PI_ACP_DELEGATE_MAX_DEPTH` environment variable, so it binds the whole delegation tree even if a child loads a different project `acp.json`. Invalid values (non-integer, `< 1`) fall back to the default with a warning log. Environment override: `PI_ACP_DELEGATE_MAX_DEPTH` (takes precedence over this key).
+
+### `delegate.syncTimeoutMinutes`
+
+- **Type:** number (minutes, fractional allowed) or `0` / `null`
+- **Default:** `5`
+- **Status:** 🟢 ACTIVE
+- **Description:** Hard timeout for **synchronous** `acp_delegate` calls — the child process is killed (SIGTERM) if it has not finished within this window. Set `0` (or `null`) to run synchronous delegates without a hard timeout. Fractional minutes are accepted (e.g. `0.5` = 30s). Invalid values fall back to the default with a warning log. Environment override: `PI_ACP_DELEGATE_SYNC_TIMEOUT_MINUTES` (`0` disables).
+
+### `delegate.idleTimeoutMinutes`
+
+- **Type:** number (minutes, fractional allowed) or `0` / `null`
+- **Default:** `5`
+- **Status:** 🟢 ACTIVE
+- **Description:** Idle watchdog for async delegate children: if a child produces **no output** for this long, it is considered hung and force-finished. This is the primary defense against a stuck child holding its stdout pipe open. Set `0` (or `null`) to disable it — ACP logs a prominent warning when you do; `acp_delegate_cancel` remains available as a manual escape hatch. Fractional minutes are accepted. Invalid values fall back to the default with a warning log. Environment override: `PI_ACP_DELEGATE_IDLE_TIMEOUT_MINUTES` (`0` disables).
+
+### `delegate.asyncTimeoutMinutes`
+
+- **Type:** number (minutes, fractional allowed) or `0` / `null`
+- **Default:** `30`
+- **Status:** 🟢 ACTIVE
+- **Description:** Absolute hard limit for **asynchronous** delegate children, regardless of activity. Set `0` (or `null`) to run long tasks without an absolute cap — the idle watchdog still applies unless separately disabled. Fractional minutes are accepted. Invalid values fall back to the default with a warning log. Environment override: `PI_ACP_DELEGATE_ASYNC_TIMEOUT_MINUTES` (`0` disables).
+
+### `delegate.maxConcurrent`
+
+- **Type:** number (integer ≥ 1)
+- **Default:** unlimited (no concurrency cap)
+- **Status:** 🟢 ACTIVE
+- **Environment override:** `PI_ACP_DELEGATE_MAX_CONCURRENT` (takes precedence over this key)
+- **Description:** Caps how many background (`async: true`) delegates run **at the same time**. When the limit is reached, further launches are held in a FIFO queue and start automatically as soon as a slot frees, so nothing is dropped — they just wait their turn. Set `1` to force strictly serial execution (useful on low-power machines where parallel sub-agents contend for CPU and time out). Sync (`async: false`) calls always run immediately and are not affected by this cap. Invalid values (non-integers or `< 1`) fall back to unlimited with a warning rather than failing the session. Only meaningful when `delegate.enabled` is `true`.
+
+### `delegate.thinkingLevel`
+
+- **Type:** string enum `"off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"`
+- **Default:** _(unset — each child uses Pi's own default)_
+- **Status:** 🟢 ACTIVE
+- **Description:** Global default thinking level applied to every delegate when neither the per-call `thinkingLevel` nor the role's own `thinkingLevel` (see `delegate.agents`) is set. Without any value at all levels, no `--thinking` flag is passed and each child runs on Pi's own default. An invalid value is ignored with a warning logged (it never fails the run). A per-call `acp_delegate({ thinkingLevel })` always wins over this global.
+
+### `delegate.agents`
+
+- **Type:** object — map of role name → `{ model?, thinkingLevel? }`
+- **Default:** _(unset — all roles inherit the parent model + Pi defaults)_
+- **Status:** 🟢 ACTIVE
+- **Description:** Per-role defaults so long-lived automation can pin a cheaper or more capable model and thinking level per delegate role without the main agent having to fill them in on every call. Keys are role names (`reviewer`, `researcher`, `worker`, `planner`, `oracle`, or any custom role). Each value may set:
+  - `model` (`"provider/id"`) — this role's default model. Resolution priority: per-call `model` > this role's `model` > parent agent's current model. A value that isn't a valid `"provider/id"` is ignored. If the configured model doesn't exist in the live registry, the child falls back to the parent model and a warning is logged — it never fails.
+  - `thinkingLevel` — this role's default thinking level (same enum as `delegate.thinkingLevel`). Priority: per-call > role > global.
+
+```jsonc
+{
+  "delegate": {
+    "thinkingLevel": "low",
+    "agents": {
+      "reviewer": { "model": "opencode-go/deepseek-v4-flash", "thinkingLevel": "high" },
+      "worker":   { "model": "anthropic/claude-sonnet-4-5" },
+      "oracle":   { "model": "openai/gpt-5", "thinkingLevel": "xhigh" }
+    }
+  }
+}
+```
+
+### `delegate.fleetShortcut`
+
+- **Type:** string — any Pi key id (e.g. `"ctrl+alt+d"`, `"ctrl+shift+f"`); the empty string `""` disables registration
+- **Default:** `ctrl+alt+d`
+- **Status:** 🟢 ACTIVE
+- **Description:** Keyboard shortcut for the TUI **fleet inspector** (live list + transcript of running/finished `acp_delegate` runs). The default was moved off `ctrl+alt+f`, which is also claimed by the `pi-subagents` extension — Pi's loader cannot deduplicate or let users override cross-extension shortcut conflicts, so both extensions would fight over the key (#412). The inspector remains reachable via `/acp-fleet` regardless of this setting. Set to `""` to register no shortcut (e.g. when you rely on another extension's fleet UI). An invalid value registers a never-matching binding instead of failing startup.
 
 ---
 
@@ -279,6 +500,143 @@ How it works:
 
 ---
 
+## Tool Call Repetition Guard
+
+The `repetitionGuard` key breaks **infinite loops of byte-identical tool calls**. Small greedy-decoding models can get stuck re-emitting the exact same `(tool call → tool result)` pair turn after turn — e.g. calling `acp_status {"scope":"uncompressed","view":"ranges"}` dozens of times with identical arguments while context grows each round. Token-level penalties cannot break this, because it is a *sequence-level* attractor (the repetition crosses turn boundaries), not a within-sequence token repetition.
+
+The guard fingerprints each tool call as `sha1(toolName + canonical-JSON(args))`, where the JSON serialization sorts object keys so that only the *arguments* matter — key order and result content are ignored. It tracks the length of the current run of consecutive identical calls per session:
+
+- At **`warn`** consecutive identical calls, a strong warning is appended to the matching tool result telling the model to stop repeating the call.
+- At **`abort`** consecutive identical calls, the call is **blocked** (not executed), the turn is aborted, and a terminal notification is shown.
+
+Any change to the arguments (or a switch to a different tool) resets the counter, as does a real user message (extension-sent messages do not reset it).
+
+### `repetitionGuard`
+
+- **Type:** boolean \| object
+- **Default:** `true`
+- **Status:** 🟢 ACTIVE
+- **Description:** Enable/disable the repetition breaker and tune its thresholds. `repetitionGuard: false` disables it entirely. Object form (any subset):
+
+  ```json
+  {
+    "repetitionGuard": {
+      "enabled": true,
+      "warn": 3,
+      "abort": 5
+    }
+  }
+  ```
+
+### `repetitionGuard.enabled`
+
+- **Type:** boolean
+- **Default:** `true`
+- **Status:** 🟢 ACTIVE
+- **Description:** Turn the feature on/off. `false` (or top-level `repetitionGuard: false`) disables all repetition detection.
+
+### `repetitionGuard.warn`
+
+- **Type:** number
+- **Default:** `3`
+- **Status:** 🟢 ACTIVE
+- **Description:** Number of consecutive byte-identical calls before a warning is appended to the tool result. Must be at least 1.
+
+### `repetitionGuard.abort`
+
+- **Type:** number
+- **Default:** `5`
+- **Status:** 🟢 ACTIVE
+- **Description:** Number of consecutive byte-identical calls before the call is blocked and the turn is aborted. Must be greater than `warn`; if misconfigured lower, it is clamped up to `warn + 1`.
+
+---
+
+## Degeneration Guard
+
+The `degenerationGuard` key handles **character-level degeneration**: a model occasionally gets stuck repeating one single codepoint — observed in the wild as a thinking block ending in 4655 consecutive 「【」, escalating over turns until the turn aborts and the session dies (#351). Unlike `repetitionGuard` (byte-identical *tool-call* loops), this is a *token-level* attractor inside generated text/thinking itself.
+
+Why the adapter must act: pi **replays prior assistant thinking back to the provider on every subsequent request** (openai-completions sends it as `reasoning_content`, or as plain text when the model requires thinking-as-text), and an aborted turn's partial message persists in the session log. A degenerated tail therefore rides along on every later prompt, where the model sees its own previous output ending in thousands of repeated characters — a continuation bias that re-triggers the same degeneration, aborts the next turn too, and leaves the session with no recovery path.
+
+On every context event the guard scans assistant text/thinking blocks in the outgoing view:
+
+- Runs of one codepoint ≥ **`minRun`** are collapsed into a short marker (`【【【… [4655× identical chars cut — degenerate repeat]`) — up to 3 copies of the character are kept so the context stays legible. The pass is pure, idempotent and fail-safe; persisted history is never modified.
+- While the most recent assistant message is degenerated, a one-shot `[ACP recovery notice]` user message is appended telling the model that the repeated segment carries no information and to resume from its last valid step. It is position-based self-limiting: once the model produces a fresh turn the old message is no longer last and the notice disappears — no persistent state, no accumulation.
+- A terminal notification echoes the collapse once per session + run signature.
+
+Tool-call arguments are never rewritten (rewriting them would desync the model's view from the call that actually executed). Detection runs on the persisted originals, not the outgoing view: thinking-only aborted turns never reach the outgoing view (empty assistant text would 400 on OpenAI-compatible providers), yet they are still "the previous turn" for the model's continuation, so the notice fires there too.
+
+### `degenerationGuard`
+
+- **Type:** boolean \| object
+- **Default:** `true`
+- **Status:** 🟢 ACTIVE
+- **Description:** Enable/disable the degenerate-repeat guard and tune its threshold. `degenerationGuard: false` disables it entirely. Object form (any subset):
+
+  ```json
+  {
+    "degenerationGuard": {
+      "enabled": true,
+      "minRun": 200
+    }
+  }
+  ```
+
+### `degenerationGuard.enabled`
+
+- **Type:** boolean
+- **Default:** `true`
+- **Status:** 🟢 ACTIVE
+- **Description:** Turn the feature on/off. `false` (or top-level `degenerationGuard: false`) disables all degeneration detection and the recovery notice.
+
+### `degenerationGuard.minRun`
+
+- **Type:** number
+- **Default:** `200`
+- **Status:** 🟢 ACTIVE
+- **Description:** Minimum length of a single-codepoint run (counted in codepoints, surrogate-pair safe) before it is treated as degeneration. Legitimate runs in coding sessions (markdown hrules, dotted leaders) stay well below this; observed pre-degeneration drift maxed at ~60 before the catastrophic 4655 run. Values below 8 are raised to 8 (keeps the collapse marker itself re-scan safe); invalid values fall back to 200 with a logged warning.
+
+---
+
+## Host Multi-Session
+
+The `hostSession` key controls **turn-boundary detection** for hosts that run several sessions inside one process (e.g. Prime with inline RLM sub/sibling sessions). The full contract — including child-session state derivation (`deriveChildState`) — is documented in **[docs/host-adapter.md](./docs/host-adapter.md)**.
+
+**Background.** ACP's per-turn ledgers (nudge-shown tracking, compress retry caps, outcome scoping) are keyed by the start of the current *turn*. Under Pi-native semantics a turn starts only at a genuine user-role message. Inline multi-session hosts additionally inject agent turns into the session log as `custom_message` entries; those are projected into LLM context (Pi-native semantics) but — under the default policy — start no turn, so several real host turns collapse into one turn key: nudge cadence cells misalign and retry-cap/throttle cycle statistics distort. Every turn-boundary decision in the adapter goes through the single predicate `isTurnBoundary(entry, policy)` (`src/turn-boundary.ts`).
+
+### `hostSession`
+
+- **Type:** boolean \| object
+- **Default:** `false` (off)
+- **Status:** 🟢 ACTIVE
+- **Description:** Turn-boundary policy for host-injected messages. `hostSession: true` is shorthand for `{ "countCustomMessages": true }`. Object form (any subset):
+
+  ```json
+  {
+    "hostSession": {
+      "countCustomMessages": true,
+      "customMessageTypes": ["agent_message", "async_bash_completion", "rlm_child_terminal_notice", "heartbeat_prompt"]
+    }
+  }
+  ```
+
+  **Default-off keeps existing single-session behavior byte-for-byte** — enable this only if your host actually injects agent turns into session logs.
+
+### `hostSession.countCustomMessages`
+
+- **Type:** boolean
+- **Default:** `false`
+- **Status:** 🟢 ACTIVE
+- **Description:** Count host-injected `custom_message` entries with non-empty text (except UI-only `acp-status` panels) as turn boundaries for all per-turn ledgers; empty injections are pure control signals and start no turn. Does not change LLM-context projection — those entries were already projected as user-role messages under Pi-native semantics.
+
+### `hostSession.customMessageTypes`
+
+- **Type:** string[]
+- **Default:** unset (every non-empty injected type counts when opted in)
+- **Status:** 🟢 ACTIVE
+- **Description:** Optional `customType` allowlist refining `countCustomMessages`: when set (with `countCustomMessages: true`), only injected `custom_message` entries whose `customType` is listed start a turn — metadata injections that enter LLM context without being a real host turn (e.g. Prime's `harness_digest`, `ipython_state`) no longer reset nudge/retry accounting (#578). Entries without a `customType` never match; UI-only types (`acp-status`, `acp-export`, `acp-rule`) stay excluded even when listed. Ignored unless `countCustomMessages: true`; malformed values (non-array, non-string or empty-string members) warn and fall back to "all injected types count". An empty array is explicit "count none". Example above is Prime's set of genuine host-turn types.
+
+---
+
 ## Compression Tuning
 
 The `compress` sub-object groups the three thresholds that form a **three-tier escalation** for context management. They control *when* the model is nudged to compress and *when* large outputs are forcibly truncated to keep the session alive. Lower thresholds mean the extension compresses earlier and more aggressively.
@@ -309,6 +667,64 @@ The flow is:
 - **Default:** `50000`
 - **Status:** 🟢 ACTIVE
 - **Description:** The token-growth threshold that controls the cadence of **soft** compression nudges. A soft nudge fires roughly every time this many tokens of new compressible content accumulate. A lower value means the model is nudged to compress more often; a higher value means less frequent nudges. This only governs *growth-driven* nudges — once usage crosses `compress.maxContextLimit`, forced nudges take over regardless of this setting. Maps to the kernel settings `nudge.growthFloor` and `nudge.growthCap`.
+- **Same-turn re-inject:** within one user turn a nudge injects at most once, but once the context has since grown by a full growth floor (mirroring the kernel's anti-thrashing cadence: `max(minGrowthFloor, minGrowthRatio × adaptiveGrowth)` — 22.5K tokens with defaults) a fresh reminder re-injects in the same turn (issue #269: a model that ignored a 78% nudge used to stay silent until the 95% emergency truncation). After a successful compress the growth baseline re-anchors to the new (smaller) scale, so post-compress regrowth into the pressure band is not held against the pre-compress peak.
+
+### `compress.reasoning`
+
+- **Type:** `object` — `{ "drop": boolean, "threshold": number }`
+- **Default:** `{ "drop": true, "threshold": 2048 }`
+- **Status:** 🟢 ACTIVE
+- **Description:** Config for dropping oversized reasoning (thinking) parts from historical `compress` tool calls — exact semantic alignment with [opencode-acp #377](https://github.com/ranxianglei/opencode-acp/pull/377). `compress` calls are hard-exempt from compression (their tool results anchor the block summaries), so their thinking rides along every request as an unreclaimable context floor. A request-time pass removes `thinking` parts from a message only when **all** gates hold:
+  1. **Closed turn** — the message is strictly before the last genuine user message; the active round is never touched (some providers require replaying the active round's thinking).
+  2. **Selector** — the message carries a `toolCall` part with name `compress` (only compress; other protected tools would need their own explicit config).
+  3. **Size** — the message's total reasoning length (chars, summed across parts of that message, never across messages) **strictly exceeds** `threshold`. `0` drops any non-empty reasoning.
+
+  Persisted history is never modified — the pass only rewrites the outgoing view, rebuilt fresh from the session log on every request. Pure, idempotent, fail-safe (any error leaves messages untouched). Merged field-wise (`drop`, `threshold` separately) across the three levels of `compress.providers`.
+
+  Fields:
+  - `drop` (`boolean`, default `true`) — master switch; `false` disables the pass (kill-switch).
+  - `threshold` (`number`, chars, default `2048`) — single-thinking size gate.
+
+  Providers whose thinking items are opaque and must round-trip unmodified (e.g. OpenAI encrypted reasoning) can opt out per-provider:
+   ```json
+   { "compress": { "providers": { "openai": { "reasoning": { "drop": false } } } } }
+   ```
+
+   **Strict-echo thinking upstreams (auto-disabled).** A few thinking-mode providers reject a rebuilt request with HTTP 400 (`The \`reasoning_content\` ... must be passed back to the API`) once a closed-round assistant message loses its reasoning. The adapter detects **DeepSeek** statically — the model's `baseUrl` or provider name contains `deepseek` (case-insensitive) — and forces `drop: false` for that model automatically, overriding an explicit `drop: true` for safety. This is cost-free for non-thinking DeepSeek models, which emit no `thinking` parts to drop. Strict-echo providers **not** on a `deepseek` host — GLM-thinking, QwQ, self-hosted DeepSeek mirrors — are deliberately not auto-detected (that would disable the pass for their non-thinking models); use the per-provider override above for those. Twin fixes: proxy-side billion-context#690 and kernel-side fold atomicity acp-kernel#245 (shipped in acp-kernel 0.0.63); tracked in [#361](https://github.com/ranxianglei/billion-context-pi/issues/361).
+
+### `compress.promptPack`
+
+- **Type:** `string` — pack name (`[A-Za-z0-9][A-Za-z0-9._-]*`, no path separators)
+- **Default:** `"default"`
+- **Status:** 🟢 ACTIVE
+- **Description:** Selects a **prompt pack** — a named bundle of surface overrides (prompt sections, nudge sections, tool prompts, delegate prompt, compression rules) applied as the base layer under your inline `acp.json` overrides. Resolved through the same three-level cascade as every other `compress.*` field: `models > providers > global`, per active model, per turn. See [Prompt Packs](#prompt-packs) for the full reference and the built-in `lean` pack.
+
+### Soft target with elastic headroom (#1122)
+
+Keeping day-to-day context small is a **cost target**, not a window size. The common misconfiguration behind [billion-context#1122](https://github.com/ranxianglei/billion-context/issues/1122) is setting `modelContextLimit` below the model's native window to express that target — e.g., a 70k limit on a 200k model "to keep things around 40k". Because every percentage threshold is measured against `modelContextLimit`, this anchors *all* triggers to the shrunken value: forced nudges start at 75% of 70k ≈ 52.5k, and lossy emergency truncation fires at ~66.5k — so a legitimate task that genuinely needs 80k of context gets compressed, and eventually truncated, mid-task.
+
+The recipe: keep the denominator at the true window and express the cost target through the existing soft threshold instead.
+
+```jsonc
+{
+  // "modelContextLimit": 200000,   // optional — omit to follow Pi's live model catalog
+  "compress": {
+    "maxContextLimit": "35%"        // soft target ≈ 70k on a 200k window (= target ÷ native window)
+  }
+}
+```
+
+How compression actually gets triggered (three layers):
+
+1. **Growth layer** (day-to-day driver) — **absolute tokens, independent of `modelContextLimit` by design**: a soft nudge fires once cumulative growth since the last anchor (session start / last compress / post-shrink reset) passes the cadence floor (`max(20k, 45% × nudgeGrowthTokens)` ≈ 22.5k by default), provided there is enough effective compressible content (~`nudgeGrowthTokens`). Keeping the window large does NOT delay this layer.
+2. **Pressure layer** — the only %-anchored part: `usage ≥ maxContextLimit` (default 75%) → forced nudge every turn; ≥ 95% → emergency truncation. Scales with `modelContextLimit`.
+3. **Qualification layer** — kernel default 45%, not exposed here; gates only the turn-1 cold-start ticket and T2/T3 block-count escalation.
+
+Notes:
+
+- Setting `maxContextLimit` below 45% works correctly (the layers gate independent paths), but acp-kernel logs one validation warning per turn — log noise only, thresholds unaffected (tracked in acp-kernel#346).
+- Behavior delta vs the old low-limit config: the forced zone moves from 75%×old-limit up to chosen-%×native-window, and emergency truncation moves from ~95%×old-limit back to the true edge (~95%×native). Between the growth anchors and the forced zone, context may drift below your target — that drift is the price of elasticity. A strict ceiling *and* burst headroom simultaneously needs structure-aware compression ([billion-context#344](https://github.com/ranxianglei/billion-context/issues/344)), not a smaller denominator.
+- All of this resolves through the three-level cascade below (`models > providers > global`), so different targets can coexist across models.
 
 ### `compress.providers` — per-provider & per-model overrides
 
@@ -414,6 +830,152 @@ The `prompts` object overrides acp-kernel's **load-bearing** compression prompt 
 - **Status:** 🟢 ACTIVE
 - **Description:** The safety gate for `prompts` overrides. Set to `true` to acknowledge that replacing the kernel's tuned compression rules may reduce summary quality, and to make your `prompts` overrides take effect. When `false` (or omitted), all `prompts` overrides are ignored and the kernel defaults are used. If `resolvePrompts` rejects your override (for example a malformed value that still passes the type check), the extension falls back to the defaults and logs a `prompts-resolve-failed` warning rather than failing to start.
 
+### `promptSections`
+
+- **Type:** `object` (partial — per-section tri-state)
+- **Default:** *(built-in defaults)*
+- **Status:** 🟢 ACTIVE
+- **Description:** Override sections of the ACP system prompt. Thirteen keys (`acpTags`, `summariesInContext`, `tools`, `whenToCompress`, `whenNotToCompress`, `multiTierIntro`, `decompressPhilosophy`, `contextBreakdown`, `throttleRetry`, `philosophy`, `howToCompress`, `tier2`, `tier3`) with one uniform tri-state contract each (mirroring the kernel's section semantics): a string **replaces** the section, `null` **removes** it entirely, omitting it keeps the default. Not risk-gated — for a risk-gated replacement of rule text, use `prompts`; when both are set, the `promptSections` value wins (applied last). Example:
+
+  ```json
+  {
+    "promptSections": {
+      "acpTags": "(custom explanation of the acp tags)",
+      "contextBreakdown": null
+    }
+  }
+  ```
+
+### `nudgeSections`
+
+- **Type:** `object` (partial — per-key tri-state)
+- **Default:** *(built-in defaults)*
+- **Status:** 🟢 ACTIVE
+- **Description:** Override the **guidance-class texts** of compression nudges. Four keys: `efficiencyNote` (gentle nudge preamble), `emergencyHeader` (emergency nudge preamble), `t2Guidance` (tier-2 distillation guidance), `t3Guidance` (tier-3 condensation guidance). Same tri-state semantics as `promptSections`. Not risk-gated. Trigger lines, renderer labels, and tool feedback text are contract-locked and cannot be overridden. Example:
+
+  ```json
+  {
+    "nudgeSections": {
+      "efficiencyNote": "Keep the working set lean — fold consumed output early.",
+      "emergencyHeader": null
+    }
+  }
+  ```
+
+### `toolPrompts`
+
+- **Type:** `object` (per-tool partial)
+- **Default:** *(built-in defaults)*
+- **Status:** 🟢 ACTIVE
+- **Description:** Override the LLM-facing text of the four ACP tools. Keys: `compress`, `decompress`, `search_context`, `acp_status`. Each accepts `description` (string), `paramDescriptions` (object mapping parameter names to strings — rewrites the schema field descriptions), `promptSnippet` (string, shown in the "Available tools" system prompt section), and `promptGuidelines` (string or string[] — appended to the system prompt Guidelines section). Read **synchronously at extension load** (tool definitions are frozen at registration), so changes require restarting pi. Example:
+
+  ```json
+  {
+    "toolPrompts": {
+      "compress": {
+        "promptSnippet": "compress({ content: [{ startId, endId, summary }] })",
+        "paramDescriptions": { "summary": "Short dense summary; paths + decisions verbatim." }
+      }
+    }
+  }
+  ```
+
+### `delegatePrompt`
+
+- **Type:** `string | null`
+- **Default:** *(built-in `ACP_DELEGATE_NOTIFICATIONS` appendix)*
+- **Status:** 🟢 ACTIVE
+- **Description:** Replace (`string`) or remove (`null`) the `ACP_DELEGATE_NOTIFICATIONS` appendix appended to the system prompt when the delegate tool is enabled. Useful for hosts that run their own delegate scheme with different semantics. Only applies when `delegate` is enabled. Example:
+
+  ```json
+  { "delegatePrompt": "Background task results arrive as system notifications — read the result file if relevant." }
+  ```
+
+---
+
+## Prompt Packs
+
+A **prompt pack** is a named JSON file bundling surface overrides — prompt sections, nudge sections, tool prompts, the delegate prompt, and the four load-bearing compression rules — so you can switch a model's entire ACP surface with one line instead of pasting a block of `promptSections`/`toolPrompts` JSON into `acp.json`:
+
+```json
+{ "compress": { "promptPack": "lean" } }
+```
+
+Pack selection rides the standard `compress` three-level cascade (`models > providers > global`, deepest-wins per turn), so different models can use different packs with zero extra config plumbing:
+
+```json
+{ "compress": { "providers": { "zhipu": { "promptPack": "lean" } } } }
+```
+
+### Discovery order
+
+For pack name `N`, the first match wins:
+
+1. `<project>/.pi/acp/packs/N.json` — project-local (checked last, wins — shadows both)
+2. `~/.pi/acp/packs/N.json` — user-global
+3. Built-in packs: `default`, `lean`
+
+Names must match `[A-Za-z0-9][A-Za-z0-9._-]*` (no `..`, no path separators); invalid names and unreadable/invalid-JSON files fall back to built-ins — the adapter never crashes on a bad pack.
+
+### Pack file schema
+
+```jsonc
+{
+  "name": "my-pack",              // informational
+  "version": "1.0.0",             // informational
+  "description": "...",           // informational
+  "prompts": {                     // the 4 load-bearing rule strings (RISK-GATED, see below)
+    "compressPhilosophy": "...",
+    "howToCompressRules": "...",
+    "tier2DistillRules": "...",
+    "tier3CondenseRules": "..."
+  },
+  "promptSections": { "acpTags": "...", "tier2": null },   // same schema as acp.json promptSections
+  "nudgeSections": { "efficiencyNote": "..." },             // same schema as acp.json nudgeSections
+  "toolPrompts": { "compress": { "description": "..." } }, // same schema as acp.json toolPrompts
+  "delegatePrompt": "..."          // string replaces, null removes
+}
+```
+
+Every field is optional; each uses the same sanitizer as its `acp.json` counterpart, and every key in each section is tri-state (`string` replaces, `null` deletes, absent keeps the pack/built-in value).
+
+### Merge semantics — pack base, inline wins
+
+The effective surface for a turn = **pack defaults ⊕ inline `acp.json` overrides**, field by field:
+
+- `promptSections` / `nudgeSections`: inline key beats pack key (including `null`).
+- `toolPrompts`: per-tool, then per-field (`description`, `promptSnippet`, `promptGuidelines`), then per-param inside `paramDescriptions`.
+- `delegatePrompt`: inline wins if present (including `null`).
+
+### Programmatic sources (hosts & future installers)
+
+The discovery chain is itself pluggable. A **pack source** is anything implementing:
+
+```ts
+interface PackSource {
+  id: string;
+  resolve(name: string): Pack | null;  // sanitized surface + provenance tag
+  list?(): Pack[];                       // optional, powers pack listings
+}
+```
+
+Built-in packs, directory packs, and any managed registry all flow through one `createPackResolver([...sources])` — first match wins, so a **prepended source shadows everything**. That is the intended integration point for a future `bili-pi install`-style pack manager: write pack files into the user dir (zero code), or register a managed source ahead of the defaults — no core changes either way. Hosts embedding the adapter can build their own resolver and pass it to `resolveActivePack`.
+
+### Risk gating
+
+A pack's `prompts` block overrides the compression rule strings, exactly like inline `prompts` — so it is gated by the same [`acknowledgePromptsRisk`](#acknowledgepromptsrisk) switch. Without that flag set in `acp.json`, the pack's `prompts` block is ignored (everything else in the pack still applies); a warning is logged. The flag cannot be shipped inside a pack — it must be an explicit local choice.
+
+### Built-in packs
+
+| Name | Purpose |
+|------|---------|
+| `default` | No overrides — the full built-in surface. |
+| `lean` | Token-lean surface: one compact system-prompt block + one-line tool descriptions, no snippets/guidelines (≈76% smaller surface than `default` — measured 5422→1312 bytes). Compression rules stay kernel defaults, delivered by nudges on demand. Adapted from the community investigation in [#410](https://github.com/ranxianglei/billion-context-pi/issues/410). |
+
+### `lean` details
+
+The `lean` pack nulls every system-prompt section except a single `acpTags` block of eight one-line rules (refs, what to compress, what to preserve verbatim, recall tools, renumbering recovery, decompress-to-file, throttle resume, summaries-are-history), blanks all four tools' `promptSnippet`/`promptGuidelines`, and replaces their `description`s with one-liners. Everything not overridden — compression philosophy, tier rules, nudge text — remains at built-in defaults. Best for small models that copy tool schemas verbatim into their answers, or when you want maximum coding tokens back. To experiment: `{ "compress": { "promptPack": "lean" } }`.
+
 ---
 
 ## Environment Variables
@@ -446,4 +1008,46 @@ Environment variables take precedence over the JSON config files. They are usefu
 - **Type:** string (file path)
 - **Default:** `~/.pi/acp.log`
 - **Status:** 🟢 ACTIVE
-- **Description:** Override the path to the log file. By default, structured logs are written to `~/.pi/acp.log` (the file rotates to `~/.pi/acp.log.old` at 10 MB). Point this at a different location to keep per-project or per-run logs separate.
+- **Description:** Override the path to the log file. By default, structured logs are written to `~/.pi/acp.log` (the file rotates to `~/.pi/acp.log.old` at 10 MB). Point this at a different location to keep per-project or per-run logs separate. On a Pi fork, `~/.pi` is the fork's own config directory (`~/.prime` on Prime) — see [docs/host-adapter.md §4](./docs/host-adapter.md#4-config-directory-config_dir_name).
+
+### `PI_ACP_DELEGATE_MAX_DEPTH`
+
+- **Type:** integer ≥ 1
+- **Default:** *(unset — follows `delegate.maxDepth`, then 2)*
+- **Status:** 🟢 ACTIVE
+- **Description:** Override the maximum delegate nesting depth for one session without editing config. Takes precedence over `delegate.maxDepth`. The resolved value is what gets propagated down the delegation tree. Do not set this manually mid-tree: it is also the internal variable ACP uses to pass the *effective limit* into child processes.
+
+### `PI_ACP_DELEGATE_SYNC_TIMEOUT_MINUTES`
+
+- **Type:** number (minutes) or `0`
+- **Default:** *(unset — follows `delegate.syncTimeoutMinutes`, then 5)*
+- **Status:** 🟢 ACTIVE
+- **Description:** Override the synchronous `acp_delegate` hard timeout. Set `0` to disable the sync hard timeout for one session. Takes precedence over `delegate.syncTimeoutMinutes`.
+
+### `PI_ACP_DELEGATE_IDLE_TIMEOUT_MINUTES`
+
+- **Type:** number (minutes) or `0`
+- **Default:** *(unset — follows `delegate.idleTimeoutMinutes`, then 5)*
+- **Status:** 🟢 ACTIVE
+- **Description:** Override the async idle watchdog window. Set `0` to disable the idle watchdog for one session (ACP logs a warning; `acp_delegate_cancel` remains as a manual escape hatch). Takes precedence over `delegate.idleTimeoutMinutes`.
+
+### `PI_ACP_DELEGATE_ASYNC_TIMEOUT_MINUTES`
+
+- **Type:** number (minutes) or `0`
+- **Default:** *(unset — follows `delegate.asyncTimeoutMinutes`, then 30)*
+- **Status:** 🟢 ACTIVE
+- **Description:** Override the absolute hard limit for async delegate children. Set `0` to run long tasks without an absolute cap (the idle watchdog still applies unless disabled). Takes precedence over `delegate.asyncTimeoutMinutes`.
+
+### `PI_ACP_DELEGATE_MAX_CONCURRENT`
+
+- **Type:** integer (≥ 1)
+- **Default:** *(unset — cap follows `delegate.maxConcurrent`, then unlimited)*
+- **Status:** 🟢 ACTIVE
+- **Description:** Override the background (`async`) delegate concurrency cap. **Takes precedence** over `delegate.maxConcurrent`. Set to `1` for forced serial execution. Invalid values fall back to the next source (then unlimited) with a warning rather than failing the session.
+
+### `PI_ACP_DELEGATE_FORCE_ENABLE`
+
+- **Type:** `true` | `false`
+- **Default:** *(unset — follows `delegate.forceEnable`, then false)*
+- **Status:** 🟢 ACTIVE
+- **Description:** Override whether `acp_delegate` stays active despite a detected project-scope `pi-subagents` install. **Takes precedence** over `delegate.forceEnable`. Unparseable values fall back to the config value with a warning rather than failing the session.

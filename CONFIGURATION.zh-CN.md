@@ -19,6 +19,8 @@
 
 > **优先级：** 环境变量 &gt; 项目文件 &gt; 全局文件 &gt; 内置默认值。
 
+在 Pi 的 fork 上，`.pi` 指该 fork 自己的配置目录——Prime 上为 `~/.prime/acp.json` 和 `<项目>/.prime/acp.json`。在该文件存在之前，仍会读取上表的 `.pi` 路径。见 [docs/host-adapter.md §4](./docs/host-adapter.md#4-config-directory-config_dir_name)。
+
 文件在会话启动时加载。缺失文件、格式错误的 JSON、未知键都会被静默忽略——扩展绝不会因为配置问题而无法启动。只有文档中列出的键会被读取，其余一律丢弃。
 
 ---
@@ -32,8 +34,9 @@
   "debug": false,
   "autoUpdate": true,
   "modelContextLimit": 200000,
+  "outputHeadroomMaxPct": 0.25,
   "toolBashDefaultTimeout": 60,
-  "toolOutputMaxBytes": 200000,
+  "toolOutputMaxBytes": 50000,
 
   "throttleRetry": {
     "enabled": true,
@@ -48,7 +51,8 @@
   "compress": {
     "maxContextLimit": "75%",
     "emergencyThresholdPercent": "95%",
-    "nudgeGrowthTokens": 50000
+    "nudgeGrowthTokens": 50000,
+    "reasoning": { "drop": true, "threshold": 2048 }
   }
 }
 ```
@@ -61,7 +65,32 @@
 }
 ```
 
-覆盖内核压缩提示词规则的高级配置（需要风险确认）。只设置你想改的字段，其余继承内核默认值：
+### 微调压缩提示词
+
+三个层级，从最轻到最重——用第一个够用的即可：
+
+**1. 选一个提示词包——一行搞定，无需风险确认。**[提示词包](#提示词包)把一整套调好的表面（系统提示词各节、nudge 文本、工具描述、压缩规则）打包在一起：
+
+```json
+{ "compress": { "promptPack": "lean" } }
+```
+
+内置包：`default`（完整表面）和 `lean`（约省 76%——适合会把工具 schema 原样抄进回答的小模型）。同一个键也可以走标准 `compress` 级联按 provider / 按 model 选包。
+
+**2. 逐项微调——三态，无需风险确认。**`promptSections`、`nudgeSections`、`toolPrompts` 覆盖表面的单个部分：**字符串替换**、`null` 删除、省略键保持默认。内联值优先于包的值：
+
+```json
+{
+  "compress": { "promptPack": "lean" },
+  "promptSections": { "whenToCompress": "（你的替换文本）" },
+  "nudgeSections": { "efficiencyNote": null },
+  "toolPrompts": { "compress": { "description": "把一段对话压缩成摘要。" } }
+}
+```
+
+逐键参考：[提示词自定义](#提示词自定义)。
+
+**3. 逐字替换内核压缩规则——需风险确认。**四个 `prompts.*` 字段是决定摘要*怎么写*的核心规则；替换它们可能悄悄降低摘要质量，因此需要显式确认。只设置你想改的字段，其余继承内核默认值：
 
 ```json
 {
@@ -96,16 +125,34 @@
 | `debug` | boolean | `false` | 🟢 ACTIVE | 开启日志中的详细调试事件。 |
 | `autoUpdate` | boolean | `true` | 🟢 ACTIVE | 启动时检查 npm 并自动安装更新。 |
 | `modelContextLimit` | number | *(自动)* | 🟢 ACTIVE | 覆盖上下文窗口大小（token 数）。 |
+| `outputHeadroomMaxPct` | number \| string | `0.25` | 🟢 ACTIVE | 输出预留（output headroom）占上下文窗口的比例上限。 |
 | `toolBashDefaultTimeout` | number | `60` | 🟢 ACTIVE | 模型省略 `timeout` 时注入 bash 工具的默认超时秒数。 |
-| `toolOutputMaxBytes` | number | `200000` | 🟢 ACTIVE | 工具返回文本的硬性字节上限。 |
+| `toolOutputMaxBytes` | number | `50000` | 🟢 ACTIVE | 工具返回文本的硬性字节上限。 |
+| `protectedTools` | string\[\] | `无` | 🟢 ACTIVE | 工具名模式（支持 glob 后缀），其**所有** call+result 对都被硬排除在压缩之外（ref 渲染为 `BLOCKED`）。适用于低频高价值、输出为独立内容的工具——见下方 ⚠ 说明。 |
+| `protectedLatestTools` | string\[\] | `无` | 🟢 ACTIVE | 工具名模式（支持 glob 后缀），仅**最近一次** call+result 对被硬排除在压缩之外；更早的对仍可压缩。适用于累积快照型工具。 |
+| `neverPreserveRecentTools` | string\[\] | 内核内置（`["decompress", "search_context", "read", "bash"]`，需 acp-kernel >= 0.0.92） | 🟢 ACTIVE | 从软保护近期区**移除**的工具名模式，让它们的结果立即可压。默认让 `read`/`bash` 保持可压；只移除 `read`（保留 `decompress`/`search_context`）可解批量读文件的「折叠→重读」死循环。**空数组 `[]` 合法**（最大保护逃生门）。 |
+| `preserveRecentTools` | string\[\] | 未设置（不做减法；需 `acp-kernel` >= 0.0.93） | 🟢 ACTIVE | `neverPreserveRecentTools` 的**正向配对**：从内核计算的生效排除表中**移除**的工具名模式 —— 单条 `["read"]` 即 #1198/#1277 的解法，无需重述内置列表。**空数组 `[]` 不合法**（纯无操作，是 `neverPreserveRecentTools: []` 的笔误）。 |
 | `throttleRetry` | boolean \| object | `true` | 🟢 ACTIVE | 自动重试 provider 侧 token 限流错误（递进退避）。 |
+| `repetitionGuard` | boolean \| object | `true` | 🟢 ACTIVE | 打断字节级完全相同的工具调用死循环（连续 3 次告警，连续 5 次拦截并中止本轮）。 |
+| `degenerationGuard` | boolean \| object | `true` | 🟢 ACTIVE | 折叠出站视图中 assistant text/thinking 里的单字符退化连击（如 4655×「【」）并注入一次性恢复通知——打破 pi 每轮请求都回传退化 thinking 导致的连环 abort 死循环（#351）。 |
+| `hostSession` | boolean \| object | `false` | 🟢 ACTIVE | 多会话宿主的回合边界策略：是否把注入的 `custom_message` 计为回合起点。默认关闭（pi 原生行为）。 |
+| `rules` | boolean | `false` | 🟢 ACTIVE | 注册可选的 `acp_rule` 记录工具：简短、原则性的提醒，硬保护免于压缩。默认关闭。 |
 
 **delegate 键**
 
 | 键 | 类型 | 默认值 | 状态 | 说明 |
 |----|------|--------|------|------|
 | `delegate.enabled` | boolean | `true` | 🟢 ACTIVE | 启用 `acp_delegate` 工具及其系统提示部分。 |
+| `delegate.forceEnable` | boolean | `false` | 🟢 ACTIVE | 检测到**项目级** `pi-subagents` 安装时仍保留 `acp_delegate`（默认：自动停用；仅用户级安装只记警告日志）。可被 `PI_ACP_DELEGATE_FORCE_ENABLE` 覆盖。 |
 | `delegate.displayUsage` | string | `"separate"` | 🟢 ACTIVE | 控制 delegate 子代理的 token 用量如何报回主会话。 |
+| `delegate.maxDepth` | number | `2` | 🟢 ACTIVE | `acp_delegate` 最大嵌套深度（主会话 = 深度 0；处于该深度的会话成为叶子，不能再委派）。设为 `1` 可禁止 delegate 再嵌套。 |
+| `delegate.syncTimeoutMinutes` | number | `5` | 🟢 ACTIVE | **同步** `acp_delegate` 调用的硬超时（分钟）。`0` / `null` 禁用。 |
+| `delegate.idleTimeoutMinutes` | number | `5` | 🟢 ACTIVE | 异步 delegate 子进程的闲置看门狗——无输出超过该时长即强制结束。`0` / `null` 禁用。 |
+| `delegate.asyncTimeoutMinutes` | number | `30` | 🟢 ACTIVE | 异步 delegate 子进程的绝对硬上限（分钟）。`0` / `null` 禁用。 |
+| `delegate.maxConcurrent` | number | unlimited | 🟢 ACTIVE | 同时运行的后台（`async`）delegate 上限；超出的启动按 FIFO 排队，有空位时自动开始。`1` = 强制串行。可被 `PI_ACP_DELEGATE_MAX_CONCURRENT` 覆盖。 |
+| `delegate.thinkingLevel` | string | _（未设置）_ | 🟢 ACTIVE | delegate 全局默认 thinking level（per-call > 角色 > 全局 > Pi 默认）。 |
+| `delegate.agents` | object | _（未设置）_ | 🟢 ACTIVE | 按角色配置默认模型 + thinking level，以角色名为键。 |
+| `delegate.fleetShortcut` | string | `ctrl+alt+d` | 🟢 ACTIVE | `acp_delegate` fleet inspector 的 TUI 快捷键；设为 `""` 可关闭注册。 |
 
 **provider 限流重试键**
 
@@ -117,6 +164,16 @@
 | `throttleRetry.maxDelayMs` | number | `300000` | 🟢 ACTIVE | 递进 kick 延迟上限。 |
 | `throttleRetry.backoffMode` | string | `"exponential"` | 🟢 ACTIVE | 延迟递进方式：`"exponential"`（每次 kick ×2）或 `"fixed"`。 |
 
+**重复熔断键**
+
+| 键 | 类型 | 默认值 | 状态 | 说明 |
+|----|------|--------|------|------|
+| `repetitionGuard.enabled` | boolean | `true` | 🟢 ACTIVE | 启用重复熔断。`false` 完全关闭。 |
+| `repetitionGuard.warn` | number | `3` | 🟢 ACTIVE | 连续字节级相同调用达到该次数后，在工具返回尾部追加强警告。 |
+| `repetitionGuard.abort` | number | `5` | 🟢 ACTIVE | 连续字节级相同调用达到该次数后，拦截该调用（不执行）并中止本轮。必须大于 `warn`。 |
+| `degenerationGuard.enabled` | boolean | `true` | 🟢 ACTIVE | 启用单字符退化熔断。`false` 完全关闭。 |
+| `degenerationGuard.minRun` | number | `200` | 🟢 ACTIVE | 单 codepoint 连击达到该长度才判定为退化并折叠。小于 8 的值会被抬到 8。 |
+
 **compress 键**
 
 | 键 | 类型 | 默认值 | 状态 | 说明 |
@@ -124,6 +181,9 @@
 | `compress.maxContextLimit` | number \| string | `"75%"` | 🟢 ACTIVE | 触发强制压缩 nudge 的上下文阈值。 |
 | `compress.emergencyThresholdPercent` | number \| string | `"95%"` | 🟢 ACTIVE | 触发紧急截断的上下文阈值。 |
 | `compress.nudgeGrowthTokens` | number | `50000` | 🟢 ACTIVE | 软压缩 nudge 的 token 增长步长。 |
+| `compress.reasoning` | object | `{ "drop": true, "threshold": 2048 }` | 🟢 ACTIVE | 请求时丢弃历史 `compress` 调用上的超大思考（不修改持久化历史）。 |
+| `compress.stripImages` | boolean | `false` | 🟢 ACTIVE | **可选开启**：wire 层剥离历史图像载荷（issue #321）。为 `true` 时，除最近 `stripImagesKeepRecent` 条消息外，历史消息的图像部分在上游请求体中被剥离；纯图像消息折叠为 `"[image]"` 文本占位符。支持协议：anthropic-messages、openai-completions、openai-responses（含 azure/codex 变体）。 |
+| `compress.stripImagesKeepRecent` | number | `5` | 🟢 ACTIVE | `stripImages` 开启时保留图像载荷的最近消息条数。 |
 
 **prompts 键**
 
@@ -131,6 +191,11 @@
 |----|------|--------|------|------|
 | `prompts` | object | *(内核默认)* | 🟢 ACTIVE | 覆盖 acp-kernel 的 4 条承重压缩提示词规则。每个设置的字段逐字替换默认值。 |
 | `acknowledgePromptsRisk` | boolean | `false` | 🟢 ACTIVE | 必须为 `true`，`prompts` 覆盖才会生效；否则覆盖被丢弃、使用默认值。 |
+| `promptSections` | object | *(内置默认)* | 🟢 ACTIVE | 覆盖 ACP 系统提示词的 13 个段，统一三态：字符串=替换 / null=删除 / 省略=默认。不经风险门禁。 |
+| `nudgeSections` | object | *(内置默认)* | 🟢 ACTIVE | 覆盖压缩提示的 4 段引导类文本（efficiencyNote / emergencyHeader / t2Guidance / t3Guidance），同样三态。不经风险门禁。 |
+| `toolPrompts` | object | *(内置默认)* | 🟢 ACTIVE | 覆盖四个 ACP 工具的 LLM 文案（description / paramDescriptions / promptSnippet / promptGuidelines）。扩展加载时同步读取，改后需重启 pi。 |
+| `delegatePrompt` | string \| null | *(内置附录)* | 🟢 ACTIVE | 替换（string）或删除（null）delegate 启用时的 ACP_DELEGATE_NOTIFICATIONS 系统提示词附录。 |
+| `promptPack` | string | `default` | 🟢 ACTIVE | 选择具名[提示词包](#提示词包)（如内置 `lean`）——一行替代整块内联 `promptSections`/`toolPrompts` JSON；作为内联覆盖之下的基础层生效。 |
 
 **环境变量**
 
@@ -140,8 +205,14 @@
 | `ACP_MODEL_CONTEXT_LIMIT` | 覆盖上下文窗口大小（优先级最高）。 |
 | `ACP_DEBUG` | 设为 `1` / `true` 开启调试日志。 |
 | `ACP_LOG_FILE` | 覆盖日志文件路径（默认 `~/.pi/acp.log`）。 |
+| `PI_ACP_FORK_HOST` | 设为 `1` / `true` 声明当前宿主是兼容 Pi 的 fork（无 `buildContextEntries()`），使其被识别为受支持宿主。OMP 默认仍被拒绝。见 [docs/host-adapter.md](./docs/host-adapter.md)。 |
+| `PI_ACP_DELEGATE_MAX_DEPTH` | 覆盖 `delegate.maxDepth`。 |
+| `PI_ACP_DELEGATE_SYNC_TIMEOUT_MINUTES` | 覆盖 `delegate.syncTimeoutMinutes`；`0` 禁用同步硬超时。 |
+| `PI_ACP_DELEGATE_IDLE_TIMEOUT_MINUTES` | 覆盖 `delegate.idleTimeoutMinutes`；`0` 禁用闲置看门狗。 |
+| `PI_ACP_DELEGATE_ASYNC_TIMEOUT_MINUTES` | 覆盖 `delegate.asyncTimeoutMinutes`；`0` 禁用异步硬上限。 |
+| `PI_ACP_DELEGATE_FORCE_ENABLE` | 覆盖 `delegate.forceEnable`；取值 `true` / `false`。 |
 
-> **只有文档中列出的键才会从 `acp.json` 读取。** 其他调优参数（`preserveRecentMessages`、`protectedTools`）是代码级别的，不开放给用户。三个压缩阈值构成三级递进：基于增长的软 nudge → 越过 `compress.maxContextLimit` 后的强制 nudge → 越过 `compress.emergencyThresholdPercent` 后的紧急截断。
+> **只有文档中列出的键才会从 `acp.json` 读取。** 其他调优参数（`preserveRecentMessages`）是代码级别的，不开放给用户。三个压缩阈值构成三级递进：基于增长的软 nudge → 越过 `compress.maxContextLimit` 后的强制 nudge → 越过 `compress.emergencyThresholdPercent` 后的紧急截断。
 
 ---
 
@@ -160,13 +231,22 @@
 - **默认值：** `true`
 - **状态：** 🟢 ACTIVE
 - **说明：** Pi 启动时检查 npm 是否有更新版本的 `billion-context-pi` 并自动安装。设为 `false` 可避免启动时的所有网络请求。也可通过 `ACP_AUTO_UPDATE` 环境变量（`ACP_AUTO_UPDATE=0` 或 `ACP_AUTO_UPDATE=false`）禁用，该变量优先于此配置。
+  - **只读安装位置：** 当该副本的安装前缀不可写（如 root 所有的 `npm i -g` 全局前缀）时，自动更新在首次 `EACCES`/权限失败后停止对该位置的重试，并一次性提示运行 `npm i -g billion-context-pi`（或若依赖 pi 自带安装则移除全局副本），而不是无限循环。检查节流与停止重试标记均按安装位置区分，因此健康副本不会压制失败副本的检查。
+  - **两套并行机制：** 此扩展侧自动更新与 pi 核心自身的更新 banner 相互独立——两者可能同时出现，禁用其中一个不影响另一个。
 
 ### `modelContextLimit`
 
 - **类型：** `number`
 - **默认值：** *(自动)* —— 每轮实时读取模型的 `contextWindow`
 - **状态：** 🟢 ACTIVE
-- **说明：** 覆盖上下文窗口大小（token 数）。默认每轮从活跃模型的 `ctx.model.contextWindow` 读取，切换模型时自动保持正确。在模型元数据可能不可用的测试或无头/非交互会话中，可设置显式值。环境变量 `ACP_MODEL_CONTEXT_LIMIT` 优先于此值。
+- **说明：** 覆盖上下文窗口大小（token 数）。默认每轮从活跃模型的 `ctx.model.contextWindow` 读取，切换模型时自动保持正确。在模型元数据可能不可用的测试或无头/非交互会话中，可设置显式值。环境变量 `ACP_MODEL_CONTEXT_LIMIT` 优先于此值。注意该值同时也是**所有百分比压缩阈值的分母**（`maxContextLimit`、`emergencyThresholdPercent`）——调低它会按比例把所有触发点下移。要在不缩小这个分母的前提下保持日常上下文偏小，见[软目标与弹性余量](#软目标与弹性余量-1122)。
+
+### `outputHeadroomMaxPct`
+
+- **类型：** `number | string`（比例或百分比字符串）
+- **默认值：** `0.25`
+- **状态：** 🟢 ACTIVE
+- **说明：** 输出预留（output headroom）占上下文窗口的比例上限：预留量 = min(model.maxTokens, pct × window)。该预留让 kernel 的 nudge/truncate 阈值带位于 (window − 预留量) 之下，使长回复不会把「输入 + 输出」推过窗口——适用于把输出计入窗口的 API（Anthropic Messages 除外：其输入限制独立于 max_tokens 强制执行，故豁免）。不设上限时，注册最大输出占窗口比例大的模型（如 262144 窗口配 131072 maxTokens）会失去大部分输入预算，75% 强制压缩阈值会在完整窗口的约三分之一处触发。0.25 的默认值在控制损失的同时，仍保证单轮回复不超过窗口 25% 时在 95% emergency 阈值下不溢出；更长的回复会溢出一次，由下一轮的 overflow self-heal 恢复。接受比例（`0.25`）或百分比字符串（`"25%"`）。设为 `0` 完全禁用预留；`1`（或更大）恢复旧的全额预留行为。
 
 ### `toolBashDefaultTimeout`
 
@@ -178,9 +258,63 @@
 ### `toolOutputMaxBytes`
 
 - **类型：** `number`
-- **默认值：** `200000`
+- **默认值：** `50000`
 - **状态：** 🟢 ACTIVE
-- **说明：** 通过 `tool_result` 钩子对工具返回文本施加的硬性字节上限（约 200KB，约 5000 行）。它拦截 Pi 自身上限无法覆盖的失控输出（例如 Pi 不做限制的工具）。触发上限时，超长文本会被头部截断，并附带提示告知模型如何查看完整输出。设小一些（如 `8192`）可收紧上下文预算，设为 `0` 则完全禁用。
+- **说明：** 通过 `tool_result` 钩子对工具返回文本施加的硬性字节上限（约 50KB，约 1250 行）。与 Pi 自身对 bash/read/grep 的上限对齐——所有工具路径统一一条天花板；对 Pi 不做限制的工具（MCP/自定义）仍能拦截失控输出。触发上限时，超长文本会被头部截断，并附带提示告知模型如何查看完整输出。需要更大输出时调高、设小一些（如 `8192`）可收紧上下文预算，设为 `0` 则完全禁用。
+
+### `protectedTools`
+
+- **类型：** `string[]`
+- **默认值：** `无`（空）
+- **状态：** 🟢 ACTIVE
+- **说明：** 工具名模式（支持 glob 后缀，如 `"skill"`、`"read_*"`）——匹配的**所有** call+result 对都被硬排除在压缩之外：这些 ref 在任何视图中都渲染为 `BLOCKED`，两种压缩模式、所有 wire 均生效。适用于低频、高价值、输出为**独立内容**而非累积快照的工具（例如 opencode/pi 的 `skill` 加载、一次性引用）。格式错误的值（非数组、空数组、非字符串或空白项）会被大声警告并忽略——绝不会导致会话失败。
+- **⚠ 两个旋钮何时用哪个：** 对高频刷屏工具做全历史保护会让上下文无限膨胀——绝不要把高频工具放在这里。独立内容型工具 → `protectedTools`；累积快照型工具（每次调用取代上一次）→ `protectedLatestTools`；高频工具 → 都不要放（依赖软近期区即可）。经验法则：如果你会厌烦于永远保留它的每一次输出，就不要对它做全历史保护。
+
+### `protectedLatestTools`
+
+- **类型：** `string[]`
+- **默认值：** `无`（空）
+- **状态：** 🟢 ACTIVE
+- **说明：** 工具名模式（支持 glob 后缀）——仅匹配的**最近一次** call+result 对被硬排除在压缩之外（ref 渲染为 `BLOCKED`），更早的对仍可压缩。适用于每次调用取代上一次的累积快照型工具。校验规则与 `protectedTools` 相同。何时用哪个旋钮见 `protectedTools` 下的 ⚠ 说明。
+
+### `neverPreserveRecentTools`
+
+- **类型：** `string[]`（工具名模式，支持 glob 后缀）
+- **默认值：** 未设置 → 内核内置 `["decompress", "search_context", "read", "bash"]`（需 `acp-kernel` >= 0.0.92）
+- **状态：** 🟢 ACTIVE
+- **说明：** 从软保护近期区（`preserveRecentMessages` 窗口）中**排除**的工具名模式：匹配的工具结果在近期窗口内立即可压缩，不再等待超龄。内核内置让 `read`/`bash` 保持可压（它们是最大的可回收体量）—— 但正是这个默认让批量读文件的工作流把刚读的文件立刻折掉，陷入「折叠→重读」死循环（上游 billion-context #1198/#1277）。**推荐解法 —— 只移除 `read`：**
+
+  ```json
+  { "neverPreserveRecentTools": ["decompress", "search_context", "bash"] }
+  ```
+
+  这样新读的文件留在近期区，之后按位置超龄回归可压（不同于 `protectedLatestTools` 会把最新一次 read 永久钉住，也不同于 `protectedTools` 会永不折叠任何 read）。**请保留 `decompress`/`search_context` 在列表里**：重新纳入它们会把刚恢复的大块内容钉死在近期区无法回收 —— 换一种病。**⚠ 空数组 `[]` 在这里合法**（与两个保护旋钮不同）：它什么都不排除，让所有工具都获得近期区保护 —— 最大保护逃生门。显式数组逐字替换默认列表。除非确实需要逐字替换语义，优先用下面更简单的正向形式。
+
+### `preserveRecentTools`
+
+- **类型：** `string[]`（工具名模式，支持 glob 后缀）
+- **默认值：** 未设置 → 不做减法（`neverPreserveRecentTools` ?? 内核内置列表逐字生效；需 `acp-kernel` >= 0.0.93）
+- **状态：** 🟢 ACTIVE
+- **说明：** `neverPreserveRecentTools` 的**正向配对旋钮**：从生效的近期区排除列表中**移除**的工具名模式。生效排除表 = `(neverPreserveRecentTools ?? 内置) 减 preserveRecentTools`，由内核计算 —— 因此 #1198/#1277 批量读文件「折叠→重读」死循环的解法只需一条：
+
+  ```json
+  { "preserveRecentTools": ["read"] }
+  ```
+
+  既不用重述（也不用冻结一份很快过时的手抄）内置列表，还自动跟随内置列表演进。可与显式 `neverPreserveRecentTools` 组合（减法同样作用于显式列表）；通配后缀模式移除匹配项（`"bash*"` 移除 `bash`）。**⚠ 空数组 `[]` 在这里不合法** —— 它是纯无操作，裸 `[]` 几乎必然是 `neverPreserveRecentTools: []`（最大保护逃生门）的笔误；畸形值告警并回退到 adapter 值。
+
+---
+
+## 规则
+
+`rules` 键控制 `acp_rule` 记录工具 —— 一个可选机制，把简短、原则性的提醒持久化在会话里，使其穿越上下文压缩。
+
+### `rules`
+
+- **类型：** `boolean`
+- **默认值：** `false`
+- **状态：** 🟢 ACTIVE
+- **说明：** 为 `true` 时，在会话启动时注册 `acp_rule` 工具。传入一条简短的提醒即记录（回显 `Recorded ruleN: …`）；不带参数调用则列出全部已记录规则。规则保存在会话 ACP 状态旁路文件中（重启后保留），并**硬保护免于压缩** —— 即使周围内容全部被压缩，其工具调用与结果仍保持可见。不涉及系统提示词：使用引导完全写在工具描述里，每轮不做任何重新注入。校验错误（空/超长/重复/超限）原样返回给模型。默认上限：最多 50 条 × 每条 300 字符。
 
 ---
 
@@ -197,7 +331,18 @@
 - **类型：** `boolean`
 - **默认值：** `true`
 - **状态：** 🟢 ACTIVE
-- **说明：** 启用 `acp_delegate` 工具（`acp_delegate`、`acp_delegate_wait`、`acp_delegate_cancel`）及其对应的系统提示部分。设为 `false` 可完全跳过注册——例如你使用了其他子代理扩展，或者在无头环境下运行时异步结果注入没有意义。
+- **说明：** 启用 `acp_delegate` 工具（`acp_delegate`、`acp_delegate_wait`、`acp_delegate_cancel`）及其对应的系统提示部分。设为 `false` 可完全跳过注册——例如你使用了其他子代理扩展，或者在无头环境下运行时异步结果注入没有意义。保留自带子代理的完整步骤见 [README.zh-CN.md](./README.zh-CN.md) 的 **改用你自己的子代理**。
+- **生效时机：** 三个工具在会话启动时注册，因此改动在**下一个会话**（或重启 Pi）生效。系统提示段每回合实时解析，可能在工具之前先于会话内消失。
+- **只关提示段：** `delegatePrompt: null` 移除 `ACP_DELEGATE NOTIFICATIONS` 段但保留工具。
+- **不能替代：** Pi 原生的 `--exclude-tools acp_delegate,acp_delegate_wait,acp_delegate_cancel` 只隐藏工具、**不**隐藏系统提示段，会让模型被告知它调不到的工具。
+
+### `delegate.forceEnable`
+
+- **类型：** `boolean`
+- **默认值：** `false`
+- **状态：** 🟢 ACTIVE
+- **说明：** 检测到第三方 [`pi-subagents`](https://github.com/nicobailon/pi-subagents) 扩展的**项目级**安装（`<cwd>/.pi/npm/node_modules/pi-subagents` 或 `<cwd>/.pi/extensions/`）时仍保留 `acp_delegate`。默认（`false`）下，会话启动检测到项目级安装会自动停用 `acp_delegate`——两个扩展各带一套重叠的子代理系统（各自的 fleet 检查器、spawn 路径，以及 #412 背后的 inspector 快捷键冲突），两套 fleet 并存会让模型困惑。**仅用户级**（全局，`~/.pi/npm`、用户 extensions 目录）安装不会停用 `acp_delegate`，只记一条警告日志——避免一次全局安装让所有项目都失去 acp_delegate。停用时会打印醒目提醒：说明 pi-subagents 的子代理默认拿不到 ACP 上下文压缩，运行 `/acp-subagents` 可把 compress / decompress / search_context / acp_status 注入其 agent overrides。优先级：显式 `delegate.enabled: false` 永远赢过 `forceEnable`；env `PI_ACP_DELEGATE_FORCE_ENABLE` 覆盖本键。
+- **生效时机：** 与 `delegate.enabled` 相同——工具与快捷键在会话启动时注册，改动在**下一个会话**生效；系统提示段每回合实时解析，可能在工具之前先于会话内消失。
 
 ### `delegate.displayUsage`
 
@@ -205,6 +350,78 @@
 - **默认值：** `"separate"`
 - **状态：** 🟢 ACTIVE
 - **说明：** 控制 delegate 子代理的 token 用量如何报回主会话。`"separate"`（默认）将 delegate token 记入独立累加器——主会话总量保持干净，delegate 用量在 `acp_status` 中单独显示一块（不计入主总量）。`"merged"` 将 delegate token 用量并入工具返回的 `usage` 字段，算作主会话总量的一部分。仅在 `delegate.enabled` 为 `true` 时有意义。
+
+### `delegate.maxDepth`
+
+- **类型：** 整数 ≥ 1
+- **默认值：** `2`
+- **状态：** 🟢 ACTIVE
+- **说明：** `acp_delegate` 的最大嵌套深度。深度表示会话距主会话的层数（主会话 = 0）；只有当自身深度**低于**该限制时才能再委派，因此*处于*该深度的会话成为叶子、不能再委派。默认 `2` 允许 主 → delegate → 二级 delegate；设为 `1` 可实现编排者 / 叶子工作者模式（delegate 不再嵌套）。解析后的限制值通过内部环境变量 `PI_ACP_DELEGATE_MAX_DEPTH` 传递给子进程，即使某个子进程加载了不同的项目级 `acp.json`，也能约束整棵委派树。非法值（非整数、`< 1`）回退到默认值并记录警告日志。环境变量覆盖：`PI_ACP_DELEGATE_MAX_DEPTH`（优先于本键）。
+
+### `delegate.syncTimeoutMinutes`
+
+- **类型：** number（分钟，支持小数）或 `0` / `null`
+- **默认值：** `5`
+- **状态：** 🟢 ACTIVE
+- **说明：** **同步** `acp_delegate` 调用的硬超时——子进程未在该时间窗内结束即被杀死（SIGTERM）。设为 `0`（或 `null`）可禁用同步硬超时。支持小数分钟（如 `0.5` = 30 秒）。非法值回退到默认值并记录警告日志。环境变量覆盖：`PI_ACP_DELEGATE_SYNC_TIMEOUT_MINUTES`（`0` 禁用）。
+
+### `delegate.idleTimeoutMinutes`
+
+- **类型：** number（分钟，支持小数）或 `0` / `null`
+- **默认值：** `5`
+- **状态：** 🟢 ACTIVE
+- **说明：** 异步 delegate 子进程的闲置看门狗：若子进程在该时长内**没有任何输出**，即视为挂死并强制结束。这是防止卡住的子进程长期占用 stdout 管道的主要防线。设为 `0`（或 `null`）可禁用它——ACP 会记录一条醒目的警告；`acp_delegate_cancel` 仍可作为手动逃生通道。支持小数分钟。非法值回退到默认值并记录警告日志。环境变量覆盖：`PI_ACP_DELEGATE_IDLE_TIMEOUT_MINUTES`（`0` 禁用）。
+
+### `delegate.asyncTimeoutMinutes`
+
+- **类型：** number（分钟，支持小数）或 `0` / `null`
+- **默认值：** `30`
+- **状态：** 🟢 ACTIVE
+- **说明：** **异步** delegate 子进程的绝对硬上限，与是否活跃无关。设为 `0`（或 `null`）可让长任务不受绝对上限约束——闲置看门狗仍然生效（除非另行禁用）。支持小数分钟。非法值回退到默认值并记录警告日志。环境变量覆盖：`PI_ACP_DELEGATE_ASYNC_TIMEOUT_MINUTES`（`0` 禁用）。
+
+### `delegate.maxConcurrent`
+
+- **类型：** number（整数 ≥ 1）
+- **默认值：** unlimited（不限制并发）
+- **状态：** 🟢 ACTIVE
+- **环境变量覆盖：** `PI_ACP_DELEGATE_MAX_CONCURRENT`（优先于本键）
+- **说明：** 限制**同时运行**的后台（`async: true`）delegate 数量。达到上限后，后续启动进入 FIFO 队列，有空位时自动开始——不会丢弃，只是排队等待。设为 `1` 可强制严格串行执行（适合低性能机器上并行子代理争抢 CPU 而超时的场景）。同步（`async: false`）调用始终立即运行，不受此上限影响。无效值（非整数或 `< 1`）会带警告回退到 unlimited，而不是让会话失败。仅在 `delegate.enabled` 为 `true` 时有意义。
+
+### `delegate.thinkingLevel`
+
+- **类型：** 字符串枚举 `"off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"`
+- **默认值：** _（未设置——每个子进程使用 Pi 自身默认值）_
+- **状态：** 🟢 ACTIVE
+- **说明：** 全局默认 thinking level。当 per-call `thinkingLevel` 与角色自身的 `thinkingLevel`（见 `delegate.agents`）都未设置时生效。所有层级都未设置时不传 `--thinking`，每个子进程使用 Pi 自身默认值。非法值会被忽略并记录警告（不会导致运行失败）。per-call 的 `acp_delegate({ thinkingLevel })` 始终优先于该全局值。
+
+### `delegate.agents`
+
+- **类型：** 对象——角色名 → `{ model?, thinkingLevel? }` 的映射
+- **默认值：** _（未设置——所有角色继承父模型 + Pi 默认值）_
+- **状态：** 🟢 ACTIVE
+- **说明：** 按角色配置默认值，便于长期自动化为不同 delegate 角色固定更便宜或更强的模型与 thinking level，而无需主 Agent 每次调用都填写。键为角色名（`reviewer`、`researcher`、`worker`、`planner`、`oracle`，或任意自定义角色）。每个值可设置：
+  - `model`（`"provider/id"`）——该角色的默认模型。优先级：per-call `model` > 该角色的 `model` > 父 Agent 当前模型。非合法 `"provider/id"` 的值会被忽略。若配置的模型在当前 registry 中不存在，则回退到父模型并记录警告——绝不导致失败。
+  - `thinkingLevel`——该角色的默认 thinking level（枚举同 `delegate.thinkingLevel`）。优先级：per-call > 角色 > 全局。
+
+```jsonc
+{
+  "delegate": {
+    "thinkingLevel": "low",
+    "agents": {
+      "reviewer": { "model": "opencode-go/deepseek-v4-flash", "thinkingLevel": "high" },
+      "worker":   { "model": "anthropic/claude-sonnet-4-5" },
+      "oracle":   { "model": "openai/gpt-5", "thinkingLevel": "xhigh" }
+    }
+  }
+}
+```
+
+### `delegate.fleetShortcut`
+
+- **类型：** 字符串——任意 Pi 键位（如 `"ctrl+alt+d"`、`"ctrl+shift+f"`）；空字符串 `""` 表示不注册快捷键
+- **默认值：** `ctrl+alt+d`
+- **状态：** 🟢 ACTIVE
+- **说明：** TUI **fleet inspector**（运行中 / 已结束的 `acp_delegate` run 的实时列表 + 会话转录）的键盘快捷键。默认键已从 `ctrl+alt+f` 挪开，因为该组合键同时被 `pi-subagents` 扩展占用——Pi 加载器既不去重跨扩展的快捷键冲突、也不允许用户覆盖，两者会争抢同一按键（#412）。无论此设置如何，fleet inspector 始终可通过 `/acp-fleet` 打开。设为 `""` 则完全不注册快捷键（例如你依赖其他扩展的 fleet 界面时）。非法值会注册一个永不触发的绑定，而不会导致启动失败。
 
 ---
 
@@ -278,6 +495,143 @@
 
 ---
 
+## 工具调用重复熔断
+
+`repetitionGuard` 键用于打断**字节级完全相同的工具调用死循环**。小模型在贪心解码下可能卡住，逐轮重复发出完全一致的 `(工具调用 → 工具返回)` 对——例如带着相同参数几十次调用 `acp_status {"scope":"uncompressed","view":"ranges"}`，而上下文每轮都在增长。token 级惩罚无法打破这种循环，因为它是**序列级吸引子**（重复跨越轮次边界），而非序列内的 token 重复。
+
+该熔断器把每次工具调用指纹化为 `sha1(toolName + canonical-JSON(args))`，其中 JSON 序列化会对对象键排序，因此只比较*参数*本身——键顺序与返回内容都不影响判定。它在会话内跟踪当前连续相同调用的长度：
+
+- 连续相同调用达到 **`warn`** 次时，在对应工具返回尾部追加一条强警告，提示模型停止重复该调用；
+- 连续相同调用达到 **`abort`** 次时，**拦截**该调用（不执行）、中止本轮，并在终端弹出通知。
+
+任何参数变化（或切换到另一个工具）都会重置计数；一条真实用户消息也会重置（扩展自己发送的消息不会重置）。
+
+### `repetitionGuard`
+
+- **类型：** boolean \| object
+- **默认值：** `true`
+- **状态：** 🟢 ACTIVE
+- **说明：** 启用/禁用重复熔断并调整阈值。`repetitionGuard: false` 完全关闭该功能。object 形式（任意子集）：
+
+  ```json
+  {
+    "repetitionGuard": {
+      "enabled": true,
+      "warn": 3,
+      "abort": 5
+    }
+  }
+  ```
+
+### `repetitionGuard.enabled`
+
+- **类型：** boolean
+- **默认值：** `true`
+- **状态：** 🟢 ACTIVE
+- **说明：** 开关。`false`（或顶层 `repetitionGuard: false`）禁用所有重复检测。
+
+### `repetitionGuard.warn`
+
+- **类型：** number
+- **默认值：** `3`
+- **状态：** 🟢 ACTIVE
+- **说明：** 连续字节级相同调用达到该次数后，在工具返回尾部追加警告。最小为 1。
+
+### `repetitionGuard.abort`
+
+- **类型：** number
+- **默认值：** `5`
+- **状态：** 🟢 ACTIVE
+- **说明：** 连续字节级相同调用达到该次数后，拦截该调用并中止本轮。必须大于 `warn`；若误配成更小值会被向上钳制到 `warn + 1`。
+
+---
+
+## 单字符退化熔断
+
+`degenerationGuard` 键处理**字符级退化**：模型偶发卡死在重复单个 codepoint 上——实测一例为 thinking 块末尾 4655 个连续「【」，跨轮升级直至 turn abort、会话停死（#351）。与 `repetitionGuard`（字节级相同的*工具调用*循环）不同，这是生成文本/thinking *内部*的 token 级吸引子。
+
+为什么必须由适配器出手：pi 会把历史 assistant thinking **在每个后续请求中回传给 provider**（openai-completions 以 `reasoning_content` 发送；模型要求 thinking-as-text 时转纯文本），而 aborted turn 的部分消息会持久化在会话日志里。于是退化尾部随每轮 prompt 重放：模型看到自己上一轮以数千个重复字符结尾 → 续写偏置再次触发同样的退化 → 下一轮也 abort → 会话陷入无恢复路径的 abort 死循环。
+
+每个 context 事件中，该熔断器扫描出站视图里的 assistant text/thinking 块：
+
+- 长度 ≥ **`minRun`** 的单 codepoint 连击被折叠成短标记（`【【【… [4655× identical chars cut — degenerate repeat]`）——最多保留 3 份字符样本以保持上下文可读。该过程是纯函数、幂等、fail-safe 的；持久化历史从不修改。
+- 当最近一条 assistant 消息已退化时，追加一次性 `[ACP recovery notice]` 用户消息，告知模型重复段不携带信息、应从最后有效步骤继续。基于位置的自限机制：模型产出新 turn 后旧消息不再是最末一条，通知自动消失——无持久状态、不会累积。
+- 终端通知按「会话 + 连击特征」去重，每次只弹一次。
+
+工具调用参数从不改写（改写会使模型视图与实际执行的调用脱钩）。检测基于持久化 originals 而非出站视图：thinking-only 的 aborted turn 根本不会进入出站视图（空 assistant 文本在 OpenAI 兼容 provider 上会 400），但它仍是模型续写意义上的"上一轮"，通知必须照发。
+
+### `degenerationGuard`
+
+- **类型：** boolean \| object
+- **默认值：** `true`
+- **状态：** 🟢 ACTIVE
+- **说明：** 启用/禁用单字符退化熔断并调整阈值。`degenerationGuard: false` 完全关闭。object 形式（任意子集）：
+
+  ```json
+  {
+    "degenerationGuard": {
+      "enabled": true,
+      "minRun": 200
+    }
+  }
+  ```
+
+### `degenerationGuard.enabled`
+
+- **类型：** boolean
+- **默认值：** `true`
+- **状态：** 🟢 ACTIVE
+- **说明：** 开关。`false`（或顶层 `degenerationGuard: false`）禁用所有退化检测与恢复通知。
+
+### `degenerationGuard.minRun`
+
+- **类型：** number
+- **默认值：** `200`
+- **状态：** 🟢 ACTIVE
+- **说明：** 单 codepoint 连击（按 codepoint 计数，代理对安全）达到该长度才判定为退化。编码会话中的合法连击（markdown 分隔线、点线引导符）远低于此值；实测退化前漂移最大约 60，随后才是 4655 的灾难性连击。小于 8 的值会被抬到 8（保证折叠标记自身不会被二次扫描命中）；非法值回退 200 并记日志警告。
+
+---
+
+## 宿主多会话
+
+`hostSession` 键控制**回合边界判定**，面向在单进程内运行多个会话的宿主（如 Prime 的内联 RLM 子/兄弟会话）。完整契约——包括子会话状态派生（`deriveChildState`）——见 **[docs/host-adapter.md](./docs/host-adapter.md)**。
+
+**背景。** ACP 的按回合账本（nudge 已展示追踪、compress 重试上限、结果归口）以"当前回合起点"为键。pi 原生语义下，只有真正的 user-role 消息开启新回合。内联多会话宿主还会把 agent 回合以 `custom_message` 条目注入会话日志；这些条目会进入 LLM 上下文（pi 原生投影），但在默认策略下**不开启回合**——多个真实宿主回合塌缩进同一个 turnKey：nudge 节奏格子错位、按回合 compress 重试上限跨回合失真、节流/溢出周期统计失真。适配器中所有回合边界判定都走同一谓词 `isTurnBoundary(entry, policy)`（`src/turn-boundary.ts`）。
+
+### `hostSession`
+
+- **类型：** boolean \| object
+- **默认值：** `false`（关闭）
+- **状态：** 🟢 ACTIVE
+- **说明：** 宿主注入消息的回合边界策略。`hostSession: true` 等价于 `{ "countCustomMessages": true }`。object 形式（任意子集）：
+
+  ```json
+  {
+    "hostSession": {
+      "countCustomMessages": true,
+      "customMessageTypes": ["agent_message", "async_bash_completion", "rlm_child_terminal_notice", "heartbeat_prompt"]
+    }
+  }
+  ```
+
+  **默认关闭保证存量单会话行为逐字节不变**——只有当你的宿主确实向会话日志注入 agent 回合时才启用。
+
+### `hostSession.countCustomMessages`
+
+- **类型：** boolean
+- **默认值：** `false`
+- **状态：** 🟢 ACTIVE
+- **说明：** 把宿主注入的非空文本 `custom_message` 条目（UI-only 的 `acp-status` 面板除外）计为所有按回合账本的回合起点；空内容注入是纯控制信号，不开启回合。不改变 LLM 上下文投影——这些条目的 user-role 投影本就是 pi 原生行为。
+
+### `hostSession.customMessageTypes`
+
+- **类型：** string[]
+- **默认值：** 未设置（开启 `countCustomMessages` 后，一切非空注入类型都计为回合起点）
+- **状态：** 🟢 ACTIVE
+- **说明：** 可选的 `customType` 白名单，细化 `countCustomMessages`：设置后（且 `countCustomMessages: true`），只有 `customType` 在列表内的注入 `custom_message` 条目才开启回合——进入 LLM 上下文但并非真实宿主回合的元数据注入（如 Prime 的 `harness_digest`、`ipython_state`）不再重置 nudge/重试账本（#578）。无 `customType` 的条目永不匹配；UI-only 类型（`acp-status`、`acp-export`、`acp-rule`）即使列出也保持排除。未开 `countCustomMessages: true` 时忽略；非法值（非数组、非字符串或空字符串成员）告警并回退到「全部注入类型都计数」。空数组表示显式「一个都不计」。上方示例即 Prime 的真实宿主回合类型集合。
+
+---
+
 ## 压缩调优
 
 `compress` 子对象包含三个阈值，构成上下文管理的**三级递进**。它们控制模型*何时*被 nudge 压缩，以及大输出*何时*被强制截断以维持会话存活。阈值越低，扩展压缩得越早、越激进。
@@ -307,7 +661,65 @@
 - **类型：** `number`
 - **默认值：** `50000`
 - **状态：** 🟢 ACTIVE
-- **说明：** 控制**软**压缩 nudge 频率的 token 增长阈值。每当积累约这么多新可压缩内容时，触发一次软 nudge。值越低模型被 nudge 压缩的频率越高；值越低频率越低。此设置只控制*基于增长的* nudge——用量越过 `compress.maxContextLimit` 后，强制 nudge 接管，不受此设置影响。映射到内核设置 `nudge.growthFloor` 和 `nudge.growthCap`。
+- **说明：** 控制**软**压缩 nudge 频率的 token 增长阈值。每当积累约这么多新可压缩内容时，触发一次软 nudge。值越低模型被 nudge 压缩的频率越高；值越高频率越低。此设置只控制*基于增长的* nudge——用量越过 `compress.maxContextLimit` 后，强制 nudge 接管，不受此设置影响。映射到内核设置 `nudge.growthFloor` 和 `nudge.growthCap`。
+- **同轮重注入：** 同一用户轮内 nudge 至多注入一次，但上下文自上次注入后又增长满一个增长门槛（镜像内核防抖 cadence：`max(minGrowthFloor, minGrowthRatio × adaptiveGrowth)`，默认 22.5K token）时，会在同轮重新注入新提醒（issue #269：模型忽略 78% nudge 后，原来会一直沉默到 95% emergency 机械截断）。成功 compress 后增长基线重锚到新（更小）刻度，压缩后重新长回压力带不会被压缩前峰值压制。
+
+### `compress.reasoning`
+
+- **类型：** `object` —— `{ "drop": boolean, "threshold": number }`
+- **默认值：** `{ "drop": true, "threshold": 2048 }`
+- **状态：** 🟢 ACTIVE
+- **说明：** 控制从历史 `compress` 工具调用中丢弃超大 reasoning（思考）部分，与 [opencode-acp #377](https://github.com/ranxianglei/opencode-acp/pull/377) 完全对齐。`compress` 调用被硬排除在压缩之外（其工具结果是块摘要的锚点），其思考会随每次请求原样重发，形成无法回收的上下文底座。一个请求时 pass 只在**全部**门控满足时移除 `thinking` 部分：
+  1. **已闭合轮次** —— 消息严格位于最后一条真实用户消息之前；活跃轮永不触碰（部分 provider 要求回放活跃轮思考）。
+  2. **选择器** —— 消息携带 `toolCall` 部分且 name 为 `compress`（仅 compress；其他保护工具如需支持应单独显式配置）。
+  3. **大小** —— 该消息 reasoning 总长（字符数，仅对该消息各部分求和，不跨消息累计）**严格大于** `threshold` 才丢弃；`0` 表示丢弃任何非空 reasoning。
+
+  持久化历史从不被修改——pass 只改写出口视图，每次请求从会话日志全新重建。纯函数、幂等、fail-safe（任何错误原样返回）。在 `compress.providers` 三级间逐字段合并（`drop`、`threshold` 各自独立）。
+
+  字段：
+  - `drop`（`boolean`，默认 `true`）—— 总开关；`false` 完全禁用（kill-switch）。
+  - `threshold`（`number`，字符数，默认 `2048`）—— 单条思考大小门。
+
+  思考项不透明且必须原样回传的 provider（如 OpenAI 加密 reasoning）可按 provider 退出：
+  ```json
+   { "compress": { "providers": { "openai": { "reasoning": { "drop": false } } } } }
+   ```
+
+   **严格回传的思考型上游（自动禁用）。** 少数思考模式 provider 在已闭合轮次的 assistant 消息丢失 reasoning 后，会以 HTTP 400（`The \`reasoning_content\` ... must be passed back to the API`）拒绝重放请求。适配器通过静态检测识别 **DeepSeek**——模型的 `baseUrl` 或 provider 名包含 `deepseek`（不区分大小写）——并对该模型自动强制 `drop: false`，即使显式配置了 `drop: true` 也会为安全起见覆盖。对非思考的 DeepSeek 模型零成本（它们不产生可丢弃的 `thinking` 部分）。**不在** `deepseek` 主机上的严格回传 provider——GLM-thinking、QwQ、自托管 DeepSeek 镜像——刻意不做自动检测（否则会禁用其非思考模型的该 pass），请对它们使用上面的按 provider 覆盖。配套修复：代理侧 billion-context#690、内核侧折叠原子性 acp-kernel#245（随 acp-kernel 0.0.63 发布）；跟踪于 [#361](https://github.com/ranxianglei/billion-context-pi/issues/361)。
+
+### `compress.promptPack`
+
+- **类型：** `string` — 包名（`[A-Za-z0-9][A-Za-z0-9._-]*`，不含路径分隔符）
+- **默认：** `"default"`
+- **状态：** 🟢 ACTIVE
+- **描述：** 选择一个**提示词包（prompt pack）**——一组命名的表面覆盖（提示词分段、nudge 分段、工具提示词、delegate 提示词、四条压缩规则），作为 `acp.json` 内联覆盖之下的基础层生效。与其他 `compress.*` 字段走同一三级级联：`models > providers > global`，逐回合按当前模型解析。完整参考与内置 `lean` 包见[提示词包](#提示词包)。
+
+### 软目标与弹性余量 (#1122)
+
+「日常保持小上下文」是一个**成本目标**，不是窗口大小。[billion-context#1122](https://github.com/ranxianglei/billion-context/issues/1122) 背后的常见误配，就是把 `modelContextLimit` 设到模型原生窗口以下来表达这个目标——例如在 200k 的模型上设 70k 限制来「保持在 40k 左右」。由于所有百分比阈值都以 `modelContextLimit` 为分母，这会把*所有*触发点锚定到缩小后的值：强制 nudge 从 70k 的 75% ≈ 52.5k 开始，有损的紧急截断在 ~66.5k 就触发——于是真正需要 80k 上下文的合法任务会在中途被反复压缩、最终被截断。
+
+配方：**分母保持在真实窗口，成本目标改用现成的软阈值表达。**
+
+```jsonc
+{
+  // "modelContextLimit": 200000,   // 可选——不填则跟随 Pi 实时模型目录
+  "compress": {
+    "maxContextLimit": "35%"        // 软目标 ≈ 200k 窗口下的 70k（= 目标 ÷ 原生窗口）
+  }
+}
+```
+
+压缩实际如何被触发（三层）：
+
+1. **增长层**（日常主力）——**绝对 token 数，按设计独立于 `modelContextLimit`**：自上一个锚点（会话开始 / 上次压缩 / 收缩后重置）以来的累计增长越过节奏下限（`max(20k, 45% × nudgeGrowthTokens)`，默认 ≈ 22.5k）、且有效可压缩量足够（约 `nudgeGrowthTokens`）时，发一次软 nudge。把窗口设大**不会**推迟这一层。
+2. **压力层**——唯一按 % 锚定的部分：`usage ≥ maxContextLimit`（默认 75%）→ 每轮强制 nudge；≥ 95% → 紧急截断。随 `modelContextLimit` 缩放。
+3. **资格层**——内核默认 45%，本扩展未暴露；只管首轮冷启动门票与 T2/T3 块数升级。
+
+注意：
+
+- `maxContextLimit` 设到 45% 以下功能正确（各层门控相互独立），但 acp-kernel 每轮会打一条校验告警——纯日志噪音，阈值不受影响（跟踪于 acp-kernel#346）。
+- 与旧的「低限制」配置相比的行为差异：强制区从 75%×旧限制 上移到 所选%×原生窗口，紧急截断从 ~95%×旧限制 回到真实边缘（~95%×原生）。增长锚点与强制区之间，上下文可能漂移到目标之下——这个漂移就是弹性的代价。若需要同时满足「严格上限 + 突发余量」，需要结构感知压缩（[billion-context#344](https://github.com/ranxianglei/billion-context/issues/344)），而不是缩小分母。
+- 以上全部通过下文的三级级联（`models > providers > global`）解析，不同模型可以共存不同目标。
 
 ### `compress.providers` —— 按 provider / 按 model 覆盖
 
@@ -372,12 +784,158 @@ provider 的 key 是 **Pi provider 名**(如 `"anthropic"`、`"openai"`、`"zhip
   }
   ```
 
+### `promptSections`
+
+- **类型：** `object`（部分覆盖——逐段三态）
+- **默认值：** *(内置默认)*
+- **状态：** 🟢 ACTIVE
+- **说明：** 覆盖 ACP 系统提示词的各段。十三个键（`acpTags`、`summariesInContext`、`tools`、`whenToCompress`、`whenNotToCompress`、`multiTierIntro`、`decompressPhilosophy`、`contextBreakdown`、`throttleRetry`、`philosophy`、`howToCompress`、`tier2`、`tier3`），统一三态语义（与内核 section 语义一致）：字符串**替换**该段，`null` **删除**该段，省略则保持默认。不经风险门禁——若需经门禁替换规则文本请用 `prompts`；两者同时设置时 `promptSections` 生效（后应用）。示例：
+
+  ```json
+  {
+    "promptSections": {
+      "acpTags": "(自定义 acp 标签说明)",
+      "contextBreakdown": null
+    }
+  }
+  ```
+
+### `nudgeSections`
+
+- **类型：** `object`（部分覆盖——逐键三态）
+- **默认值：** *(内置默认)*
+- **状态：** 🟢 ACTIVE
+- **说明：** 覆盖压缩提示的**引导类文本**。四个键：`efficiencyNote`（温和提示开场）、`emergencyHeader`（紧急提示开场）、`t2Guidance`（T2 蒸馏引导）、`t3Guidance`（T3 凝缩引导）。与 `promptSections` 相同的三态语义。不经风险门禁。触发行、渲染器标签和工具反馈文本属于契约锁定，不可覆盖。示例：
+
+  ```json
+  {
+    "nudgeSections": {
+      "efficiencyNote": "保持工作集精简——尽早折叠已消耗的输出。",
+      "emergencyHeader": null
+    }
+  }
+  ```
+
+### `toolPrompts`
+
+- **类型：** `object`（逐工具部分覆盖）
+- **默认值：** *(内置默认)*
+- **状态：** 🟢 ACTIVE
+- **说明：** 覆盖四个 ACP 工具面向 LLM 的文案。键：`compress`、`decompress`、`search_context`、`acp_status`。每项可设 `description`（字符串）、`paramDescriptions`（参数名→字符串的对象——重写 schema 字段描述）、`promptSnippet`（字符串，显示在系统提示词的“可用工具”段）、`promptGuidelines`（字符串或字符串数组——追加到系统提示词 Guidelines 段）。在**扩展加载时同步读取**（工具定义在注册时固化），修改后需重启 pi。示例：
+
+  ```json
+  {
+    "toolPrompts": {
+      "compress": {
+        "promptSnippet": "compress({ content: [{ startId, endId, summary }] })",
+        "paramDescriptions": { "summary": "简短稠密摘要；路径+决策逐字保留。" }
+      }
+    }
+  }
+  ```
+
+### `delegatePrompt`
+
+- **类型：** `string | null`
+- **默认值：** *(内置 `ACP_DELEGATE_NOTIFICATIONS` 附录)*
+- **状态：** 🟢 ACTIVE
+- **说明：** 替换（`string`）或删除（`null`）delegate 工具启用时追加到系统提示词的 `ACP_DELEGATE_NOTIFICATIONS` 附录。适用于用自己的后台任务机制、语义不同的宿主。仅在 `delegate` 启用时生效。示例：
+
+  ```json
+  { "delegatePrompt": "后台任务结果以系统通知到达——如相关则读取结果文件。" }
+  ```
+
 ### `acknowledgePromptsRisk`
 
 - **类型：** `boolean`
 - **默认值：** `false`
 - **状态：** 🟢 ACTIVE
 - **说明：** `prompts` 覆盖的安全门禁。设为 `true` 以确认替换内核调优的压缩规则可能降低摘要质量，并使你的 `prompts` 覆盖生效。为 `false`（或省略）时，所有 `prompts` 覆盖被忽略，使用内核默认值。如果 `resolvePrompts` 拒绝了你的覆盖（例如某个仍通过类型检查的畸形值），扩展会回退到默认值并记录 `prompts-resolve-failed` 警告，而不是启动失败。
+
+---
+
+## 提示词包
+
+**提示词包（prompt pack）**是一个命名的 JSON 文件，把表面覆盖打包——提示词分段、nudge 分段、工具提示词、delegate 提示词、四条承重压缩规则——切模型整个 ACP 表面只需一行，不必把整块 `promptSections`/`toolPrompts` JSON 粘进 `acp.json`：
+
+```json
+{ "compress": { "promptPack": "lean" } }
+```
+
+包选择复用标准 `compress` 三级级联（`models > providers > global`，逐字段最深者赢），因此不同模型用不同包不需要额外配置管道：
+
+```json
+{ "compress": { "providers": { "zhipu": { "promptPack": "lean" } } } }
+```
+
+### 查找顺序
+
+包名 `N`，首个命中者生效：
+
+1. `<项目>/.pi/acp/packs/N.json` — 项目本地（最后检查但优先——可遮蔽以下两者）
+2. `~/.pi/acp/packs/N.json` — 用户全局
+3. 内置包：`default`、`lean`
+
+包名必须匹配 `[A-Za-z0-9][A-Za-z0-9._-]*`（禁止 `..` 与路径分隔符）；非法名字、不可读或非法 JSON 的文件都回退到内置包——适配器绝不因坏包崩溃。
+
+### 包文件 schema
+
+```jsonc
+{
+  "name": "my-pack",              // 信息性
+  "version": "1.0.0",             // 信息性
+  "description": "...",           // 信息性
+  "prompts": {                     // 4 条承重规则字符串（有风险门，见下）
+    "compressPhilosophy": "...",
+    "howToCompressRules": "...",
+    "tier2DistillRules": "...",
+    "tier3CondenseRules": "..."
+  },
+  "promptSections": { "acpTags": "...", "tier2": null },   // 与 acp.json promptSections 同 schema
+  "nudgeSections": { "efficiencyNote": "..." },             // 与 acp.json nudgeSections 同 schema
+  "toolPrompts": { "compress": { "description": "..." } }, // 与 acp.json toolPrompts 同 schema
+  "delegatePrompt": "..."          // string 替换，null 删除
+}
+```
+
+所有字段可选；每个字段走与其 `acp.json` 对应项相同的消毒器，每个 section 内的每个键都是三态（`string` 替换、`null` 删除、缺省保留包/内置值）。
+
+### 合并语义——包为基础层，内联优先
+
+一回合的有效表面 = **包默认值 ⊕ `acp.json` 内联覆盖**，逐字段：
+
+- `promptSections` / `nudgeSections`：内联键胜包键（含 `null`）。
+- `toolPrompts`：先按工具，再按字段（`description`、`promptSnippet`、`promptGuidelines`），再按 `paramDescriptions` 内逐参数。
+- `delegatePrompt`：内联存在则胜（含 `null`）。
+
+### 可编程来源（宿主与未来安装器）
+
+查找链本身可插拔。**包源（PackSource）**是实现以下接口的任意对象：
+
+```ts
+interface PackSource {
+  id: string;
+  resolve(name: string): Pack | null;  // 已消毒表面 + 来源标签
+  list?(): Pack[];                       // 可选，支撑列包
+}
+```
+
+内置包、目录包、任何托管注册表全部走同一个 `createPackResolver([...sources])`——首个命中者胜，**前置的 source 可遮蔽一切**。这就是为将来 `bili-pi install` 式包管理器预留的集成点：把包文件写进用户目录（零代码），或在默认链前面注册一个 managed source——两条路都不改核心。内嵌适配器的宿主也可以自建 resolver 传给 `resolveActivePack`。
+
+### 风险门
+
+包的 `prompts` 块会覆盖压缩规则字符串，与内联 `prompts` 完全一样——因此受同一个 [`acknowledgePromptsRisk`](#acknowledgepromptsrisk) 开关门控。`acp.json` 未设该标志时，包的 `prompts` 块被忽略（包内其余照常生效）并记录警告。该标志不能随包分发——它必须是显式的本地选择。
+
+### 内置包
+
+| 名称 | 用途 |
+|------|------|
+| `default` | 无覆盖——完整内置表面。 |
+| `lean` | Token 精简表面：一个紧凑系统提示词块 + 单行工具描述，无 snippet/guidelines（实测 5422→1312 字节，约省 76%）。压缩规则保持内核默认，由 nudge 按需送达。改编自社区调研 [#410](https://github.com/ranxianglei/billion-context-pi/issues/410)。 |
+
+### `lean` 细节
+
+`lean` 包把系统提示词除单个 `acpTags` 块（八条单行规则：refs、压什么、保留什么、召回工具、重编号恢复、解压到文件、节流续作、摘要是历史）外全部置空，四个工具的 `promptSnippet`/`promptGuidelines` 全部清空，`description` 换成单行。未覆盖的部分——压缩哲学、分层规则、nudge 文本——保持内置默认。适合会把工具 schema 原样抄进回答的小模型，或想把编码 token 最大化拿回来的场景。试用：`{ "compress": { "promptPack": "lean" } }`。
 
 ---
 
@@ -411,4 +969,46 @@ provider 的 key 是 **Pi provider 名**(如 `"anthropic"`、`"openai"`、`"zhip
 - **类型：** 字符串（文件路径）
 - **默认值：** `~/.pi/acp.log`
 - **状态：** 🟢 ACTIVE
-- **说明：** 覆盖日志文件路径。默认情况下，结构化日志写入 `~/.pi/acp.log`（文件在 10MB 时轮转为 `~/.pi/acp.log.old`）。指向不同位置可为每个项目或每次运行保留独立日志。
+- **说明：** 覆盖日志文件路径。默认情况下，结构化日志写入 `~/.pi/acp.log`（文件在 10MB 时轮转为 `~/.pi/acp.log.old`）。指向不同位置可为每个项目或每次运行保留独立日志。在 Pi 的 fork 上，`~/.pi` 指该 fork 自己的配置目录（Prime 上为 `~/.prime`）——见 [docs/host-adapter.md §4](./docs/host-adapter.md#4-config-directory-config_dir_name)。
+
+### `PI_ACP_DELEGATE_MAX_DEPTH`
+
+- **类型：** 整数 ≥ 1
+- **默认值：** *(未设置——遵循 `delegate.maxDepth`，再回退到 2)*
+- **状态：** 🟢 ACTIVE
+- **说明：** 不编辑配置文件，为单个会话覆盖 delegate 最大嵌套深度。优先于 `delegate.maxDepth`。解析后的值会被向下传递到整棵委派树。请勿在委派树中间手动设置它：这也是 ACP 用来把*生效限制*传入子进程的内部变量。
+
+### `PI_ACP_DELEGATE_SYNC_TIMEOUT_MINUTES`
+
+- **类型：** number（分钟）或 `0`
+- **默认值：** *(未设置——遵循 `delegate.syncTimeoutMinutes`，再回退到 5)*
+- **状态：** 🟢 ACTIVE
+- **说明：** 覆盖同步 `acp_delegate` 的硬超时。设为 `0` 可为单个会话禁用同步硬超时。优先于 `delegate.syncTimeoutMinutes`。
+
+### `PI_ACP_DELEGATE_IDLE_TIMEOUT_MINUTES`
+
+- **类型：** number（分钟）或 `0`
+- **默认值：** *(未设置——遵循 `delegate.idleTimeoutMinutes`，再回退到 5)*
+- **状态：** 🟢 ACTIVE
+- **说明：** 覆盖异步闲置看门狗的时间窗。设为 `0` 可为单个会话禁用闲置看门狗（ACP 会记录警告；`acp_delegate_cancel` 仍可作为手动逃生通道）。优先于 `delegate.idleTimeoutMinutes`。
+
+### `PI_ACP_DELEGATE_ASYNC_TIMEOUT_MINUTES`
+
+- **类型：** number（分钟）或 `0`
+- **默认值：** *(未设置——遵循 `delegate.asyncTimeoutMinutes`，再回退到 30)*
+- **状态：** 🟢 ACTIVE
+- **说明：** 覆盖异步 delegate 子进程的绝对硬上限。设为 `0` 可让长任务不受绝对上限约束（闲置看门狗仍然生效，除非另行禁用）。优先于 `delegate.asyncTimeoutMinutes`。
+
+### `PI_ACP_DELEGATE_MAX_CONCURRENT`
+
+- **类型：** integer（≥ 1）
+- **默认值：** *(未设置——上限遵循 `delegate.maxConcurrent`，再否则 unlimited)*
+- **状态：** 🟢 ACTIVE
+- **说明：** 覆盖后台（`async`）delegate 并发上限。**优先于** `delegate.maxConcurrent`。设为 `1` 强制串行执行。无效值会带警告回退到下一个来源（最终 unlimited），而不是让会话失败。
+
+### `PI_ACP_DELEGATE_FORCE_ENABLE`
+
+- **类型：** `true` | `false`
+- **默认值：** *(未设置——遵循 `delegate.forceEnable`，再否则 false)*
+- **状态：** 🟢 ACTIVE
+- **说明：** 覆盖"检测到项目级 `pi-subagents` 安装时是否仍保留 `acp_delegate`"。**优先于** `delegate.forceEnable`。无法解析的值带警告回退到配置值，而不是让会话失败。

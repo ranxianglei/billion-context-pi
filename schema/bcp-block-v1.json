@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ranxianglei/billion-context-pi/schema/bcp-block-v1.json",
+  "title": "BcpBlockV1",
+  "description": "One compressed block as persisted in billion-context-pi's <sessionFile>.acp.json sidecar (schemaVersion 1). Fields mirror acp-kernel's CompressionBlock verbatim; unknown extra fields are additive and must be ignored by readers.",
+  "type": "object",
+  "required": [
+    "blockId",
+    "runId",
+    "tier",
+    "summary",
+    "directMessageIds",
+    "effectiveMessageIds",
+    "directBlockIds",
+    "compressedTokens",
+    "createdAt",
+    "survivedCount",
+    "generation",
+    "active"
+  ],
+  "properties": {
+    "blockId": { "type": "string", "pattern": "^b[0-9]+$" },
+    "runId": { "type": "string" },
+    "tier": { "type": "integer", "minimum": 1, "maximum": 3 },
+    "topic": { "type": "string" },
+    "summary": { "type": "string" },
+    "directMessageIds": { "type": "array", "items": { "type": "string" } },
+    "effectiveMessageIds": { "type": "array", "items": { "type": "string" } },
+    "directBlockIds": { "type": "array", "items": { "type": "string" } },
+    "compressedTokens": { "type": "integer", "minimum": 0 },
+    "createdAt": { "type": "number" },
+    "survivedCount": { "type": "integer", "minimum": 0 },
+    "generation": { "type": "string", "enum": ["young", "old"] },
+    "active": { "type": "boolean" },
+    "expanded": { "type": "boolean" },
+    "durationMs": { "type": "number" },
+    "compressCallId": { "type": "string" },
+    "startRef": { "type": "string" },
+    "endRef": { "type": "string" }
+  },
+  "additionalProperties": true
+}

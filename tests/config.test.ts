@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { resolveConfig, resolveCompress, mergeCompress, resolveDelegate, type AdapterConfig } from "../src/config.js";
+import { resolveConfig, resolveCompress, mergeCompress, resolveDelegate, resolveRepetitionGuard, resolveHostSession, REPETITION_GUARD_DEFAULTS, type AdapterConfig } from "../src/config.js";
 
 const EMPTY: AdapterConfig = {};
 
@@ -82,6 +82,18 @@ test("resolveConfig leaves growthFloor/growthCap at kernel defaults when compres
   assert.equal(cfg.nudge.growthCap, 50000);
 });
 
+test("resolveConfig maps compress.minPressureBenefitTokens to kernel nudge (0 = legacy any-pending)", () => {
+  const cfg = resolveConfig({ compress: { minPressureBenefitTokens: 0 } }, 1_000_000);
+  assert.equal(cfg.nudge.minPressureBenefitTokens, 0);
+  const cfg2 = resolveConfig({ compress: { minPressureBenefitTokens: 8000 } }, 1_000_000);
+  assert.equal(cfg2.nudge.minPressureBenefitTokens, 8000);
+});
+
+test("resolveConfig leaves minPressureBenefitTokens undefined (kernel default max(5000, limit×1%)) when omitted", () => {
+  const cfg = resolveConfig(EMPTY, 1_000_000);
+  assert.equal(cfg.nudge.minPressureBenefitTokens, undefined);
+});
+
 test("resolveConfig handles all three compress fields together", () => {
   const cfg = resolveConfig({ compress: { maxContextLimit: "70%", emergencyThresholdPercent: 0.9, nudgeGrowthTokens: 40000 } }, 1_000_000);
   assert.equal(cfg.nudge.maxContextLimitPct, 0.7);
@@ -91,22 +103,30 @@ test("resolveConfig handles all three compress fields together", () => {
   assert.equal(cfg.nudge.growthCap, 40000);
 });
 
-test("resolveDelegate: undefined delegate defaults to enabled + separate", () => {
+test("resolveDelegate: undefined delegate defaults to enabled + separate + skip", () => {
   const r = resolveDelegate({});
   assert.equal(r.enabled, true);
   assert.equal(r.displayUsage, "separate");
+  assert.equal(r.notifyIfRead, "skip");
 });
 
 test("resolveDelegate: boolean true shorthand", () => {
   const r = resolveDelegate({ delegate: true });
   assert.equal(r.enabled, true);
   assert.equal(r.displayUsage, "separate");
+  assert.equal(r.notifyIfRead, "skip");
 });
 
 test("resolveDelegate: boolean false shorthand", () => {
   const r = resolveDelegate({ delegate: false });
   assert.equal(r.enabled, false);
   assert.equal(r.displayUsage, "separate");
+  assert.equal(r.notifyIfRead, "skip");
+});
+
+test("resolveDelegate: notifyIfRead always is honored, skip is the default", () => {
+  assert.equal(resolveDelegate({ delegate: { notifyIfRead: "always" } }).notifyIfRead, "always");
+  assert.equal(resolveDelegate({ delegate: { enabled: true } }).notifyIfRead, "skip");
 });
 
 test("resolveDelegate: object with enabled + displayUsage", () => {
@@ -119,6 +139,65 @@ test("resolveDelegate: object with only enabled (displayUsage defaults)", () => 
   const r = resolveDelegate({ delegate: { enabled: true } });
   assert.equal(r.enabled, true);
   assert.equal(r.displayUsage, "separate");
+});
+
+test("resolveDelegate: maxConcurrent resolves from object form", () => {
+  const r = resolveDelegate({ delegate: { enabled: true, maxConcurrent: 3 } });
+  assert.equal(r.enabled, true);
+  assert.equal(r.maxConcurrent, 3);
+});
+
+test("resolveDelegate: maxConcurrent absent resolves to unlimited", () => {
+  const r = resolveDelegate({ delegate: { enabled: true } });
+  assert.equal(r.maxConcurrent, Infinity);
+});
+
+test("resolveDelegate: boolean shorthand leaves maxConcurrent unlimited", () => {
+  const r = resolveDelegate({ delegate: true });
+  assert.equal(r.maxConcurrent, Infinity);
+});
+
+test("resolveDelegate: forceEnable defaults to false", () => {
+  assert.equal(resolveDelegate({}).forceEnable, false);
+  assert.equal(resolveDelegate({ delegate: true }).forceEnable, false);
+  assert.equal(resolveDelegate({ delegate: { enabled: true } }).forceEnable, false);
+});
+
+test("resolveDelegate: forceEnable true is honored; explicit false stays off", () => {
+  assert.equal(resolveDelegate({ delegate: { forceEnable: true } }).forceEnable, true);
+  assert.equal(resolveDelegate({ delegate: { forceEnable: false } }).forceEnable, false);
+});
+
+test("resolveDelegate: PI_ACP_DELEGATE_FORCE_ENABLE overrides acp.json (env > config)", () => {
+  const prev = process.env.PI_ACP_DELEGATE_FORCE_ENABLE;
+  try {
+    process.env.PI_ACP_DELEGATE_FORCE_ENABLE = "true";
+    assert.equal(resolveDelegate({}).forceEnable, true);
+    assert.equal(resolveDelegate({ delegate: { forceEnable: false } }).forceEnable, true);
+    process.env.PI_ACP_DELEGATE_FORCE_ENABLE = "false";
+    assert.equal(resolveDelegate({ delegate: { forceEnable: true } }).forceEnable, false);
+  } finally {
+    if (prev === undefined) delete process.env.PI_ACP_DELEGATE_FORCE_ENABLE;
+    else process.env.PI_ACP_DELEGATE_FORCE_ENABLE = prev;
+  }
+});
+
+test("resolveDelegate: unparseable PI_ACP_DELEGATE_FORCE_ENABLE falls back to the config value", () => {
+  const prev = process.env.PI_ACP_DELEGATE_FORCE_ENABLE;
+  try {
+    process.env.PI_ACP_DELEGATE_FORCE_ENABLE = "maybe";
+    assert.equal(resolveDelegate({}).forceEnable, false);
+    assert.equal(resolveDelegate({ delegate: { forceEnable: true } }).forceEnable, true);
+  } finally {
+    if (prev === undefined) delete process.env.PI_ACP_DELEGATE_FORCE_ENABLE;
+    else process.env.PI_ACP_DELEGATE_FORCE_ENABLE = prev;
+  }
+});
+
+test("resolveDelegate: forceEnable never re-enables an explicitly disabled delegate (priority matrix)", () => {
+  const p = resolveDelegate({ delegate: { enabled: false, forceEnable: true } });
+  assert.equal(p.enabled, false);
+  assert.equal(p.forceEnable, true);
 });
 
 test("resolveDelegate: legacy flat displayUsage still works with boolean delegate", () => {
@@ -136,6 +215,142 @@ test("resolveDelegate: legacy flat displayUsage still works with undefined deleg
 test("resolveDelegate: object displayUsage takes priority over legacy flat", () => {
   const r = resolveDelegate({ delegate: { displayUsage: "separate" }, displayUsage: "merged" });
   assert.equal(r.displayUsage, "separate");
+});
+
+// ─── #279: configurable maxDepth + timeouts ─────────────────────────────────
+
+test("resolveDelegate: maxDepth + timeouts default to 2 / 5m / 5m / 30m", () => {
+  const r = resolveDelegate({});
+  assert.equal(r.maxDepth, 2);
+  assert.equal(r.syncTimeoutMs, 5 * 60_000);
+  assert.equal(r.idleMs, 5 * 60_000);
+  assert.equal(r.asyncTimeoutMs, 30 * 60_000);
+});
+
+test("resolveDelegate: custom maxDepth + timeouts (minutes → ms)", () => {
+  const r = resolveDelegate({ delegate: { maxDepth: 1, syncTimeoutMinutes: 10, idleTimeoutMinutes: 7.5, asyncTimeoutMinutes: 120 } });
+  assert.equal(r.maxDepth, 1);
+  assert.equal(r.syncTimeoutMs, 10 * 60_000);
+  assert.equal(r.idleMs, 450_000);
+  assert.equal(r.asyncTimeoutMs, 120 * 60_000);
+});
+
+test("resolveDelegate: 0/null disables a timeout, others keep defaults", () => {
+  const r = resolveDelegate({ delegate: { syncTimeoutMinutes: 0, idleTimeoutMinutes: null, asyncTimeoutMinutes: 90 } });
+  assert.equal(r.syncTimeoutMs, null);
+  assert.equal(r.idleMs, null);
+  assert.equal(r.asyncTimeoutMs, 90 * 60_000);
+});
+
+test("resolveDelegate: invalid numeric values fall back to defaults", () => {
+  const r = resolveDelegate({ delegate: { maxDepth: 0, syncTimeoutMinutes: -5, idleTimeoutMinutes: Number.NaN } });
+  assert.equal(r.maxDepth, 2);
+  assert.equal(r.syncTimeoutMs, 5 * 60_000);
+  assert.equal(r.idleMs, 5 * 60_000);
+});
+
+const DELEGATE_ENV_KEYS = [
+  "PI_ACP_DELEGATE_MAX_DEPTH",
+  "PI_ACP_DELEGATE_SYNC_TIMEOUT_MINUTES",
+  "PI_ACP_DELEGATE_IDLE_TIMEOUT_MINUTES",
+  "PI_ACP_DELEGATE_ASYNC_TIMEOUT_MINUTES",
+  "PI_ACP_DELEGATE_MAX_CONCURRENT",
+] as const;
+
+function withDelegateEnv(mutate: (env: NodeJS.ProcessEnv) => void, fn: () => void): void {
+  const saved: Record<string, string | undefined> = {};
+  for (const k of DELEGATE_ENV_KEYS) saved[k] = process.env[k];
+  try {
+    mutate(process.env);
+    fn();
+  } finally {
+    for (const k of DELEGATE_ENV_KEYS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k]!;
+    }
+  }
+}
+
+test("resolveDelegate: env overrides acp.json; unset env falls back to config", () => {
+  withDelegateEnv(
+    (env) => {
+      env.PI_ACP_DELEGATE_MAX_DEPTH = "1";
+      env.PI_ACP_DELEGATE_ASYNC_TIMEOUT_MINUTES = "0";
+    },
+    () => {
+      const r = resolveDelegate({ delegate: { maxDepth: 5, asyncTimeoutMinutes: 120 } });
+      assert.equal(r.maxDepth, 1, "env beats config");
+      assert.equal(r.asyncTimeoutMs, null, "env 0 disables");
+    },
+  );
+  const r2 = resolveDelegate({ delegate: { maxDepth: 5, asyncTimeoutMinutes: 120 } });
+  assert.equal(r2.maxDepth, 5, "config used when env unset");
+  assert.equal(r2.asyncTimeoutMs, 120 * 60_000);
+});
+
+test("resolveDelegate: invalid env values fall back without failing", () => {
+  let r!: ReturnType<typeof resolveDelegate>;
+  withDelegateEnv(
+    (env) => {
+      env.PI_ACP_DELEGATE_MAX_DEPTH = "abc";
+      env.PI_ACP_DELEGATE_SYNC_TIMEOUT_MINUTES = "-3";
+      env.PI_ACP_DELEGATE_IDLE_TIMEOUT_MINUTES = "1.5x";
+    },
+    () => {
+      r = resolveDelegate({ delegate: { syncTimeoutMinutes: 8 } });
+    },
+  );
+  assert.equal(r.maxDepth, 2, "invalid env maxDepth → default");
+  assert.equal(r.syncTimeoutMs, 5 * 60_000, "invalid env timeout → default (not config)");
+  assert.equal(r.idleMs, 5 * 60_000, "invalid env idle → default");
+});
+
+test("resolveDelegate: maxConcurrent env > acp.json > unlimited, invalid env falls to config", () => {
+  withDelegateEnv(
+    (env) => {
+      delete env.PI_ACP_DELEGATE_MAX_CONCURRENT;
+    },
+    () => {
+      assert.equal(resolveDelegate({ delegate: { maxConcurrent: 3 } }).maxConcurrent, 3, "config when env unset");
+      process.env.PI_ACP_DELEGATE_MAX_CONCURRENT = "5";
+      assert.equal(resolveDelegate({ delegate: { maxConcurrent: 3 } }).maxConcurrent, 5, "env beats config");
+      process.env.PI_ACP_DELEGATE_MAX_CONCURRENT = "not-a-number";
+      assert.equal(resolveDelegate({ delegate: { maxConcurrent: 3 } }).maxConcurrent, 3, "invalid env falls to config");
+      process.env.PI_ACP_DELEGATE_MAX_CONCURRENT = "0";
+      assert.equal(resolveDelegate({ delegate: { maxConcurrent: 2 } }).maxConcurrent, 2, "env < 1 falls to config");
+      delete process.env.PI_ACP_DELEGATE_MAX_CONCURRENT;
+      assert.equal(resolveDelegate({}).maxConcurrent, Infinity, "no source -> unlimited");
+    },
+  );
+});
+
+test("resolveDelegate: object exposes thinkingLevel + per-role agents", () => {
+  const r = resolveDelegate({
+    delegate: {
+      thinkingLevel: "medium",
+      agents: {
+        reviewer: { model: "openai/gpt-5", thinkingLevel: "high" },
+        worker: { model: "anthropic/claude-5" },
+      },
+    },
+  });
+  assert.equal(r.enabled, true);
+  assert.equal(r.thinkingLevel, "medium");
+  assert.deepEqual(r.agents?.reviewer, { model: "openai/gpt-5", thinkingLevel: "high" });
+  assert.deepEqual(r.agents?.worker, { model: "anthropic/claude-5" });
+});
+
+test("resolveDelegate: boolean shorthand leaves thinkingLevel/agents undefined", () => {
+  const r = resolveDelegate({ delegate: true });
+  assert.equal(r.enabled, true);
+  assert.equal(r.thinkingLevel, undefined);
+  assert.equal(r.agents, undefined);
+});
+
+test("resolveDelegate: unset thinkingLevel/agents on object stay undefined", () => {
+  const r = resolveDelegate({ delegate: { enabled: true } });
+  assert.equal(r.thinkingLevel, undefined);
+  assert.equal(r.agents, undefined);
 });
 
 test("resolveCompress returns {} when no compress configured", () => {
@@ -198,4 +413,124 @@ test("resolveConfig applies provider/model cascade to kernel config", () => {
 test("resolveConfig without provider/modelId behaves as before (global only)", () => {
   const cfg = resolveConfig({ compress: { maxContextLimit: "80%" } }, 1_000_000);
   assert.equal(cfg.nudge.maxContextLimitPct, 0.8);
+});
+
+test("resolveRepetitionGuard defaults to enabled with warn=3 abort=5", () => {
+  const r = resolveRepetitionGuard(EMPTY);
+  assert.equal(r.enabled, true);
+  assert.equal(r.warn, 3);
+  assert.equal(r.abort, 5);
+});
+
+test("resolveRepetitionGuard defaults match the exported defaults constant", () => {
+  const r = resolveRepetitionGuard(EMPTY);
+  assert.equal(r.warn, REPETITION_GUARD_DEFAULTS.warn);
+  assert.equal(r.abort, REPETITION_GUARD_DEFAULTS.abort);
+});
+
+test("resolveRepetitionGuard boolean false shorthand disables the guard", () => {
+  const r = resolveRepetitionGuard({ repetitionGuard: false });
+  assert.equal(r.enabled, false);
+});
+
+test("resolveRepetitionGuard object with explicit warn/abort", () => {
+  const r = resolveRepetitionGuard({ repetitionGuard: { warn: 4, abort: 8 } });
+  assert.equal(r.enabled, true);
+  assert.equal(r.warn, 4);
+  assert.equal(r.abort, 8);
+});
+
+test("resolveRepetitionGuard clamps abort to at least warn+1 when misconfigured", () => {
+  const r = resolveRepetitionGuard({ repetitionGuard: { warn: 5, abort: 2 } });
+  assert.ok(r.abort > r.warn, "abort must be strictly greater than warn");
+  assert.equal(r.abort, 6);
+});
+
+test("resolveRepetitionGuard falls back for non-positive thresholds", () => {
+  const r = resolveRepetitionGuard({ repetitionGuard: { warn: 0, abort: -1 } });
+  assert.equal(r.warn, 3);
+  assert.equal(r.abort, 5);
+});
+
+test("resolveRepetitionGuard keeps custom thresholds while honoring enabled:false", () => {
+  const r = resolveRepetitionGuard({ repetitionGuard: { enabled: false, warn: 4, abort: 9 } });
+  assert.equal(r.enabled, false);
+  assert.equal(r.warn, 4);
+  assert.equal(r.abort, 9);
+});
+
+test("resolveHostSession defaults to pi-native (off) when unset or false", () => {
+  assert.deepEqual(resolveHostSession(EMPTY), { countCustomMessages: false });
+  assert.deepEqual(resolveHostSession({ hostSession: false }), { countCustomMessages: false });
+});
+
+test("resolveHostSession boolean true shorthand enables countCustomMessages", () => {
+  assert.deepEqual(resolveHostSession({ hostSession: true }), { countCustomMessages: true });
+});
+
+test("resolveHostSession object form honors explicit values", () => {
+  assert.deepEqual(resolveHostSession({ hostSession: { countCustomMessages: true } }), { countCustomMessages: true });
+  assert.deepEqual(resolveHostSession({ hostSession: { countCustomMessages: false } }), { countCustomMessages: false });
+});
+
+test("resolveHostSession falls back to off for invalid values", () => {
+  assert.deepEqual(resolveHostSession({ hostSession: "yes" as unknown as boolean }), { countCustomMessages: false });
+  assert.deepEqual(resolveHostSession({ hostSession: { countCustomMessages: "yes" as unknown as boolean } }), { countCustomMessages: false });
+});
+
+test("resolveHostSession passes a valid customMessageTypes allowlist through (#578)", () => {
+  const r = resolveHostSession({ hostSession: { countCustomMessages: true, customMessageTypes: ["agent_message", "heartbeat_prompt"] } });
+  assert.equal(r.countCustomMessages, true);
+  assert.deepEqual(r.customMessageTypes, ["agent_message", "heartbeat_prompt"]);
+});
+
+test("resolveHostSession drops an orphaned customMessageTypes without countCustomMessages (#578)", () => {
+  const r = resolveHostSession({ hostSession: { customMessageTypes: ["agent_message"] } });
+  assert.deepEqual(r, { countCustomMessages: false }, "allowlist alone does not opt in");
+});
+
+test("resolveHostSession drops malformed customMessageTypes values (#578)", () => {
+  const bad = (v: unknown) => resolveHostSession({ hostSession: { countCustomMessages: true, customMessageTypes: v as string[] } });
+  assert.deepEqual(bad("agent_message"), { countCustomMessages: true }, "non-array falls back to all types counting");
+  assert.deepEqual(bad(["agent_message", 42]), { countCustomMessages: true }, "non-string member rejected");
+  assert.deepEqual(bad([""]), { countCustomMessages: true }, "empty-string member rejected");
+  assert.deepEqual(bad(null), { countCustomMessages: true }, "null rejected");
+});
+
+test("resolveHostSession honors an empty allowlist as explicit count-none (#578)", () => {
+  const r = resolveHostSession({ hostSession: { countCustomMessages: true, customMessageTypes: [] } });
+  assert.deepEqual(r, { countCustomMessages: true, customMessageTypes: [] });
+});
+
+test("resolveConfig forwards protection keys into the kernel config", () => {
+  const cfg = resolveConfig({ protectedTools: ["skill"], protectedLatestTools: ["read_*"] }, 200_000);
+  assert.deepEqual(cfg.protectedTools, ["skill"]);
+  assert.deepEqual(cfg.protectedLatestTools, ["read_*"]);
+});
+
+test("resolveConfig defaults protection keys to empty when unset", () => {
+  const cfg = resolveConfig(EMPTY, 200_000);
+  assert.deepEqual(cfg.protectedTools, []);
+  assert.deepEqual(cfg.protectedLatestTools, []);
+});
+
+// --- neverPreserveRecentTools (kernel >= 0.0.92, bili #1277) ----------------
+
+test("resolveConfig passes neverPreserveRecentTools verbatim, [] included", () => {
+  const cfg = resolveConfig({ neverPreserveRecentTools: ["decompress", "search_context", "bash"] }, 200_000);
+  assert.deepEqual(cfg.neverPreserveRecentTools, ["decompress", "search_context", "bash"]);
+  // [] is the max-protection escape hatch — must survive, not fall back to the kernel built-in.
+  assert.deepEqual(resolveConfig({ neverPreserveRecentTools: [] }, 200_000).neverPreserveRecentTools, []);
+});
+
+test("resolveConfig leaves neverPreserveRecentTools undefined so the kernel built-in list governs", () => {
+  assert.equal(resolveConfig({}, 200_000).neverPreserveRecentTools, undefined);
+});
+
+// --- preserveRecentTools (kernel >= 0.0.93, bili #1277) ---------------------
+
+test("resolveConfig passes preserveRecentTools verbatim (the one-entry #1198/#1277 remedy)", () => {
+  const cfg = resolveConfig({ preserveRecentTools: ["read"] }, 200_000);
+  assert.deepEqual(cfg.preserveRecentTools, ["read"]);
+  assert.equal(resolveConfig({}, 200_000).preserveRecentTools, undefined, "unset → no subtraction, kernel built-in governs");
 });

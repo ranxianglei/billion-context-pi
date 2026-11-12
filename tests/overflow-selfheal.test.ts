@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { inspectOverflowMessage, OverflowEpisode, OVERFLOW_MARKER, reserveOutputHeadroom, shouldReserveOutputHeadroom } from "../src/overflow-selfheal.js";
+import { inspectOverflowMessage, OverflowEpisode, OVERFLOW_MARKER, isNoBody4xxError, NO_BODY_ARM_RATIO, reserveOutputHeadroom, shouldReserveOutputHeadroom, applyOutputHeadroom, resolveOutputHeadroomCap, DEFAULT_OUTPUT_HEADROOM_MAX_PCT } from "../src/overflow-selfheal.js";
 
 test("inspectOverflowMessage: detects OpenAI context-overflow + parses window", () => {
   const info = inspectOverflowMessage(
@@ -83,11 +83,18 @@ test("OverflowEpisode: initial state + reset", () => {
   assert.equal(ep.armed, false);
   ep.setLearnedWindow("m1", 100000);
   ep.armed = true;
+  ep.noteSentView(60_000, 100_000);
+  assert.equal(ep.onNoBody4xx().arm, true);
+  ep.noteSuccess();
+  ep.noteSentView(10_000, 100_000);
+  assert.equal(ep.onNoBody4xx().arm, false, "low ratio + first occurrence after reset");
   assert.equal(ep.learnedWindowFor("m1"), 100000);
   assert.equal(ep.armed, true);
   ep.reset();
   assert.equal(ep.learnedWindowFor("m1"), null);
   assert.equal(ep.armed, false);
+  assert.equal(ep.onNoBody4xx().ratio, null, "reset clears the recorded sent view");
+  assert.equal(ep.onNoBody4xx().consecutive, 2, "reset clears the consecutive count");
 });
 
 test("OverflowEpisode: learned windows are per-model (no cross-model crosstalk)", () => {
@@ -128,11 +135,126 @@ test("reserveOutputHeadroom: no-op for unusable window", () => {
   assert.equal(reserveOutputHeadroom(Number.NaN, 10_000), Number.NaN);
 });
 
+test("reserveOutputHeadroom: capPct bounds the reservation at capPct * window (issue #207)", () => {
+  // qwen3.8-27b scenario: 262144 window, 131072 registered maxTokens. Legacy
+  // full reservation halved the budget; the 25% default cap keeps 196608.
+  assert.equal(reserveOutputHeadroom(262_144, 131_072, 0.25), 196_608);
+  // A small maxOutput below the cap is reserved in full (unchanged behavior).
+  assert.equal(reserveOutputHeadroom(262_144, 32_768, 0.25), 229_376);
+  assert.equal(reserveOutputHeadroom(100_000, 16_384, 0.25), 83_616);
+});
+
+test("reserveOutputHeadroom: capPct edge semantics", () => {
+  assert.equal(reserveOutputHeadroom(100_000, 50_000, 0), 100_000, "0 disables the reservation");
+  assert.equal(reserveOutputHeadroom(100_000, 50_000, -1), 100_000, "negative clamps to 0 → disabled");
+  assert.equal(reserveOutputHeadroom(100_000, 50_000, 1), 50_000, "1 = legacy full reservation");
+  assert.equal(reserveOutputHeadroom(100_000, 50_000, 2), 50_000, ">= 1 clamps to legacy");
+  assert.equal(reserveOutputHeadroom(100_000, 50_000, Number.NaN), 50_000, "non-finite = not provided → legacy");
+  assert.equal(reserveOutputHeadroom(100_000, 50_000), 50_000, "default arg preserves pre-cap behavior");
+});
+
+test("reserveOutputHeadroom: cap does not resurrect no-op cases", () => {
+  assert.equal(reserveOutputHeadroom(100_000, 0, 0.25), 100_000);
+  assert.equal(reserveOutputHeadroom(100_000, 100_000, 0.25), 100_000, "maxOutput >= window still degenerate");
+  assert.equal(reserveOutputHeadroom(0, 10_000, 0.25), 0);
+});
+
 test("OVERFLOW_MARKER: case-insensitive and matches the shared guard patterns", () => {
   assert.ok(OVERFLOW_MARKER.test("PROMPT IS TOO LONG"));
   assert.ok(OVERFLOW_MARKER.test("Context Length Exceeded"));
   assert.ok(OVERFLOW_MARKER.test("context_length_exceeded"));
   assert.ok(!OVERFLOW_MARKER.test("too many tokens, please wait before trying again"));
+});
+
+// --- no-body 4xx (incident 2026-08-23): pi's ambiguous "4xx ... (no body)" ---
+// pi surfaces a bodyless provider 4xx verbatim; pi-ai's own classifier
+// treats the text as overflow (same anchored regex), but our marker set must
+// NOT — the text also carries non-overflow 4xx. It is a possible-overflow
+// signal armed only with corroboration (OverflowEpisode.onNoBody4xx).
+test("isNoBody4xxError: matches pi's surfaced forms of the bodyless 4xx", () => {
+  assert.equal(isNoBody4xxError("400 status code (no body)"), true, "the incident form");
+  assert.equal(isNoBody4xxError("413 status code (no body)"), true);
+  assert.equal(isNoBody4xxError("400 (no body)"), true);
+  assert.equal(isNoBody4xxError("413(no body)"), true, "zero spaces allowed");
+});
+
+test("isNoBody4xxError: other statuses / texts / empty are not no-body 4xx", () => {
+  assert.equal(isNoBody4xxError("429 status code (no body)"), false, "throttle stays on the throttle path");
+  assert.equal(isNoBody4xxError("500 status code (no body)"), false);
+  assert.equal(isNoBody4xxError("404 status code (no body)"), false);
+  assert.equal(isNoBody4xxError("insufficient_quota"), false);
+  assert.equal(isNoBody4xxError(""), false);
+  assert.equal(isNoBody4xxError(undefined), false);
+  assert.equal(isNoBody4xxError("Error: 400 status code (no body)"), false, "anchored like pi-ai's classifier — a prefix is not pi's surface form");
+});
+
+test("no-body 4xx stays OUT of the unconditional text-marker path", () => {
+  assert.equal(inspectOverflowMessage("400 status code (no body)").isOverflow, false);
+  assert.equal(inspectOverflowMessage("413 (no body)").isOverflow, false);
+});
+
+test("inspectOverflowMessage: classic 'maximum context length is 262144' still arms via the text-marker path (regression)", () => {
+  const info = inspectOverflowMessage(
+    "This model's maximum context length is 262144 tokens. However, you requested about 262200 tokens. Please reduce the length of the messages.",
+  );
+  assert.equal(info.isOverflow, true);
+  assert.equal(info.window, 262144);
+  assert.equal(isNoBody4xxError(info.message), false);
+});
+
+test("no-body guard: low estimate + first occurrence → NO arm (false-positive guard)", () => {
+  // Incident scale: ~31.5k estimated on a 131,072 effective limit (~24%) —
+  // the estimate under-reports vs sglang's input+max_tokens cap, so the
+  // ratio guard alone cannot fire; a single hit must not arm either.
+  const ep = new OverflowEpisode();
+  ep.noteSentView(31_475, 131_072);
+  const d = ep.onNoBody4xx();
+  assert.equal(d.arm, false);
+  assert.equal(d.consecutive, 1);
+  assert.equal(d.ratio, 31_475 / 131_072);
+});
+
+test("no-body guard: estimate >= 50% of effective limit → arm on first occurrence", () => {
+  const ep = new OverflowEpisode();
+  ep.noteSentView(70_000, 131_072);
+  assert.equal(ep.onNoBody4xx().arm, true);
+});
+
+test("no-body guard: exactly the threshold ratio arms (>= semantics)", () => {
+  const ep = new OverflowEpisode();
+  ep.noteSentView(65_536, 131_072);
+  const d = ep.onNoBody4xx();
+  assert.equal(d.ratio, NO_BODY_ARM_RATIO);
+  assert.equal(d.arm, true, "ratio == threshold arms on the first occurrence");
+});
+
+test("no-body guard: second consecutive no-body at low estimate → arm (incident dead-loop)", () => {
+  const ep = new OverflowEpisode();
+  ep.noteSentView(31_475, 131_072);
+  assert.equal(ep.onNoBody4xx().arm, false, "first: low ratio, first occurrence");
+  const d = ep.onNoBody4xx();
+  assert.equal(d.arm, true, "second consecutive since last success arms");
+  assert.equal(d.consecutive, 2);
+});
+
+test("no-body guard: successful turn resets the consecutive count", () => {
+  const ep = new OverflowEpisode();
+  ep.noteSentView(31_475, 131_072);
+  assert.equal(ep.onNoBody4xx().arm, false);
+  ep.noteSuccess();
+  assert.equal(ep.onNoBody4xx().arm, false, "after a success the count restarts — a lone no-body does not arm");
+  assert.equal(ep.onNoBody4xx().arm, true, "the next consecutive pair still arms");
+});
+
+test("no-body guard: no recorded sent view (fresh episode) → first no-body does not arm", () => {
+  // message_end can only see a sent view recorded by a context event; on a
+  // mid-session extension reload the first error has no basis — only the
+  // consecutive guard can fire (on the second hit).
+  const ep = new OverflowEpisode();
+  const d = ep.onNoBody4xx();
+  assert.equal(d.arm, false);
+  assert.equal(d.ratio, null);
+  assert.equal(ep.onNoBody4xx().arm, true);
 });
 
 // Provider phrasings the shorter marker set missed — mirrored from pi-ai's
@@ -173,4 +295,24 @@ test("shouldReserveOutputHeadroom: anthropic-messages exempt, other APIs reserve
   assert.equal(shouldReserveOutputHeadroom("google"), true);
   assert.equal(shouldReserveOutputHeadroom("bedrock-converse-stream"), true, "conservative for uncertain APIs");
   assert.equal(shouldReserveOutputHeadroom(undefined), true, "unknown api → conservative (reserve)");
+});
+
+test("applyOutputHeadroom: threads the cap through to reserveOutputHeadroom", () => {
+  const config = { modelContextLimit: 262_144 };
+  const model = { maxTokens: 131_072, api: "openai-completions" };
+  assert.equal(applyOutputHeadroom(config, model, 0.25).modelContextLimit, 196_608, "capped reservation (qwen3.8-27b issue #207)");
+  assert.equal(applyOutputHeadroom(config, model, 1).modelContextLimit, 131_072, "cap 1 = legacy full reservation");
+  assert.equal(applyOutputHeadroom(config, model).modelContextLimit, 131_072, "no cap arg = legacy for old call sites");
+  assert.equal(applyOutputHeadroom(config, model, 0).modelContextLimit, 262_144, "cap 0 disables the reservation");
+  assert.equal(applyOutputHeadroom(config, { maxTokens: 131_072, api: "anthropic-messages" }, 0.25).modelContextLimit, 262_144, "anthropic exempt even with a cap");
+  assert.equal(applyOutputHeadroom(config, undefined, 0.25).modelContextLimit, 262_144, "no model → no reservation");
+  assert.equal(config.modelContextLimit, 262_144, "input config never mutated");
+});
+
+test("resolveOutputHeadroomCap: unset → default, ratio/percent passthrough", () => {
+  assert.equal(resolveOutputHeadroomCap(undefined), DEFAULT_OUTPUT_HEADROOM_MAX_PCT, "unset → 0.25 default");
+  assert.equal(resolveOutputHeadroomCap(0.5), 0.5, "ratio passthrough");
+  assert.equal(resolveOutputHeadroomCap("25%"), 0.25, "percent string");
+  assert.equal(resolveOutputHeadroomCap(0), 0, "0 stays 0 (disable)");
+  assert.equal(resolveOutputHeadroomCap(1), 1, "1 = legacy full reservation");
 });

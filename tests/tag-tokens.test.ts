@@ -80,7 +80,7 @@ test("rewriteTagTokens replaces tokens= but preserves ref and type", () => {
   assert.equal(out, acpRef("m00042", "6", "bash"));
 });
 
-test("tag tokens in output are raw-counted, not density-inflated", () => {
+test("tag tokens in output are raw-counted (stale tag values are rewritten)", () => {
   const body = "a".repeat(1000);
   const entries: SessionEntry[] = [msgEntry("mid", user(body))];
   const coreOut: CoreMessage[] = [
@@ -89,22 +89,22 @@ test("tag tokens in output are raw-counted, not density-inflated", () => {
   const out = simulateTurn(entries, coreOut);
   const text = textOf(out[0]);
   assert.ok(text.includes(acpRef("m00001", "250")), `expected raw 250 tag, got: ${text.slice(-60)}`);
-  assert.ok(!text.includes('tokens="2.5K"'), "density-inflated tag value must not reach the model");
+  assert.ok(!text.includes('tokens="2.5K"'), "stale tag value must not reach the model");
 });
 
-test("tag token value is deterministic across re-renders at different densities", () => {
+test("tag token value is deterministic across re-renders with different stale tag values", () => {
   const body = "这是一个测试。a".repeat(8);
   const entries: SessionEntry[] = [msgEntry("mid", user(body))];
-  const render = (densityTag: string): string => {
+  const render = (staleTag: string): string => {
     const coreOut: CoreMessage[] = [
-      { id: "mid", role: "user", contentType: "text", text: `${acpRef("m00001", densityTag)}\n${body}` },
+      { id: "mid", role: "user", contentType: "text", text: `${acpRef("m00001", staleTag)}\n${body}` },
     ];
     const out = simulateTurn(entries, coreOut);
     return textOf(out[0]);
   };
-  const atDensity1 = render("1.0K");
-  const atDensity25 = render("2.5K");
-  assert.equal(atDensity1, atDensity25, "rendered bytes must not depend on calibration density");
+  const atTag1 = render("1.0K");
+  const atTag25 = render("2.5K");
+  assert.equal(atTag1, atTag25, "rendered bytes must not depend on the stale tag value");
 });
 
 test("rebuild path (truncated core body) tags the kernel body with raw tokens", () => {

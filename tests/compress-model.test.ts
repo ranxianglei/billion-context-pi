@@ -148,8 +148,11 @@ test("truncateContent is a no-op under the cap", () => {
 
 test("saveCompressionModelId writes, reads back, and clears (isolated HOME)", async () => {
   const prevHome = process.env.HOME;
+  const prevUserProfile = process.env.USERPROFILE;
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "acp-home-"));
+  // os.homedir() resolves USERPROFILE on Windows, HOME elsewhere — set both.
   process.env.HOME = home;
+  process.env.USERPROFILE = home;
   try {
     await saveCompressionModelId("testprov/test-unique-b");
     const acpJson = path.join(home, ".pi", "acp.json");
@@ -167,6 +170,8 @@ test("saveCompressionModelId writes, reads back, and clears (isolated HOME)", as
   } finally {
     if (prevHome === undefined) delete process.env.HOME;
     else process.env.HOME = prevHome;
+    if (prevUserProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = prevUserProfile;
     await fs.rm(home, { recursive: true, force: true });
   }
 });

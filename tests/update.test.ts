@@ -1,8 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { homedir, tmpdir } from "node:os";
-import { mkdtempSync, readFileSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 import type { NpmRunner } from "../src/update.js";
 
@@ -28,10 +28,16 @@ const {
   findNpmRoot,
   setRunNpmForTest,
   setRunNodeForTest,
+  setInstalledSpecForTest,
   autoInstallLatest,
-  isNewer,
+  isVersionNewer,
+  specUpdateTag,
+  isAutoUpdatableSpec,
   runNpm,
   runNode,
+  findExtensionDir,
+  readOnlyMarkerFile,
+  resetUpdateStateForTest,
 } = await import("../src/update.js");
 
 const THROTTLE = join(
@@ -110,13 +116,61 @@ test("checkForUpdate trims surrounding whitespace in ACP_AUTO_UPDATE before matc
   delete process.env.ACP_AUTO_UPDATE;
 });
 
-test("isNewer compares numeric segments", () => {
-  assert.equal(isNewer("0.1.43", "0.1.41"), true);
-  assert.equal(isNewer("0.1.41", "0.1.43"), false);
-  assert.equal(isNewer("0.1.41", "0.1.41"), false);
-  assert.equal(isNewer("0.2.0", "0.10.0"), false);
-  assert.equal(isNewer("1.0.0", "0.9.9"), true);
-  assert.equal(isNewer("v1.2.3", "1.2.2"), true);
+test("isVersionNewer compares numeric segments", () => {
+  assert.equal(isVersionNewer("0.1.43", "0.1.41"), true);
+  assert.equal(isVersionNewer("0.1.41", "0.1.43"), false);
+  assert.equal(isVersionNewer("0.1.41", "0.1.41"), false);
+  assert.equal(isVersionNewer("0.2.0", "0.10.0"), false);
+  assert.equal(isVersionNewer("1.0.0", "0.9.9"), true);
+  assert.equal(isVersionNewer("v1.2.3", "1.2.2"), true);
+});
+
+test("isVersionNewer handles prerelease ordering (pre < release, numeric pre parts)", () => {
+  // A prerelease is OLDER than its release: 0.1.46-pr.202.1 < 0.1.46
+  assert.equal(isVersionNewer("0.1.46", "0.1.46-pr.202.1"), true);
+  assert.equal(isVersionNewer("0.1.46-pr.202.1", "0.1.46"), false);
+  // Higher prerelease number is newer
+  assert.equal(isVersionNewer("0.1.46-pr.203.1", "0.1.46-pr.202.1"), true);
+  // A release is newer than any prerelease of a lower version
+  assert.equal(isVersionNewer("0.1.47", "0.1.46-pr.999.1"), true);
+});
+
+test("specUpdateTag maps a spec to the dist-tag channel to track", () => {
+  // dist-tags track themselves
+  assert.equal(specUpdateTag("stable"), "stable");
+  assert.equal(specUpdateTag("dev"), "dev");
+  assert.equal(specUpdateTag("pr-327"), "pr-327");
+  assert.equal(specUpdateTag("latest"), "latest");
+  // ranges and * track latest
+  assert.equal(specUpdateTag("^1.2.3"), "latest");
+  assert.equal(specUpdateTag("~0.1.0"), "latest");
+  assert.equal(specUpdateTag(">=1.0.0"), "latest");
+  assert.equal(specUpdateTag("*"), "latest");
+  // exact pins and non-registry specs never auto-update
+  assert.equal(specUpdateTag("1.2.3"), undefined);
+  assert.equal(specUpdateTag("file:../local/x.tgz"), undefined);
+  assert.equal(specUpdateTag("git+https://github.com/x/y.git"), undefined);
+  assert.equal(specUpdateTag(""), undefined);
+});
+
+test("specUpdateTag tracks latest for exact prerelease pins (npm-resolved tag installs)", () => {
+  // npm records `npm i pkg@pr-293` as the resolved exact version, losing the
+  // channel; freezing those users on a stale PR/dev build serves no one.
+  assert.equal(specUpdateTag("0.1.56-pr.293.4"), "latest");
+  assert.equal(specUpdateTag("0.1.57-beta.1"), "latest");
+  // exact stable pins still never auto-update
+  assert.equal(specUpdateTag("0.1.56"), undefined);
+});
+
+test("isAutoUpdatableSpec classifies specs", () => {
+  assert.equal(isAutoUpdatableSpec("latest"), true);
+  assert.equal(isAutoUpdatableSpec("*"), true);
+  assert.equal(isAutoUpdatableSpec("^1.2.3"), true);
+  assert.equal(isAutoUpdatableSpec("stable"), true);
+  assert.equal(isAutoUpdatableSpec("pr-327"), true);
+  assert.equal(isAutoUpdatableSpec("1.2.3"), false);
+  assert.equal(isAutoUpdatableSpec("file:../x.tgz"), false);
+  assert.equal(isAutoUpdatableSpec(""), false);
 });
 
 test("runNpm resolves real npm output", { timeout: 30_000 }, (t) => {
@@ -153,6 +207,43 @@ test("checkForUpdate queries npm view first with exact args", async () => {
   assert.deepEqual(calls[0].args, ["view", "billion-context-pi", "version"]);
   assert.ok(calls[0].opts.timeout > 0);
   assert.match(readLog(), new RegExp(`event=check current=${REPO_VERSION} latest=0\\.0\\.1 hasUpdate=false`));
+});
+
+test("checkForUpdate follows the installed channel: @stable → npm view --tag stable", async () => {
+  resetThrottle();
+  const { impl, calls } = makeFakeNpm(
+    { code: 0, stdout: "0.0.1\n", stderr: "" },
+    { code: 0, stdout: "", stderr: "" },
+  );
+  setRunNpmForTest(impl);
+  setInstalledSpecForTest("stable");
+  try {
+    const notes: string[] = [];
+    await checkForUpdate(true, (m) => notes.push(m));
+    assert.equal(notes.length, 0);
+    assert.deepEqual(calls[0].args, ["view", "billion-context-pi", "version", "--tag", "stable"]);
+  } finally {
+    setInstalledSpecForTest(null);
+  }
+});
+
+test("checkForUpdate skips the check entirely for an exact-pin spec (never auto-updates)", async () => {
+  resetThrottle();
+  const { impl, calls } = makeFakeNpm(
+    { code: 0, stdout: "99.0.0\n", stderr: "" },
+    { code: 0, stdout: "", stderr: "" },
+  );
+  setRunNpmForTest(impl);
+  setInstalledSpecForTest("1.2.3");
+  try {
+    const notes: string[] = [];
+    await checkForUpdate(true, (m) => notes.push(m));
+    // pinned spec → no npm view, no notify
+    assert.equal(calls.length, 0);
+    assert.equal(notes.length, 0);
+  } finally {
+    setInstalledSpecForTest(null);
+  }
 });
 
 test("checkForUpdate: update available but not under node_modules → manual hint + install-skip logged", async () => {
@@ -358,4 +449,57 @@ test("autoInstallLatest: npm install failure → failed, no rollback, no verify"
   assert.equal(outcome, "failed");
   assert.equal(nodeCalls, 0);
   rmSync(fx.root, { recursive: true, force: true });
+});
+
+// --- read-only (EACCES) handling (issue #267) ---
+
+test("autoInstallLatest: EACCES install failure → read-only outcome + stop-retry marker written", async () => {
+  const fx = makeFixture();
+  fx.writeInstalled("1.2.3");
+  setRunNpmForTest(makeFakeNpm(
+    { code: 0, stdout: "", stderr: "" },
+    { code: 1, stdout: "", stderr: "npm error code EACCES\nnpm error syscall open\nnpm error errno -13" },
+  ).impl);
+  setRunNodeForTest(async () => ({ code: 0, stdout: "", stderr: "" }));
+  const outcome = await autoInstallLatest("9.9.9", fx.extDir);
+  assert.equal(outcome, "read-only");
+  assert.ok(existsSync(readOnlyMarkerFile(fx.extDir)), "stop-retry marker written for the read-only location");
+  rmSync(fx.root, { recursive: true, force: true });
+});
+
+test("autoInstallLatest: non-permission failure (404) → failed, no stop-retry marker", async () => {
+  const fx = makeFixture();
+  fx.writeInstalled("1.2.3");
+  setRunNpmForTest(makeFakeNpm(
+    { code: 0, stdout: "", stderr: "" },
+    { code: 1, stdout: "", stderr: "npm error 404 Not Found - GET" },
+  ).impl);
+  setRunNodeForTest(async () => ({ code: 0, stdout: "", stderr: "" }));
+  const outcome = await autoInstallLatest("9.9.9", fx.extDir);
+  assert.equal(outcome, "failed");
+  assert.ok(!existsSync(readOnlyMarkerFile(fx.extDir)), "no marker for a non-permission failure");
+  rmSync(fx.root, { recursive: true, force: true });
+});
+
+test("checkForUpdate: read-only marker present → skips npm view entirely + notifies once per process", async () => {
+  resetUpdateStateForTest();
+  const extDir = await findExtensionDir();
+  assert.ok(extDir, "extension dir resolvable in test");
+  mkdirSync(dirname(readOnlyMarkerFile(extDir)), { recursive: true });
+  writeFileSync(readOnlyMarkerFile(extDir), String(Date.now()));
+  let npmCalls = 0;
+  setRunNpmForTest(async () => { npmCalls += 1; return { code: 0, stdout: "", stderr: "" }; });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (() => { throw new Error("fetch must not be called for a read-only location"); }) as typeof fetch;
+  const notes: string[] = [];
+  try {
+    await checkForUpdate(true, (m) => notes.push(m));
+    await checkForUpdate(true, (m) => notes.push(m));
+  } finally {
+    globalThis.fetch = originalFetch;
+    rmSync(readOnlyMarkerFile(extDir), { force: true });
+  }
+  assert.equal(npmCalls, 0, "no npm view when the install location is read-only");
+  assert.equal(notes.length, 1, "notify emitted once per process, not once per check");
+  assert.match(notes[0], /npm i -g billion-context-pi/);
 });

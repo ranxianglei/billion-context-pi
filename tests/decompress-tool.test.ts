@@ -4,6 +4,7 @@ import { rm, readFile, mkdtemp, symlink } from "node:fs/promises";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import { createAcpExtension } from "../src/index.js";
+import { tmpPath } from "./tmp-path.js";
 
 function captureApi() {
   const handlers = new Map<string, ((event: any, ctx: any) => any)[]>();
@@ -60,7 +61,7 @@ async function setupWithCompressedBlock() {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api as any);
 
-  const stateFile = "/tmp/pai-acp-decompress-tool-it.session.json";
+  const stateFile = tmpPath("pai-acp-decompress-tool-it.session.json");
   await cleanState(stateFile);
   const longText = "This is a detailed message that needs to be compressed. ".repeat(130);
   const filler = (n: string) => `filler ${n} `.repeat(400);
@@ -82,7 +83,7 @@ async function setupWithCompressedBlock() {
   );
 
   const decompressTool = api.tools.find((t: any) => t.name === "decompress")!;
-  return { decompressTool, ctx };
+  return { decompressTool, ctx, stateFile };
 }
 
 test("decompress default writes content to an auto-generated file (no context bloat)", async () => {
@@ -174,7 +175,7 @@ test("decompress keeps the block active after a file-mode call", async () => {
 test("decompress restores a block's original text via getEntry fallback after tree navigation (undo)", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api as any);
-  const stateFile = "/tmp/pai-acp-decompress-fallback-undo.session.json";
+  const stateFile = tmpPath("pai-acp-decompress-fallback-undo.session.json");
   await cleanState(stateFile);
   const longText = "This is a detailed message that needs to be compressed. ".repeat(130);
   const filler = (n: string) => `filler ${n} `.repeat(400);
@@ -211,7 +212,7 @@ test("decompress restores a block's original text via getEntry fallback after tr
 test("decompress keeps the degraded message when the ref is gone from both branch and full tree", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api as any);
-  const stateFile = "/tmp/pai-acp-decompress-fallback-gone.session.json";
+  const stateFile = tmpPath("pai-acp-decompress-fallback-gone.session.json");
   await cleanState(stateFile);
   const longText = "This is a detailed message that needs to be compressed. ".repeat(130);
   const filler = (n: string) => `filler ${n} `.repeat(400);
@@ -240,7 +241,7 @@ test("decompress keeps the degraded message when the ref is gone from both branc
 test("decompress restores multi tool-call assistant messages (refs carry # suffix) after undo", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api as any);
-  const stateFile = "/tmp/pai-acp-decompress-fallback-tools.session.json";
+  const stateFile = tmpPath("pai-acp-decompress-fallback-tools.session.json");
   await cleanState(stateFile);
   const filler = (n: string) => `filler ${n} `.repeat(400);
 
@@ -286,7 +287,7 @@ test("decompress restores multi tool-call assistant messages (refs carry # suffi
 test("decompress survives repeated compress → navigate → decompress cycles (state not lost)", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api as any);
-  const stateFile = "/tmp/pai-acp-decompress-fallback-cycles.session.json";
+  const stateFile = tmpPath("pai-acp-decompress-fallback-cycles.session.json");
   await cleanState(stateFile);
   const longText = "This is a detailed message that needs to be compressed. ".repeat(130);
   const filler = (n: string) => `filler ${n} `.repeat(600);
@@ -321,3 +322,47 @@ test("decompress survives repeated compress → navigate → decompress cycles (
   assert.ok(((res.content[0] as any).text as string).includes("filler two"),
     "cycle 2: newly compressed block also restores after navigate-away");
 });
+
+// ─── #535 P2: re-fold hint on inline restore ───────────────────────────────
+
+test("decompress inline:true appends the re-fold hint with exact restored refs (#535 P2)", async () => {
+  const { decompressTool, ctx } = await setupWithCompressedBlock();
+  const res = await decompressTool.execute("tc-p2-1", { blockId: "b1", inline: true }, undefined, undefined, ctx);
+  const text = (res.content[0] as any).text as string;
+  const hint = 'Re-fold: call compress("m00001–m00001", <fresh summary>) → updates block b1 in place (same id, new summary).';
+  assert.ok(text.endsWith(`\n\n${hint}`), `re-fold hint missing or malformed at end:\n---\n${text}\n---`);
+});
+
+test("decompress inline persists restoredInline=true on the block in the sidecar (kernel K2 precondition)", async () => {
+  const { decompressTool, ctx, stateFile } = await setupWithCompressedBlock();
+  await decompressTool.execute("tc-p2-2", { blockId: "b1", inline: true }, undefined, undefined, ctx);
+  const raw = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
+  const block = (raw.blocks as any[]).find((b) => b.blockId === "b1");
+  assert.ok(block, "b1 persisted");
+  assert.equal(block.restoredInline, true, "inline restore must flag the block so a later refold updates it in place");
+});
+
+test("decompress file modes add no re-fold hint and do not set restoredInline (#535 P2 scope)", async () => {
+  const { decompressTool, ctx, stateFile } = await setupWithCompressedBlock();
+  const dir = await mkdtemp(join(tmpdir(), "pai-acp-refold-filemode-"));
+  const target = join(dir, "out.txt");
+  const r1 = await decompressTool.execute("tc-p2-3", { blockId: "b1" }, undefined, undefined, ctx);
+  const d1 = (r1.content[0] as any).text as string;
+  assert.doesNotMatch(d1, /Re-fold:/, "default file mode receipt must stay unchanged");
+  const r2 = await decompressTool.execute("tc-p2-4", { blockId: "b1", toFile: target }, undefined, undefined, ctx);
+  const d2 = (r2.content[0] as any).text as string;
+  assert.doesNotMatch(d2, /Re-fold:/, "toFile mode receipt must stay unchanged");
+  const raw = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
+  const block = (raw.blocks as any[]).find((b) => b.blockId === "b1");
+  assert.notEqual(block?.restoredInline, true, "file mode must not flag the block as inline-restored");
+});
+
+// Full-loop refold acceptance (inline restore → re-compress same span → in-place
+// update) is NOT asserted here yet: the kernel's K2 gate is reached today only
+// through the consumed-range classification, which assumes a pruned view where
+// the originals are absent from input.messages (opencode world). Pi passes the
+// full projection + anchors, where the range classifies "ok" with zero NEW
+// messages and applySingleRange's livelock guard throws first. Tracked upstream
+// (acp-kernel, follow-up to #398); re-add this e2e when the kernel fix lands:
+// compress(m00001..m00001) after an inline restore must succeed, keep blockId
+// b1, store the fresh summary and clear restoredInline.

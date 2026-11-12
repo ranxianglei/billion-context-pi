@@ -1,7 +1,7 @@
 import { appendFileSync, mkdirSync, statSync, renameSync, existsSync } from "node:fs";
 import * as path from "node:path";
 import { homedir } from "node:os";
-import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
+import { CONFIG_DIR_NAME } from "./config-dir.js";
 
 const MAX_BYTES = 10 * 1024 * 1024;
 
@@ -22,13 +22,20 @@ function debugOn(): boolean {
   return runtimeDebug ?? ENV_DEBUG;
 }
 
+// One physical line per entry (issue #326): multi-line field values (nudge
+// text, error stacks) must not spill onto untagged lines or grep of an event
+// name stops at the headline. JSON.stringify already escapes control chars.
+function escapeLine(s: string): string {
+  return s.replace(/\r/g, "\\r").replace(/\n/g, "\\n");
+}
+
 function fmt(v: unknown): string {
-  if (typeof v === "string") return v;
-  if (v instanceof Error) return v.stack || String(v);
+  if (typeof v === "string") return escapeLine(v);
+  if (v instanceof Error) return escapeLine(v.stack || String(v));
   try {
     return JSON.stringify(v);
   } catch {
-    return String(v);
+    return escapeLine(String(v));
   }
 }
 

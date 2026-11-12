@@ -3,21 +3,42 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
 import { homedir } from "node:os";
-import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
+import { createHash } from "node:crypto";
+import { CONFIG_DIR_NAME } from "./config-dir.js";
 import { debug, logInfo, logWarn } from "./log.js";
 
 declare const CURRENT_VERSION: string;
 
 const PACKAGE_NAME = "billion-context-pi";
-const REGISTRY_URL = `https://registry.npmjs.org/${PACKAGE_NAME}/latest`;
+const registryUrl = (tag: string) =>
+  `https://registry.npmjs.org/${PACKAGE_NAME}/${encodeURIComponent(tag)}`;
 const SEMVER_RE = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z-.]+)?$/;
 const CHECK_INTERVAL_MS = 3 * 60 * 1000;
+// Short stable key for an install location, used to scope the throttle +
+// read-only marker files per copy. Two copies of the extension (e.g. an
+// `npm i -g` global install and pi's own npm dir) must not share these files:
+// a healthy copy refreshing the throttle would otherwise silently suppress a
+// failing copy's checks, and a read-only location's stop-retry marker would
+// wrongly apply to a writable one (issue #267).
+function locationKey(location: string): string {
+  return createHash("sha256").update(location).digest("hex").slice(0, 12);
+}
 // Resolved lazily (not at module load) so tests can redirect it via env at any
 // time. Without this, parallel test processes race on the real file under the
 // user's home dir: one process stamps the throttle timestamp while another has
 // just deleted it, making the victim's check skip "npm view" entirely.
-const throttleFile = () =>
-  process.env.ACP_UPDATE_THROTTLE_FILE ?? join(homedir(), CONFIG_DIR_NAME, "agent", ".billion-context-pi-update-check");
+// Keyed by the extension dir so each installed copy throttles independently.
+const throttleFileFor = (extDir?: string): string => {
+  if (process.env.ACP_UPDATE_THROTTLE_FILE) return process.env.ACP_UPDATE_THROTTLE_FILE;
+  const base = join(homedir(), CONFIG_DIR_NAME, "agent");
+  return extDir ? join(base, `.billion-context-pi-update-check-${locationKey(extDir)}`) : join(base, ".billion-context-pi-update-check");
+};
+// Persistent marker for an install location that failed with a permission
+// error (EACCES/EPERM). Once set, auto-update stops retrying that location —
+// a read-only global prefix can never be fixed by re-running npm install, so
+// retrying is a pure infinite loop (issue #267). The user must `npm i -g`.
+export const readOnlyMarkerFile = (extDir: string): string =>
+  join(homedir(), CONFIG_DIR_NAME, "agent", `.billion-context-pi-readonly-${locationKey(extDir)}`);
 
 // Guards against concurrent checks: the context event fires on every LLM call,
 // so several can race past the throttle read before any writes the timestamp.
@@ -79,35 +100,135 @@ export function setRunNodeForTest(impl: NodeRunner): void {
   runNodeImpl = impl;
 }
 
-function parseVersion(v: string): number[] {
-  return v.replace(/^v/, "").split(".").map((n) => parseInt(n, 10) || 0);
+// Test-only override for the installed spec (the channel the user installed
+// from). null = not overridden (real discovery). Lets tests exercise the
+// non-latest channel path without a full node_modules fixture.
+let installedSpecOverride: string | null = null;
+export function setInstalledSpecForTest(spec: string | null): void {
+  installedSpecOverride = spec;
 }
 
-export function isNewer(latest: string, current: string): boolean {
-  const l = parseVersion(latest);
-  const c = parseVersion(current);
-  for (let i = 0; i < 3; i++) {
-    if ((l[i] ?? 0) > (c[i] ?? 0)) return true;
-    if ((l[i] ?? 0) < (c[i] ?? 0)) return false;
-  }
+// --- Channel-based auto-update (ported from opencode-acp lib/update.ts) ---
+// The updater follows the dist-tag the user installed from, not the global
+// `latest`: an @stable install tracks `stable`, @dev tracks `dev`, @pr-N
+// tracks `pr-N`, ranges/latest/* track `latest`, and an exact pin never
+// auto-updates.
+
+export function isAutoUpdatableSpec(spec: string): boolean {
+  const value = spec.trim();
+  if (!value) return false;
+  if (value === "latest" || value === "*") return true;
+  if (/^[~^]/.test(value)) return true;
+  if (/^(?:>=|>|<=|<)/.test(value)) return true;
+  if (/\s+(?:\|\||-|[<>=])\s+/.test(value)) return true;
+  if (isDistTag(value)) return true;
   return false;
 }
 
-async function readLastCheck(): Promise<number> {
+/**
+ * Registry dist-tag the auto-updater should track for a spec.
+ * - `stable`, `dev`, `pr-327`, `latest` → that dist-tag
+ * - ranges (`^1.2.3`, `>=1.0.0`, `*`) → `latest`
+ * - exact pins / non-registry specs → undefined (never auto-update)
+ * - exact *prerelease* versions → `latest`: npm records tag installs
+ *   (`@pr-N`, `@dev`) as the resolved exact version, so without this
+ *   fallback those users would freeze on a stale PR/dev build forever
+ */
+export function specUpdateTag(spec: string): string | undefined {
+  const value = spec.trim();
+  if (!isAutoUpdatableSpec(value)) {
+    if (/^\d+\.\d+\.\d+-[0-9A-Za-z-.]+$/.test(value)) return "latest";
+    return undefined;
+  }
+  if (value === "*") return "latest";
+  if (isDistTag(value)) return value;
+  return "latest";
+}
+
+function isDistTag(value: string): boolean {
+  // npm dist-tag names contain no `/`, `@`, `:`, or whitespace. Anything with
+  // those is a path/git/URL spec; a bare exact version (or x-range) is a pin,
+  // not a tag.
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value)) return false;
+  if (parseSemVer(value)) return false;
+  if (/\.x(\.|$)/i.test(value)) return false;
+  return true;
+}
+
+export function isVersionNewer(latest: string, current: string): boolean {
+  const next = parseSemVer(latest);
+  const prev = parseSemVer(current);
+  if (!next || !prev) return false;
+
+  for (let i = 0; i < 3; i++) {
+    const a = next.parts[i] ?? 0;
+    const b = prev.parts[i] ?? 0;
+    if (a !== b) return a > b;
+  }
+
+  if (!next.pre.length && prev.pre.length) return true;
+  if (next.pre.length && !prev.pre.length) return false;
+
+  for (let i = 0; i < Math.max(next.pre.length, prev.pre.length); i++) {
+    const a = next.pre[i];
+    const b = prev.pre[i];
+    if (a === undefined) return false;
+    if (b === undefined) return true;
+    if (a === b) continue;
+
+    const aNumber = /^\d+$/.test(a) ? Number(a) : undefined;
+    const bNumber = /^\d+$/.test(b) ? Number(b) : undefined;
+    if (aNumber !== undefined && bNumber !== undefined) return aNumber > bNumber;
+    if (aNumber !== undefined) return false;
+    if (bNumber !== undefined) return true;
+    return a > b;
+  }
+
+  return false;
+}
+
+function parseSemVer(version: string): { parts: number[]; pre: string[] } | undefined {
+  const match = version.match(/^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+.+)?$/);
+  if (!match) return undefined;
+  return {
+    parts: [Number(match[1]), Number(match[2]), Number(match[3])],
+    pre: match[4]?.split(".") ?? [],
+  };
+}
+
+async function readLastCheck(throttle: string): Promise<number> {
   try {
-    const data = await readFile(throttleFile(), "utf-8");
+    const data = await readFile(throttle, "utf-8");
     return parseInt(data.trim(), 10) || 0;
   } catch {
     return 0;
   }
 }
 
-async function writeLastCheck(timestamp: number): Promise<void> {
+async function writeLastCheck(timestamp: number, throttle: string): Promise<void> {
   try {
-    await mkdir(dirname(throttleFile()), { recursive: true });
-    await writeFile(throttleFile(), String(timestamp), "utf-8");
+    await mkdir(dirname(throttle), { recursive: true });
+    await writeFile(throttle, String(timestamp), "utf-8");
   } catch {
     // best-effort
+  }
+}
+
+async function isReadOnlyLocation(extDir: string): Promise<boolean> {
+  try {
+    await access(readOnlyMarkerFile(extDir));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function markReadOnlyLocation(extDir: string): Promise<void> {
+  try {
+    await mkdir(dirname(readOnlyMarkerFile(extDir)), { recursive: true });
+    await writeFile(readOnlyMarkerFile(extDir), String(Date.now()), "utf-8");
+  } catch {
+    // best-effort: if we can't write the marker we'll keep retrying (old behavior)
   }
 }
 
@@ -139,7 +260,7 @@ export function findNpmRoot(extDir: string): string | undefined {
   }
 }
 
-async function findExtensionDir(): Promise<string | undefined> {
+export async function findExtensionDir(): Promise<string | undefined> {
   let dir = dirname(fileURLToPath(import.meta.url));
   for (;;) {
     const pkg = await readPackageJson(join(dir, "package.json"));
@@ -150,7 +271,13 @@ async function findExtensionDir(): Promise<string | undefined> {
   }
 }
 
-export type InstallOutcome = "ok" | "failed" | "rolled-back";
+export type InstallOutcome = "ok" | "failed" | "rolled-back" | "read-only";
+
+// A permission failure means the install prefix itself is not writable (e.g. an
+// `npm i -g` global prefix owned by root). Re-running npm install can never fix
+// that, so the caller stops retrying the location and tells the user to run
+// `npm i -g` (issue #267). Matched against npm's stderr, not the exit code.
+const PERMISSION_ERROR_RE = /EACCES|EPERM|permission denied|operation not permitted|read-only file system|read only file system/i;
 
 // The declared entries pi/loaders may touch: pi's own extension entry, the
 // ESM export, and main. All of them must exist on disk after an install.
@@ -238,6 +365,13 @@ export async function autoInstallLatest(latest: string, extDirOverride?: string)
         npmDir,
         stderr: stderr.trim().slice(-2000),
       });
+      if (PERMISSION_ERROR_RE.test(stderr)) {
+        // The install prefix is not writable (e.g. root-owned global prefix).
+        // Mark it so we stop retrying, and surface a user-visible hint.
+        await markReadOnlyLocation(extDir);
+        logWarn("update", { event: "auto-install-read-only", latest, npmDir });
+        return "read-only";
+      }
       return "failed";
     }
     const verify = await verifyInstall(npmDir, latest);
@@ -261,13 +395,17 @@ export async function autoInstallLatest(latest: string, extDirOverride?: string)
   }
 }
 
-async function fetchLatestVersion(): Promise<string | undefined> {
+async function fetchLatestVersion(tag: string): Promise<string | undefined> {
   // Prefer `npm view`: it honors the user's registry/proxy/auth config (mirrors,
   // corporate proxies) — the same toolchain as the install step. A direct fetch
   // to registry.npmjs.org fails on machines that only reach npm via a mirror or
   // proxy (Node fetch ignores HTTP_PROXY/HTTPS_PROXY).
   try {
-    const { code, stdout } = await runNpmImpl(["view", PACKAGE_NAME, "version"], {
+    // `npm view <pkg> version` defaults to the `latest` tag; only pass --tag
+    // for a non-latest channel so the default path stays byte-identical.
+    const viewArgs = ["view", PACKAGE_NAME, "version"];
+    if (tag !== "latest") viewArgs.push("--tag", tag);
+    const { code, stdout } = await runNpmImpl(viewArgs, {
       timeout: 20_000,
     });
     if (code === 0) {
@@ -282,7 +420,7 @@ async function fetchLatestVersion(): Promise<string | undefined> {
   } catch {
   }
   try {
-    const res = await fetch(REGISTRY_URL, {
+    const res = await fetch(registryUrl(tag), {
       signal: AbortSignal.timeout(10_000),
       headers: { Accept: "application/json" },
     });
@@ -318,28 +456,51 @@ export async function checkForUpdate(
   if (updateInFlight) return;
   updateInFlight = true;
   try {
+    const extDir = await findExtensionDir();
+    // A location already marked read-only (EACCES) can never be fixed by
+    // re-running npm install — skip the whole check (no npm view, no install)
+    // and remind the user once per process (issue #267).
+    if (extDir && (await isReadOnlyLocation(extDir))) {
+      notifyReadOnly(notify);
+      return;
+    }
+    const throttle = throttleFileFor(extDir);
     const now = Date.now();
-    const lastCheck = await readLastCheck();
+    const lastCheck = await readLastCheck(throttle);
     if (now - lastCheck < CHECK_INTERVAL_MS) return;
 
-    await writeLastCheck(now);
+    await writeLastCheck(now, throttle);
 
     const runtimeVersion = await getRuntimeVersion();
-    const latest = await fetchLatestVersion();
+    // Follow the channel the user installed from (dist-tag), not the global
+    // `latest`: an @stable install tracks `stable`, @dev tracks `dev`, @pr-N
+    // tracks `pr-N`, ranges/latest/* track `latest`, an exact stable pin never
+    // auto-updates (exact prerelease versions fall back to latest — see
+    // specUpdateTag). No recoverable spec (e.g. not under node_modules) → latest.
+    const spec = await getInstalledSpec();
+    const tag = spec ? specUpdateTag(spec) : "latest";
+    if (!tag) {
+      debug.event("update-check", { event: "skip", reason: "pinned-spec", spec });
+      return;
+    }
+    const latest = await fetchLatestVersion(tag);
     if (!latest) return;
 
     const current = runtimeVersion ?? CURRENT_VERSION;
-    const hasUpdate = isNewer(latest, current);
+    const hasUpdate = isVersionNewer(latest, current);
     debug.event("update-check", {
       current,
       latest,
+      tag,
       hasUpdate,
     });
     logInfo("update", { event: "check", current, latest, hasUpdate });
 
     if (hasUpdate) {
-      const outcome = await autoInstallLatest(latest);
-      if (outcome === "ok" && notify) {
+      const outcome = await autoInstallLatest(latest, extDir);
+      if (outcome === "read-only" && notify) {
+        notifyReadOnly(notify);
+      } else if (outcome === "ok" && notify) {
         notify(
           `\x1b[32m\u2714 ACP auto-updated ${current} \u2192 ${latest}. Restart Pi to finish.\x1b[0m`,
         );
@@ -364,9 +525,38 @@ export async function checkForUpdate(
   }
 }
 
+// Emitted at most once per process so a read-only location (checked on every
+// context event) does not spam a toast on each LLM call.
+let readOnlyNotified = false;
+function notifyReadOnly(notify?: (msg: string) => void): void {
+  if (!notify || readOnlyNotified) return;
+  readOnlyNotified = true;
+  notify(
+    `\x1b[33m\u26a0 ACP auto-update cannot write to this install location (no permission). ` +
+      `To update run \`npm i -g ${PACKAGE_NAME}\`, or remove the global copy if you rely on pi's bundled install.\x1b[0m`,
+  );
+}
+export function resetUpdateStateForTest(): void {
+  readOnlyNotified = false;
+}
+
 async function getRuntimeVersion(): Promise<string | undefined> {
   const extDir = await findExtensionDir();
   if (!extDir) return undefined;
   const pkg = await readPackageJson(join(extDir, "package.json"));
   return pkg?.version;
+}
+
+// The spec the user installed with, as recorded in the host project's
+// package.json dependencies (e.g. `~/.pi/agent/npm/package.json` →
+// `"billion-context-pi": "^0.1.46"` or `"stable"`). This is what determines
+// which dist-tag channel the auto-updater follows.
+async function getInstalledSpec(): Promise<string | undefined> {
+  if (installedSpecOverride !== null) return installedSpecOverride;
+  const extDir = await findExtensionDir();
+  if (!extDir) return undefined;
+  const npmRoot = findNpmRoot(extDir);
+  if (!npmRoot) return undefined;
+  const hostPkg = await readPackageJson(join(npmRoot, "package.json"));
+  return hostPkg?.dependencies?.[PACKAGE_NAME];
 }

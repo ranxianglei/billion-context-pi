@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { AcpRuntime } from "../src/runtime.js";
-import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 
 // tsup defines CURRENT_VERSION at build time; under the node test runner it
 // is bare, so stub it before the module graph reads it.
@@ -10,8 +10,8 @@ const { makeCommands } = await import("../src/commands.js");
 
 function fakeRuntime(): AcpRuntime {
   return {
+    adapter: {},
     configFor: () => ({ modelContextLimit: 1_000_000 }),
-    density: { densityFor: () => 1, update: () => {}, resetModel: () => {} },
     stateFor: async () => ({
       state: { blocks: [], stats: { tokensCompressed: 0 }, messageRefs: { byRaw: {}, byRef: {} } },
       coreMessages: [],
@@ -44,7 +44,7 @@ test("/acp panel (kit-rendered) separates session accounting from sent view", as
   await acp.options.handler!("", ctx);
 
   const text = notified[0] ?? "";
-  assert.match(text, /Context \(session accounting, host footer scale\): 43% \(430k \/ 1\.0M\) — never shrinks/, text);
+  assert.match(text, /Context \(session accounting, host footer scale\): 43% \(430k \/ 1\.0M\) — includes compressed originals; shrinks slower than the sent view/, text);
   assert.match(text, /Sent to LLM \(after compression, est\.\): 24k \(2% of limit\)/, text);
   // unprunedTokens is passed from the same projection — Session-only derives
   // on the estimation scale (issue #18), never 430k − 24k cross-scale.
@@ -132,4 +132,46 @@ test("/acp panel omits prompt cache section when entries carry no usage", async 
   const text = notified[0] ?? "";
   assert.ok(text, "panel rendered");
   assert.doesNotMatch(text, /Prompt cache/, `cache section must be omitted without cache-reported requests:\n${text}`);
+});
+
+test("/acp and /acp-status emit a persistent custom message via pi.sendMessage (issue #255)", async () => {
+  const sent: Array<{ customType: string; content: string; display: boolean }> = [];
+  const pi = { sendMessage: (m: { customType: string; content: string; display: boolean }) => sent.push(m) } as unknown as ExtensionAPI;
+  const notified: string[] = [];
+  const ctx = {
+    ui: { notify: (t: string) => notified.push(t) },
+    getContextUsage: () => ({ tokens: 430_000 }),
+    model: { contextWindow: 1_000_000 },
+    sessionManager: { getSessionId: () => "s5", getSessionFile: () => "/tmp/s5.json" },
+  } as unknown as ExtensionCommandContext;
+
+  for (const name of ["acp", "acp-status"]) {
+    const cmd = makeCommands(fakeRuntime(), pi).find((c) => c.name === name)!;
+    await cmd.options.handler!("", ctx);
+  }
+
+  assert.equal(sent.length, 2, "one custom message per command");
+  assert.equal(notified.length, 0, "notify must not fire when sendMessage is available");
+  for (const m of sent) {
+    assert.equal(m.customType, "acp-status");
+    assert.equal(m.display, true, "display:true renders persistently in TUI and web hosts");
+    assert.match(m.content, /Context \(session accounting, host footer scale\): 43%/, "panel text is the custom message content");
+  }
+});
+
+test("/acp falls back to notify when pi lacks sendMessage", async () => {
+  const pi = {} as unknown as ExtensionAPI;
+  const notified: string[] = [];
+  const ctx = {
+    ui: { notify: (t: string) => notified.push(t) },
+    getContextUsage: () => ({ tokens: 430_000 }),
+    model: { contextWindow: 1_000_000 },
+    sessionManager: { getSessionId: () => "s6", getSessionFile: () => "/tmp/s6.json" },
+  } as unknown as ExtensionCommandContext;
+
+  const acp = makeCommands(fakeRuntime(), pi).find((c) => c.name === "acp")!;
+  await acp.options.handler!("", ctx);
+
+  assert.equal(notified.length, 1, "fallback notify fires");
+  assert.match(notified[0]!, /Token Breakdown \(sent view\):/, "panel text via notify");
 });

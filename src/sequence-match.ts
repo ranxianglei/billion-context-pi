@@ -69,6 +69,27 @@ export function findUniqueLongestRun<Key>(candidates: readonly Key[], live: read
     : undefined;
 }
 
+// #459 fallback for hosts whose views contain duplicate content: the
+// unique-longest-run matcher above gives up entirely when its best run is
+// ambiguous, which strands every live message as unmatched and churns their
+// ids. Under append-only growth the live view's matched head always aligns
+// with the TAIL of the persisted branch (persisted only grows at the end), so
+// anchor there: longest k such that live[0..k) === candidates[len-k..len).
+// Deterministic by construction — one answer for a given pair of views.
+export function findPositionalPrefixRun<Key>(candidates: readonly Key[], live: readonly Key[]): MatchRange | undefined {
+  if (candidates.length === 0 || live.length === 0) return undefined;
+  const max = Math.min(candidates.length, live.length);
+  for (let length = max; length > 0; length--) {
+    const candidateStart = candidates.length - length;
+    let ok = true;
+    for (let i = 0; i < length; i++) {
+      if (candidates[candidateStart + i] !== live[i]) { ok = false; break; }
+    }
+    if (ok) return { candidateStart, liveStart: 0, length };
+  }
+  return undefined;
+}
+
 function buildSuffixArray(sequence: readonly number[]): number[] {
   const suffixArray = sequence.map((_, index) => index);
   let ranks = [...sequence];
