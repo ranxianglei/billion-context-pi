@@ -386,6 +386,45 @@ export function coreOutToAgentMessages(
   return out;
 }
 
+/** Build the id → original-AgentMessage map that coreOutToAgentMessages()
+ *  restores from. `message` entries keep their original verbatim;
+ *  `custom_message` entries are restored as role:"custom" with
+ *  customType/details/display/timestamp intact (issue #691) so downstream
+ *  context handlers can still recognise their own messages. The user-text
+ *  projection for the provider is Pi's job at the LLM boundary (convertToLlm
+ *  maps role:"custom" → role:"user"), not ours — rewriting to role:"user"
+ *  here stripped the fields other extensions match on. */
+export function collectOriginals(entries: Array<{
+  type: string;
+  id: string;
+  message?: AgentMessage;
+  content?: unknown;
+  customType?: string;
+  display?: boolean;
+  details?: unknown;
+  timestamp?: string;
+}>): Map<string, AgentMessage> {
+  const map = new Map<string, AgentMessage>();
+  for (const entry of entries) {
+    if (entry.type === "message" && entry.message) {
+      map.set(entry.id, entry.message);
+    } else if (entry.type === "custom_message") {
+      const content = typeof entry.content === "string"
+        ? [{ type: "text" as const, text: entry.content }]
+        : entry.content;
+      map.set(entry.id, {
+        role: "custom",
+        customType: entry.customType ?? "",
+        content,
+        display: entry.display ?? true,
+        details: entry.details,
+        timestamp: entry.timestamp ? new Date(entry.timestamp).getTime() : Date.now(),
+      } as AgentMessage);
+    }
+  }
+  return map;
+}
+
 function compactedArgsFrom(kernelText: string | undefined, originalArgs: unknown): unknown | null {
   if (!kernelText) return null;
   const start = kernelText.indexOf("{");
