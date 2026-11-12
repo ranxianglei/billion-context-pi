@@ -1,9 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { entriesToCoreMessages, coreOutToAgentMessages, isCustomMessageEntry, matchesStoredText, messageIdentity, ACP_STATUS_CUSTOM_TYPE, ACP_EXPORT_CUSTOM_TYPE, ACP_RULE_CUSTOM_TYPE } from "../src/messages.js";
+import { entriesToCoreMessages, coreOutToAgentMessages, collectOriginals, isCustomMessageEntry, matchesStoredText, messageIdentity, ACP_STATUS_CUSTOM_TYPE, ACP_EXPORT_CUSTOM_TYPE, ACP_RULE_CUSTOM_TYPE } from "../src/messages.js";
 import { isTurnBoundary } from "../src/turn-boundary.js";
 import type { CoreMessage } from "acp-kernel";
 import type { SessionEntry, SessionMessageEntry } from "@earendil-works/pi-coding-agent";
+import { convertToLlm } from "@earendil-works/pi-coding-agent";
 
 const LT = "\x3c";
 const GT = "\x3e";
@@ -220,45 +221,88 @@ test("entriesToCoreMessages drops acp-status panels, acp-export docs and acp-rul
   assert.deepEqual(core.map((m) => m.id), ["a", "c", "d"], "acp-status panel, acp-export doc and acp-rule report excluded, other custom messages kept");
 });
 
-test("custom_message round-trip: entriesToCoreMessages → collectOriginals → coreOutToAgentMessages preserves user role", () => {
+test("custom_message round-trip: collectOriginals restores role:custom with customType/details (issue #691)", () => {
   const entries: SessionEntry[] = [
     msgEntry("a", user("hello")),
-    customEntry("b", "subagent_result", "Sub-agent test completed (6s)."),
+    {
+      type: "custom_message",
+      id: "b",
+      parentId: null,
+      timestamp: "2026-01-01T00:00:00.000Z",
+      customType: "pi-bg-bash-output",
+      content: "seq_through=1; records=1 … tick 39",
+      display: true,
+      details: { token: "tok-abc123" },
+    } as SessionEntry,
     msgEntry("c", user("ok")),
   ];
 
-  // Step 1: entries → CoreMessage[]
+  // Step 1: entries → CoreMessage[] (kernel view — user projection is fine here,
+  // the kernel doesn't need customType/details).
   const coreMessages = entriesToCoreMessages(entries);
+  assert.equal(coreMessages[1]!.role, "user", "kernel projection stays user");
 
-  // Step 2: simulate collectOriginals (mirrors src/index.ts collectOriginals logic)
-  // For message entries, the original is entry.message.
-  // For custom_message entries, the original is projected as a user AgentMessage
-  // (NOT role:"custom", which Pi would silently drop).
-  const originalById = new Map<string, SessionMessageEntry["message"]>();
-  for (const entry of entries) {
-    if (entry.type === "message") {
-      originalById.set(entry.id, entry.message);
-    } else if (entry.type === "custom_message") {
-      const content = typeof entry.content === "string"
-        ? [{ type: "text" as const, text: entry.content }]
-        : entry.content;
-      originalById.set(entry.id, { role: "user", content } as SessionMessageEntry["message"]);
-    }
-  }
+  // Step 2: ACTUAL collectOriginals (src/messages.ts) — the fix under test.
+  const originalById = collectOriginals(entries);
 
-  // Step 3: coreOutToAgentMessages restores from originalById
+  // Step 3: coreOutToAgentMessages restores from originalById.
   const out = coreOutToAgentMessages(coreMessages, originalById);
 
-  // The custom_message (id "b") should be restored as role:"user", not role:"custom"
-  const customOut = out.find((m) => (m as { role?: string }).role === "user" &&
-    Array.isArray((m as { content?: unknown[] }).content) &&
-    ((m as { content: Array<{ type?: string; text?: string }> }).content.some((b) => b.text?.includes("Sub-agent test"))));
-  assert.ok(customOut, "custom_message restored as a user message");
-  assert.equal((customOut as { role: string }).role, "user", "role is user, not custom");
+  // The custom_message (id "b") must be restored as role:"custom" with
+  // customType/details/display intact — NOT rewritten to role:"user".
+  const customOut = out.find((m) => (m as { customType?: string }).customType === "pi-bg-bash-output") as {
+    role: string;
+    customType: string;
+    display: boolean;
+    details: { token: string };
+    content: Array<{ type: string; text: string }>;
+  } | undefined;
+  assert.ok(customOut, "custom_message restored");
+  assert.equal(customOut.role, "custom", "role is custom, not user (issue #691)");
+  assert.equal(customOut.customType, "pi-bg-bash-output", "customType preserved");
+  assert.equal(customOut.display, true, "display preserved");
+  assert.deepEqual(customOut.details, { token: "tok-abc123" }, "details preserved (pi-bg-bash matches on details.token)");
+  assert.ok(
+    customOut.content.some((b) => b.text?.includes("tick 39")),
+    "content text preserved",
+  );
 
-  // Ensure no role:"custom" in output (that would be silently dropped by Pi)
-  const customs = out.filter((m) => (m as { role?: string }).role === "custom");
-  assert.equal(customs.length, 0, "no role:custom messages in output");
+  // The two real user messages still project as user (unchanged).
+  const userOut = out.filter((m) => (m as { role?: string }).role === "user");
+  assert.equal(userOut.length, 2, "the two real user messages still project as user");
+});
+
+test("issue #691 end-to-end: restored role:custom is projected to user by Pi's convertToLlm (provider payload unchanged)", () => {
+  const entries: SessionEntry[] = [
+    msgEntry("a", user("hello")),
+    {
+      type: "custom_message",
+      id: "b",
+      parentId: null,
+      timestamp: "2026-01-01T00:00:00.000Z",
+      customType: "pi-bg-bash-output",
+      content: "seq_through=1; records=1 … tick 39",
+      display: true,
+      details: { token: "tok-abc123" },
+    } as SessionEntry,
+  ];
+  const coreMessages = entriesToCoreMessages(entries);
+  const originalById = collectOriginals(entries);
+  const out = coreOutToAgentMessages(coreMessages, originalById);
+
+  // bcp hands downstream context handlers the role:custom message (they match on details)…
+  const customOut = out.find((m) => (m as { customType?: string }).customType === "pi-bg-bash-output");
+  assert.equal((customOut as { role: string }).role, "custom", "downstream handlers see role:custom");
+
+  // …and Pi's convertToLlm projects it to user for the provider payload, so the
+  // model sees user text exactly as before the fix.
+  const llm = convertToLlm(out as Parameters<typeof convertToLlm>[0]);
+  const llmCustom = llm.find(
+    (m) => m.role === "user" && Array.isArray(m.content) &&
+      (m.content as Array<{ type?: string; text?: string }>).some((b) => b.text?.includes("tick 39")),
+  );
+  assert.ok(llmCustom, "custom message reaches the provider as a user message");
+  assert.equal(llmCustom.role, "user", "convertToLlm projects role:custom → role:user for the provider");
 });
 
 test("entriesToCoreMessages still skips compaction and model_change", () => {
