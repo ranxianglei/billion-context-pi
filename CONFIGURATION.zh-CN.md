@@ -184,6 +184,9 @@
 | `compress.reasoning` | object | `{ "drop": true, "threshold": 2048 }` | 🟢 ACTIVE | 请求时丢弃历史 `compress` 调用上的超大思考（不修改持久化历史）。 |
 | `compress.stripImages` | boolean | `false` | 🟢 ACTIVE | **可选开启**：wire 层剥离历史图像载荷（issue #321）。为 `true` 时，除最近 `stripImagesKeepRecent` 条消息外，历史消息的图像部分在上游请求体中被剥离；纯图像消息折叠为 `"[image]"` 文本占位符。支持协议：anthropic-messages、openai-completions、openai-responses（含 azure/codex 变体）。 |
 | `compress.stripImagesKeepRecent` | number | `5` | 🟢 ACTIVE | `stripImages` 开启时保留图像载荷的最近消息条数。 |
+| `compress.minSummaryLength` | number | `50`（内核默认） | 🟢 ACTIVE | 压缩摘要的最小字符数，更短的摘要会被内核拒绝。 |
+| `compress.minSummaryRatio` | number | `0`（关闭） | 🟡 PENDING KERNEL | 比例下限：摘要每 token（按范围内直接消息计）的最少字符数。已转发给内核，但需 acp-kernel 包含摘要完整性守卫（acp-kernel#519）后才生效，旧内核忽略该键。 |
+| `compress.rejectTruncatedSummary` | boolean | `true`（内核默认） | 🟡 PENDING KERNEL | 拒绝以省略号结尾或 ``` 围栏未闭合的摘要。已转发给内核，但需 acp-kernel 包含摘要完整性守卫（acp-kernel#519）后才生效，旧内核忽略该键。 |
 
 **prompts 键**
 
