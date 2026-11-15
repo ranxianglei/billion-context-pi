@@ -534,3 +534,21 @@ test("resolveConfig passes preserveRecentTools verbatim (the one-entry #1198/#12
   assert.deepEqual(cfg.preserveRecentTools, ["read"]);
   assert.equal(resolveConfig({}, 200_000).preserveRecentTools, undefined, "unset → no subtraction, kernel built-in governs");
 });
+
+test("resolveConfig forwards summary-integrity knobs from compress to kernel compress validation", () => {
+  const cfg = resolveConfig(
+    { compress: { minSummaryLength: 200, minSummaryRatio: 0.02, rejectTruncatedSummary: false } },
+    1_000_000,
+  );
+  const kc = cfg.compress as typeof cfg.compress & { minSummaryRatio?: number; rejectTruncatedSummary?: boolean };
+  assert.equal(kc.minSummaryLength, 200);
+  assert.equal(kc.minSummaryRatio, 0.02);
+  assert.equal(kc.rejectTruncatedSummary, false);
+});
+
+test("resolveConfig leaves kernel summary defaults alone when compress omits them", () => {
+  const cfg = resolveConfig({}, 1_000_000);
+  const kc = cfg.compress as typeof cfg.compress & { minSummaryRatio?: number };
+  assert.equal(kc.minSummaryLength, 50);
+  assert.equal(kc.minSummaryRatio, undefined);
+});
