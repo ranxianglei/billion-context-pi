@@ -159,6 +159,14 @@ export interface CompressSettings {
    *  window and would suppress every nudge. Maps to kernel
    *  nudge.minPressureBenefitTokens. */
   minPressureBenefitTokens?: number;
+  /** Kernel summary floor (chars). Default: kernel's 50. */
+  minSummaryLength?: number;
+  /** Kernel proportional floor: min summary chars per direct-message token.
+   *  Needs acp-kernel with summary-integrity guards. Default: 0 (off). */
+  minSummaryRatio?: number;
+  /** Reject summaries ending in an ellipsis or with an unclosed ``` fence.
+   *  Needs acp-kernel with summary-integrity guards. Default: true. */
+  rejectTruncatedSummary?: boolean;
   /** [#336] Drop oversized reasoning (thinking) from historical `compress`
    *  tool calls — see CompressReasoningConfig in src/reasoning-drop.ts.
    *  Merged field-wise (drop, threshold) across the three levels. */
@@ -563,6 +571,9 @@ export function mergeCompress(
     emergencyThresholdPercent: model?.emergencyThresholdPercent ?? provider?.emergencyThresholdPercent ?? global?.emergencyThresholdPercent,
     nudgeGrowthTokens: model?.nudgeGrowthTokens ?? provider?.nudgeGrowthTokens ?? global?.nudgeGrowthTokens,
     minPressureBenefitTokens: model?.minPressureBenefitTokens ?? provider?.minPressureBenefitTokens ?? global?.minPressureBenefitTokens,
+    minSummaryLength: model?.minSummaryLength ?? provider?.minSummaryLength ?? global?.minSummaryLength,
+    minSummaryRatio: model?.minSummaryRatio ?? provider?.minSummaryRatio ?? global?.minSummaryRatio,
+    rejectTruncatedSummary: model?.rejectTruncatedSummary ?? provider?.rejectTruncatedSummary ?? global?.rejectTruncatedSummary,
     reasoning: {
       drop: model?.reasoning?.drop ?? provider?.reasoning?.drop ?? global?.reasoning?.drop,
       threshold: model?.reasoning?.threshold ?? provider?.reasoning?.threshold ?? global?.reasoning?.threshold,
@@ -630,6 +641,17 @@ export function resolveConfig(adapter: AdapterConfig, liveContextLimit: number, 
   if (c.minPressureBenefitTokens !== undefined) {
     config.nudge.minPressureBenefitTokens = c.minPressureBenefitTokens;
   }
+  // Summary-integrity knobs (acp.json `compress`): forwarded to the kernel's
+  // compress validation config. Without this they were silently ignored.
+  if (c.minSummaryLength !== undefined) config.compress.minSummaryLength = c.minSummaryLength;
+  // The two newer keys ride through as extra properties so this compiles
+  // against kernels that predate them (they simply ignore unknown keys).
+  const kc = config.compress as typeof config.compress & {
+    minSummaryRatio?: number;
+    rejectTruncatedSummary?: boolean;
+  };
+  if (c.minSummaryRatio !== undefined) kc.minSummaryRatio = c.minSummaryRatio;
+  if (c.rejectTruncatedSummary !== undefined) kc.rejectTruncatedSummary = c.rejectTruncatedSummary;
   return config;
 }
 

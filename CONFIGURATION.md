@@ -185,6 +185,9 @@ All keys below are currently **ACTIVE**.
 | `compress.reasoning` | object | `{ "drop": true, "threshold": 2048 }` | 🟢 ACTIVE | Drop oversized thinking from historical `compress` calls (request-time; persisted history untouched). |
 | `compress.stripImages` | boolean | `false` | 🟢 ACTIVE | **Opt-in** wire-level strip of historical image payloads (issue #321). When `true`, every message older than the most recent `stripImagesKeepRecent` has its image parts dropped from the outbound provider body; image-only messages collapse to a `"[image]"` text placeholder. Supported wire dialects: anthropic-messages, openai-completions, openai-responses (incl. azure/codex variants). |
 | `compress.stripImagesKeepRecent` | number | `5` | 🟢 ACTIVE | How many of the most recent messages keep their image payloads when `stripImages` is on. |
+| `compress.minSummaryLength` | number | `50` (kernel) | 🟢 ACTIVE | Minimum chars for a compression summary; shorter summaries are rejected by the kernel. |
+| `compress.minSummaryRatio` | number | `0` (off) | 🟡 PENDING KERNEL | Proportional floor: min summary chars per token of the range's direct messages. Forwarded to the kernel, but ignored until the pinned acp-kernel ships the summary-integrity guards (acp-kernel#519). |
+| `compress.rejectTruncatedSummary` | boolean | `true` (kernel) | 🟡 PENDING KERNEL | Reject summaries ending in an ellipsis or with an unclosed ``` fence. Forwarded to the kernel, but ignored until the pinned acp-kernel ships the summary-integrity guards (acp-kernel#519). |
 
 **Prompts keys**
 
