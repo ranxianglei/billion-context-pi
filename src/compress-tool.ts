@@ -319,13 +319,16 @@ export function blockSpanLabel(block: CompressionBlock, state: CompressionState)
   return `${block.blockId}${tierMark}=${span}${star}`;
 }
 
-// #535 P1: one-line integrity fingerprint per new/updated block — cheap
-// head/tail excerpt + char length so the model can verify its summary was
-// stored intact without decompressing.
+// #535 P1: one-line integrity fingerprint per new/updated block — char length
+// + head excerpt so the model can verify its summary was stored intact without
+// decompressing. #695: the tail echo is DROPPED — summaries written at end of
+// turn end with the pending expectation ("waiting for review"), and the
+// receipt replayed that line verbatim as the most recent text in context,
+// seeding the next message's fabrication of the awaited event. Head + length
+// still identify the block.
 export function summaryFingerprintLine(blockId: string, summary: string): string {
   const head = summary.slice(0, 30).replace(/\r?\n/g, " ");
-  const tail = summary.slice(-100).replace(/\r?\n/g, " ");
-  return ` · ${blockId} summary ${summary.length}ch · head "${head}" … tail "${tail}"`;
+  return ` · ${blockId} summary ${summary.length}ch · head "${head}"`;
 }
 
 function blockHasVisibleAnchor(block: CompressionBlock, visibleIds: Set<string>): boolean {
@@ -412,6 +415,19 @@ function cappedRejectionText(snapshot: string): string {
     "Continue the task; compress becomes available again on the next user message.",
   ].join("\n");
 }
+
+// #695: the receipt is the most recent text the model reads before its next
+// message, and a fold adds no new input — yet the next assistant message has
+// been observed reporting the waited-for event (review verdicts, gate results,
+// commits) as if it had happened, after BOTH idle end-of-turn folds and
+// mid-task folds (session 01a1e3cb: a past task recited, a gate "passed" that
+// never ran). State the boundary explicitly: nothing arrived, nothing was run,
+// pending items did not happen.
+export const POST_FOLD_BOUNDARY_LINE =
+  "Nothing new has arrived since this fold: no user message, no tool result. " +
+  "Anything the summary lists as pending or next has NOT happened. " +
+  "Do not report results, verdicts, or progress you have not seen in a tool result or user message — a step that was not run has no result. " +
+  "If you were waiting, end the turn now; if you were mid-task, continue from the summary's last real action.";
 
 function tier3OnlyRewrite(newBlocks: CompressionBlock[], allBlocks: CompressionBlock[]): string[] | null {
   if (newBlocks.length === 0) return null;
@@ -649,14 +665,19 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
   const lines = [`▣ ACP | ${formatK(beforeTokens)} → ${formatK(afterTokens)} tokens (~${formatK(reclaimed)} reclaimed, ${spanClause})`];
   if (blocksCreated > 0) {
     for (const b of newBlocks) lines.push(summaryFingerprintLine(b.blockId, b.summary));
+    lines.push(POST_FOLD_BOUNDARY_LINE);
   }
   if (warnings.length > 0) lines.push("⚠️ " + warnings.join("; "));
   if (errors.length > 0) lines.push("Errors: " + errors.join("; "));
   // #420: carry the post-compression snapshot so a same-turn follow-up
   // compress has its refs without a planning acp_status call. Computed from
   // afterTurn (processTurn over the applied state), so the list reflects
-  // what actually remains — not the pre-fold view.
-  if (blocksCreated > 0) {
+  // what actually remains — not the pre-fold view. #695: only when the fold
+  // was partial-by-error — that is the case where a same-turn retry is
+  // legitimate. After a clean fold the list is pure residue and invites
+  // folding it (observed: the model folded every listed range with "no new
+  // facts" summaries, then fabricated), so a clean receipt lists nothing.
+  if (blocksCreated > 0 && errors.length > 0) {
     const afterSnapshot = compressibleSnapshotText(afterTurn.nudge);
     if (!afterSnapshot.startsWith("No compressible")) {
       lines.push("Current compressible ranges (use these refs exactly as listed):\n" + afterSnapshot);
