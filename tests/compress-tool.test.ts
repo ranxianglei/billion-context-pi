@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFile, rm } from "node:fs/promises";
 import type { CompressionBlock, CompressionState } from "acp-kernel";
 import { createAcpExtension } from "../src/index.js";
-import { blockSpanLabel, compressPanelBlocks, isCompressNoopText, isCompressSuccessText, summaryFingerprintLine } from "../src/compress-tool.js";
+import { blockSpanLabel, compressPanelBlocks, isCompressNoopText, isCompressSuccessText, POST_FOLD_BOUNDARY_LINE, summaryFingerprintLine } from "../src/compress-tool.js";
 import { tmpPath } from "./tmp-path.js";
 
 // ─── helpers (mirror decompress-tool.test.ts) ──────────────────────────────
@@ -367,15 +367,18 @@ test("compressPanelBlocks counts tier labels correctly ((Tn) carries a paren)", 
   assert.equal(compressPanelBlocks("No ranges provided."), -1);
 });
 
-// issue #420: a successful compress must carry the POST-compression snapshot
-// of remaining compressible ranges, so a same-turn follow-up compress has its
-// refs without a planning acp_status call — and must stay silent once nothing
-// viable remains.
-test("compress success result lists remaining compressible ranges, then goes quiet", async () => {
+// issue #420 + #695: a successful compress whose call was PARTIAL-BY-ERROR
+// must carry the POST-compression snapshot of remaining compressible ranges,
+// so a same-turn retry has its refs without a planning acp_status call.
+// A CLEAN fold lists nothing: after a clean fold the remaining list is pure
+// residue and invites folding it (observed: the model folded every listed
+// range with "no new facts" summaries, then fabricated on the next message),
+// so the clean receipt carries only the post-fold boundary line.
+test("compress success result: clean fold lists no ranges; partial-by-error lists the rest (#420/#695)", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000, preserveRecentMessages: 1 })(api as any);
   const BIG = "中".repeat(6000);
-  const entries = [userMsg("e1", BIG), userMsg("e2", BIG), userMsg("e3", BIG)];
+  const entries = [userMsg("e1", BIG), userMsg("e2", BIG), userMsg("e3", BIG), userMsg("e4", BIG)];
   const stateFile = tmpPath("pai-acp-compress-success-ranges.session.json");
   await rm(`${stateFile}.acp.json`, { force: true });
   const ctx = fakeCtx(entries, stateFile);
@@ -383,49 +386,83 @@ test("compress success result lists remaining compressible ranges, then goes qui
   await runContextRound(handlers, ctx); // prime refs
 
   const compressTool = api.tools.find((t: any) => t.name === "compress")!;
-  async function doCompress(callId: string, range: { startId: string; endId: string; summary: string }) {
-    const out = await compressTool.execute(callId, { content: [range] }, undefined, undefined, ctx);
+  async function doCompress(callId: string, ranges: any[]) {
+    const out = await compressTool.execute(callId, { content: ranges }, undefined, undefined, ctx);
     return typeof out === "string" ? out : out.content?.[0]?.text ?? String(out);
   }
 
-  const first = await doCompress("tc1", { startId: "m00001", endId: "m00001", summary: "first block: success-path ranges snapshot test with a longer summary to clear the minimum length gate" });
+  const first = await doCompress("tc1", [{ startId: "m00001", endId: "m00001", summary: "first block: success-path ranges snapshot test with a longer summary to clear the minimum length gate" }]);
   assert.ok(first.includes("▣ ACP"), `first compress failed: ${first}`);
   assert.ok(!first.includes("Errors:"), `first compress rejected: ${first}`);
+  assert.ok(first.includes(POST_FOLD_BOUNDARY_LINE), `clean success must carry the post-fold boundary line: ${first}`);
   assert.ok(
-    first.includes("Current compressible ranges (use these refs exactly as listed)"),
-    `success must carry the remaining-ranges snapshot: ${first}`,
+    !first.includes("Current compressible ranges"),
+    `clean fold must not list residue ranges: ${first}`,
   );
-  assert.ok(first.includes("m00002"), `snapshot must list the untouched range m00002: ${first}`);
 
   await runContextRound(handlers, ctx);
-  const second = await doCompress("tc2", { startId: "m00002", endId: "m00003", summary: "second block: everything remaining folded in this range so the snapshot must go quiet" });
-  assert.ok(second.includes("▣ ACP"), `second compress failed: ${second}`);
-  assert.ok(!second.includes("Errors:"), `second compress rejected: ${second}`);
+  const partial = await doCompress("tc2", [
+    { startId: "m00001", endId: "m00001", summary: "duplicate range that must be rejected because already compressed" },
+    { startId: "m00002", endId: "m00002", summary: "second block folded while the duplicate range errors, so the snapshot must carry the rest" },
+  ]);
+  assert.ok(partial.includes("▣ ACP"), `second compress failed: ${partial}`);
+  assert.ok(partial.includes("Errors:"), `partial run must report the rejected range: ${partial}`);
+  assert.ok(partial.includes(POST_FOLD_BOUNDARY_LINE), `partial success must carry the post-fold boundary line: ${partial}`);
   assert.ok(
-    !second.includes("Current compressible ranges"),
-    `no snapshot noise once nothing viable remains: ${second}`,
+    partial.includes("Current compressible ranges (use these refs exactly as listed)"),
+    `partial-by-error success must carry the remaining-ranges snapshot: ${partial}`,
   );
+  assert.ok(partial.includes("m00003"), `snapshot must list the untouched range m00003: ${partial}`);
+});
+
+// #695: the clean-fold receipt must not replay the summary's tail (the
+// pending-expectation line, e.g. "waiting for review") — the most recent text
+// in context is the seed of the next message's fabrication of the awaited
+// event. Head + length still identify the block.
+test("clean-fold receipt carries the boundary line and no summary tail (#695)", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000, preserveRecentMessages: 1 })(api as any);
+  const BIG = "中".repeat(6000);
+  const entries = [userMsg("e1", BIG), userMsg("e2", BIG), userMsg("e3", BIG)];
+  const stateFile = tmpPath("pai-acp-compress-boundary.session.json");
+  await rm(`${stateFile}.acp.json`, { force: true });
+  const ctx = fakeCtx(entries, stateFile);
+  ctx.__setUsage(100_000);
+  await runContextRound(handlers, ctx);
+
+  const compressTool = api.tools.find((t: any) => t.name === "compress")!;
+  const s = "Investigated the lock ordering bug at src/runtime.ts:88. " + "细节".repeat(60) + " 停手等 review；#387 未开工";
+  const out = await compressTool.execute(
+    "tc1",
+    { content: [{ startId: "m00001", endId: "m00001", summary: s }] },
+    undefined, undefined, ctx,
+  );
+  const text = typeof out === "string" ? out : out.content?.[0]?.text ?? String(out);
+  assert.ok(text.includes("▣ ACP") && !text.includes("Errors:"), `compress failed: ${text}`);
+  assert.ok(text.includes(POST_FOLD_BOUNDARY_LINE), `boundary line missing: ${text}`);
+  assert.ok(!text.includes("停手等 review"), `pending tail must not be replayed in the receipt: ${text}`);
+  assert.ok(!text.includes("Current compressible ranges"), `clean fold must not list residue: ${text}`);
 });
 
 // ─── #535 P1: per-block summary fingerprint lines ──────────────────────────
 
-test("summaryFingerprintLine: long summary keeps exact char length, head 30 and tail 100", () => {
+test("summaryFingerprintLine: long summary keeps exact char length and head 30, no tail echo (#695)", () => {
   const s = "A".repeat(20) + "B".repeat(200);
-  assert.equal(summaryFingerprintLine("b7", s),
-    ` · b7 summary 220ch · head "${"A".repeat(20)}${"B".repeat(10)}" … tail "${"B".repeat(100)}"`);
+  const line = summaryFingerprintLine("b7", s);
+  assert.equal(line, ` · b7 summary 220ch · head "${"A".repeat(20)}${"B".repeat(10)}"`);
+  assert.ok(!line.includes("B".repeat(100)), `the summary's tail must not be replayed: ${line}`);
 });
 
 test("summaryFingerprintLine: summary below thresholds renders whole, unpadded and unclipped", () => {
   const s = "tiny note ok";
   assert.equal(summaryFingerprintLine("b2", s),
-    ` · b2 summary 12ch · head "${s}" … tail "${s}"`);
+    ` · b2 summary 12ch · head "${s}"`);
 });
 
 test("summaryFingerprintLine: CJK counts as single characters (no byte drift)", () => {
   const s = "中文摘要 mixed en tail";
   const line = summaryFingerprintLine("b3", s);
-  assert.ok(line.startsWith(` · b3 summary ${s.length}ch`), `charLen must be character-based: ${line}`);
-  assert.ok(line.includes(`head "${s}"`), `short summary appears whole as head: ${line}`);
+  assert.equal(line, ` · b3 summary ${s.length}ch · head "${s}"`);
   assert.equal(s.length, 18, "precondition: char count includes CJK as one each");
 });
 
@@ -434,9 +471,14 @@ test("summaryFingerprintLine: newlines flatten to spaces and the result stays on
   const line = summaryFingerprintLine("b9", s);
   assert.ok(!line.includes("\n") && !line.includes("\r"), `fingerprint must be a single line: ${JSON.stringify(line)}`);
   const head = s.slice(0, 30).replace(/\r?\n/g, " ");
-  const tail = s.slice(-100).replace(/\r?\n/g, " ");
   assert.ok(head.includes("first line second"), `newline became a space in head: ${head}`);
-  assert.equal(line, ` · b9 summary ${s.length}ch · head "${head}" … tail "${tail}"`);
+  assert.equal(line, ` · b9 summary ${s.length}ch · head "${head}"`);
+});
+
+test("summaryFingerprintLine: pending-expectation tail is not echoed (#695)", () => {
+  const s = "Early work done. " + "x".repeat(150) + " 停手等 review";
+  const line = summaryFingerprintLine("b12", s);
+  assert.ok(!line.includes("停手等 review"), `the summary's pending tail must not be replayed: ${line}`);
 });
 
 test("compress success panel appends one fingerprint line per created block matching the stored summary (#535 P1)", async () => {
