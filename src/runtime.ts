@@ -7,19 +7,21 @@ import {
   defaultPrompts,
   type CompressionCore,
   type CompressionState,
+  type MessageRefMap,
   type Config,
   type Prompts,
 } from "acp-kernel";
 import { resolveCompress, resolveConfig, type AdapterConfig } from "./config.js";
 import { applyStrictReasoningGate, resolveReasoningDrop, type CompressReasoningConfig } from "./reasoning-drop.js";
-import { entriesToCoreMessages, EntryProjectionCache, extractText, matchesStoredText, messageIdentity, messageRef } from "./messages.js";
+import { entriesToCoreMessages, EntryProjectionCache, extractText, matchesStoredText, messageRef } from "./messages.js";
 import { SessionStateStore, deriveChildState, type LiveRefOrigin } from "./state.js";
 import { hasCompressHistory, rebuildStateFromLog } from "./state-rebuild.js";
 import { loadUserConfig, applyUserConfig } from "./user-config.js";
 import { sanitizeSurfaceConfig } from "./surface.js";
 import { ThrottleEpisode } from "./throttle-retry.js";
 import { logInfo, logWarn, setDebugEnabled } from "./log.js";
-import { findPositionalPrefixRun, findUniqueLongestRun, type MatchRange } from "./sequence-match.js";
+import { MessageIdentityCache, type CachedIdentity } from "./message-identity-cache.js";
+import { AppendOnlyRunMatcher, findPositionalPrefixRun, findUniqueLongestRun, type MatchRange } from "./sequence-match.js";
 import { OverflowEpisode } from "./overflow-selfheal.js";
 import { lastTurnBoundaryId, type TurnBoundaryPolicy } from "./turn-boundary.js";
 // pi exposes `sessionManager.buildContextEntries()`; omp (oh-my-pi) only has
@@ -167,7 +169,8 @@ export interface AcpRuntime {
   /** Drop a session's sent-view meter (session_shutdown). */
   dropSentViewCount(sid: string): void;
   /** Drop a session's incremental projection cache (session_shutdown): it
-   *  holds the full projected CoreMessage[] for the session history. */
+   *  holds the full projected CoreMessage[] for the session history. Also
+   *  drops the fork-host merge cache for that session. */
   dropProjectionCache(sid: string): void;
   save(state: CompressionState, ctx: ExtensionContext): Promise<void>;
   /** #364 inline child sessions (same process, e.g. Prime RLM): derive the
@@ -231,46 +234,64 @@ export interface AcpRuntime {
 // including the not-yet-persisted tail) with the persisted branch: matching
 // messages keep their stable entry id, unmatched tail messages get
 // content-addressed `live-<hash>` ids (#459) until persisted.
-function mergeLiveEntries(entries: SessionEntry[], live: AgentMessage[], state: CompressionState, origins: LiveRefOrigin[]): SessionEntry[] {
-  const persisted = entries.filter((e): e is SessionMessageEntry => e.type === "message");
-  const liveIdentities = live.map(messageIdentity);
-  const persistedIdentities = persisted.map((entry) => messageIdentity(entry.message));
-  const normalizedKeys = normalizePersistedMatchKeys(persisted, persistedIdentities, live, liveIdentities);
-  // #459: the unique matcher gives up on duplicate-heavy views (ambiguous best
-  // run), which previously stranded every live message and renumbered its
-  // volatile live-N id each fire; the tail-anchored prefix run recovers the
-  // alignment deterministically under append-only growth.
-  const persistedRange = findUniqueLongestRun<MatchKey>(persistedIdentities, normalizedKeys) ?? findPositionalPrefixRun<MatchKey>(persistedIdentities, normalizedKeys);
-  const originRange = findUniqueLongestRun(origins.map((origin) => origin.identity), liveIdentities);
-  // #459: occurrence rank of each identity across (persisted + unmatched live
-  // prefix). When a message gets persisted it moves from the live count into
-  // the persisted count, so every still-live duplicate keeps the same rank —
-  // its id stays put across fires.
-  const identityRanks = new Map<string, number>();
-  for (const identity of persistedIdentities) identityRanks.set(identity, (identityRanks.get(identity) ?? 0) + 1);
-  const out: SessionEntry[] = [];
-  const nextOrigins: LiveRefOrigin[] = [];
-  for (let i = 0; i < live.length; i++) {
-    const msg = live[i]!;
-    const entry = valueInRange(persisted, persistedRange, i);
-    const origin = valueInRange(origins, originRange, i);
-    if (entry) {
-      if (origin) migrateLiveRefs(state, origin.rawId, entry.id);
-      else migrateTaggedRef(state, msg, entry.id);
-      out.push(entry);
-      continue;
+export class LiveEntryMerger {
+  private readonly identities = new MessageIdentityCache();
+  private readonly persistedMatcher = new AppendOnlyRunMatcher<MatchKey>();
+  private previousLive: CachedIdentity[] = [];
+  private previousPersisted: CachedIdentity[] = [];
+  private previousPersistedIds: string[] = [];
+
+  mergeLiveEntries(entries: SessionEntry[], live: AgentMessage[], state: CompressionState, origins: LiveRefOrigin[]): SessionEntry[] {
+    const persisted = entries.filter((e): e is SessionMessageEntry => e.type === "message");
+    const liveMemos = live.map((message, i) => this.identities.read(message, this.previousLive[i]));
+    const persistedMemos = persisted.map((entry, i) => this.identities.read(entry.message,
+      this.previousPersistedIds[i] === entry.id ? this.previousPersisted[i] : undefined));
+    const liveIdentities = liveMemos.map((memo) => memo.identity);
+    const persistedIdentities = persistedMemos.map((memo) => memo.identity);
+    const canExtend = this.previousLive.every((memo, i) => memo.identity === liveIdentities[i])
+      && this.previousPersistedIds.every((id, i) => id === persisted[i]?.id);
+    this.previousLive = liveMemos;
+    this.previousPersisted = persistedMemos;
+    this.previousPersistedIds = persisted.map((entry) => entry.id);
+    const normalizedKeys = normalizePersistedMatchKeys(persisted, persistedIdentities, live, liveIdentities);
+    // #459: the unique matcher gives up on duplicate-heavy views (ambiguous best
+    // run), which previously stranded every live message and renumbered its
+    // volatile live-N id each fire; the tail-anchored prefix run recovers the
+    // alignment deterministically under append-only growth.
+    const persistedRange = this.persistedMatcher.match(persistedIdentities, normalizedKeys, canExtend)
+      ?? findPositionalPrefixRun<MatchKey>(persistedIdentities, normalizedKeys);
+    const originRange = findUniqueLongestRun(origins.map((origin) => origin.identity), liveIdentities);
+    // #459: occurrence rank of each identity across (persisted + unmatched live
+    // prefix). When a message gets persisted it moves from the live count into
+    // the persisted count, so every still-live duplicate keeps the same rank —
+    // its id stays put across fires.
+    const identityRanks = new Map<string, number>();
+    for (const identity of persistedIdentities) identityRanks.set(identity, (identityRanks.get(identity) ?? 0) + 1);
+    const refMigration = new LiveRefMigration(state.messageRefs);
+    const out: SessionEntry[] = [];
+    const nextOrigins: LiveRefOrigin[] = [];
+    for (let i = 0; i < live.length; i++) {
+      const msg = live[i]!;
+      const entry = valueInRange(persisted, persistedRange, i);
+      const origin = valueInRange(origins, originRange, i);
+      if (entry) {
+        if (origin) refMigration.migrateLiveRefs(origin.rawId, entry.id);
+        else refMigration.migrateTaggedRef(msg, entry.id);
+        out.push(entry);
+        continue;
+      }
+      const identity = liveIdentities[i]!;
+      const rank = identityRanks.get(identity) ?? 0;
+      identityRanks.set(identity, rank + 1);
+      const id = origin?.rawId ?? stableLiveId(identity, rank);
+      out.push({ type: "message", id, parentId: null, timestamp: String(msg.timestamp ?? Date.now()), message: msg });
+      nextOrigins.push({ rawId: id, identity });
     }
-    const identity = liveIdentities[i]!;
-    const rank = identityRanks.get(identity) ?? 0;
-    identityRanks.set(identity, rank + 1);
-    const id = origin?.rawId ?? stableLiveId(identity, rank);
-    out.push({ type: "message", id, parentId: null, timestamp: String(msg.timestamp ?? Date.now()), message: msg });
-    nextOrigins.push({ rawId: id, identity });
+    origins.splice(0, origins.length, ...nextOrigins);
+    const unmatched = live.length - (persistedRange?.length ?? 0);
+    if (unmatched > 0) logInfo("runtime", { event: "merge-live-entries", live: live.length, unmatched });
+    return out;
   }
-  origins.splice(0, origins.length, ...nextOrigins);
-  const unmatched = live.length - (persistedRange?.length ?? 0);
-  if (unmatched > 0) logInfo("runtime", { event: "merge-live-entries", live: live.length, unmatched });
-  return out;
 }
 
 // #459: deterministic id for an unmatched live message — sha256 over its
@@ -281,26 +302,60 @@ function stableLiveId(identity: string, rank: number): string {
   return `live-${createHash("sha256").update(`${identity}\u0000${rank}`).digest("hex").slice(0, 16)}`;
 }
 
-function migrateTaggedRef(state: CompressionState, message: AgentMessage, stableId: string): void {
-  const ref = messageRef(message);
-  const rawId = ref ? state.messageRefs.byRef[ref] : undefined;
-  if (rawId?.startsWith("live-")) migrateLiveRefs(state, rawId, stableId);
+class LiveRefMigration {
+  private byRoot?: Map<string, Set<string>>;
+
+  constructor(private readonly refs: MessageRefMap) {}
+
+  migrateTaggedRef(message: AgentMessage, stableId: string): void {
+    const ref = messageRef(message);
+    const rawId = ref ? this.refs.byRef[ref] : undefined;
+    if (rawId?.startsWith("live-")) this.migrateLiveRefs(rawId, stableId);
+  }
+
+  migrateLiveRefs(liveId: string, stableId: string): void {
+    const rootId = liveRefRoot(liveId);
+    if (rootId === undefined) return;
+    // Build once per merge, not once per message. The kernel can modify the
+    // refs between merges, so do not retain the index across requests.
+    if (!this.byRoot) {
+      this.byRoot = new Map();
+      for (const rawId of Object.keys(this.refs.byRaw)) this.index(rawId);
+    }
+    const aliases = this.byRoot.get(rootId);
+    if (!aliases) return;
+    const { byRaw, byRef } = this.refs;
+    // Preserve Object.entries order and snapshot semantics, even if stableId
+    // is itself a live id and the destination overlaps another alias.
+    const entries = Array.from(aliases, (rawId) => [rawId, byRaw[rawId]!] as const);
+    for (const [rawId, ref] of entries) {
+      const stableRawId = `${stableId}${rawId.slice(rootId.length)}`;
+      if (byRaw[stableRawId] === undefined) {
+        byRaw[stableRawId] = ref;
+        byRef[ref] = stableRawId;
+        this.index(stableRawId);
+      } else if (byRef[ref] === rawId) {
+        delete byRef[ref];
+      }
+      delete byRaw[rawId];
+      aliases.delete(rawId);
+    }
+    if (aliases.size === 0) this.byRoot.delete(rootId);
+  }
+
+  private index(rawId: string): void {
+    const rootId = liveRefRoot(rawId);
+    if (rootId === undefined) return;
+    let aliases = this.byRoot!.get(rootId);
+    if (!aliases) { aliases = new Set(); this.byRoot!.set(rootId, aliases); }
+    aliases.add(rawId);
+  }
 }
 
-function migrateLiveRefs(state: CompressionState, liveId: string, stableId: string): void {
-  const rootId = liveId.split("#", 1)[0]!;
-  if (!rootId.startsWith("live-")) return;
-  for (const [rawId, ref] of Object.entries(state.messageRefs.byRaw)) {
-    if (rawId !== rootId && !rawId.startsWith(`${rootId}#`)) continue;
-    const stableRawId = `${stableId}${rawId.slice(rootId.length)}`;
-    if (state.messageRefs.byRaw[stableRawId] === undefined) {
-      state.messageRefs.byRaw[stableRawId] = ref;
-      state.messageRefs.byRef[ref] = stableRawId;
-    } else if (state.messageRefs.byRef[ref] === rawId) {
-      delete state.messageRefs.byRef[ref];
-    }
-    delete state.messageRefs.byRaw[rawId];
-  }
+function liveRefRoot(rawId: string): string | undefined {
+  if (!rawId.startsWith("live-")) return undefined;
+  const hash = rawId.indexOf("#");
+  return hash < 0 ? rawId : rawId.slice(0, hash);
 }
 
 type MatchKey = string | symbol;
@@ -820,7 +875,9 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   // entries array (fresh objects) every turn from an append-only jsonl, so the
   // 24k-entry projection is prefix-stable and only the new tail needs work.
   const projectionCaches = new Map<string, EntryProjectionCache>();
+  const liveEntryMergers = new Map<string, LiveEntryMerger>();
   function dropProjectionCache(sid: string): void {
+    liveEntryMergers.delete(sid);
     projectionCaches.delete(sid);
   }
 
@@ -864,7 +921,9 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     // persisted branch records on the omp path only.
     if (!piHost && live && live.length > 0) {
       const origins = store.getLiveRefOrigins(sessionFile, sessionId);
-      const merged = mergeLiveEntries(entries, live, state, origins);
+      let merger = liveEntryMergers.get(sessionId);
+      if (!merger) { merger = new LiveEntryMerger(); liveEntryMergers.set(sessionId, merger); }
+      const merged = merger.mergeLiveEntries(entries, live, state, origins);
       store.setLiveRefOrigins(sessionFile, sessionId, origins);
       const coreMessages = entriesToCoreMessages(merged);
       // #459: enforce byRaw ⊆ view-ids ∪ block-ids on the merged view too —

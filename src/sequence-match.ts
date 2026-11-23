@@ -4,8 +4,86 @@ export interface MatchRange {
   length: number;
 }
 
+interface LongestRun {
+  length: number;
+  unique?: MatchRange;
+}
+
+const NO_RUN: LongestRun = { length: 0 };
+const MAX_APPEND_KEYS = 8;
+const SHORT_TAIL_KEYS = 4;
+
 export function findUniqueLongestRun<Key>(candidates: readonly Key[], live: readonly Key[]): MatchRange | undefined {
   if (candidates.length === 0 || live.length === 0) return undefined;
+  // Origins are normally a short live tail. Scan its endpoints instead of sorting the history.
+  if (candidates.length <= SHORT_TAIL_KEYS) return extendLongestRun(NO_RUN, candidates, live, 0, live.length).unique;
+  if (live.length <= SHORT_TAIL_KEYS) return extendLongestRun(NO_RUN, candidates, live, candidates.length, 0).unique;
+  return findLongestRun(candidates, live).unique;
+}
+
+export class AppendOnlyRunMatcher<Key> {
+  private previous?: { candidates: readonly Key[]; live: readonly Key[]; longest: LongestRun };
+
+  match(candidates: readonly Key[], live: readonly Key[], canExtend: boolean): MatchRange | undefined {
+    const previous = this.previous;
+    const longest = canExtend && previous
+      && candidates.length + live.length - previous.candidates.length - previous.live.length <= MAX_APPEND_KEYS
+      && hasPrefix(candidates, previous.candidates) && hasPrefix(live, previous.live)
+      ? extendLongestRun(previous.longest, candidates, live, previous.candidates.length, previous.live.length)
+      : findLongestRun(candidates, live);
+    this.previous = { candidates, live, longest };
+    return longest.unique;
+  }
+}
+
+function sameKey<Key>(a: Key, b: Key): boolean {
+  return a === b || Object.is(a, b);
+}
+
+function hasPrefix<Key>(values: readonly Key[], prefix: readonly Key[]): boolean {
+  return values.length >= prefix.length && prefix.every((key, i) => sameKey(values[i]!, key));
+}
+
+function extendLongestRun<Key>(
+  previous: LongestRun, candidates: readonly Key[], live: readonly Key[], oldCandidates: number, oldLive: number,
+): LongestRun {
+  let best = previous;
+  function record(length: number, candidateStart: number, liveStart: number): void {
+    if (length > best.length) best = { length, unique: { length, candidateStart, liveStart } };
+    else if (length === best.length && best.unique) best = { length };
+  }
+  // A new best run must end in an appended key. Count runs ending in both new tails only once.
+  for (let end = oldCandidates + 1; end <= candidates.length; end++) {
+    scanRunsEndingAt(candidates, end, live, live.length, (length, start) => record(length, end - length, start));
+  }
+  for (let end = oldLive + 1; end <= live.length; end++) {
+    scanRunsEndingAt(live, end, candidates, oldCandidates, (length, start) => record(length, start, end - length));
+  }
+  return best;
+}
+
+function scanRunsEndingAt<Key>(
+  fixed: readonly Key[], end: number, other: readonly Key[], otherEnd: number,
+  visit: (length: number, start: number) => void,
+): void {
+  if (otherEnd === 0) return;
+  // KMP on the reversed views gives the longest match at each start in `other`
+  // that ends at `end` (exclusive) in `fixed`, even for duplicate-heavy sequences.
+  const failure = new Uint32Array(end);
+  function advance(length: number, key: Key): number {
+    while (length > 0 && (length === end || !sameKey(fixed[end - length - 1]!, key))) length = failure[length - 1]!;
+    return sameKey(fixed[end - length - 1]!, key) ? length + 1 : length;
+  }
+  for (let i = 1; i < end; i++) failure[i] = advance(failure[i - 1]!, fixed[end - i - 1]!);
+  let length = 0;
+  for (let start = otherEnd - 1; start >= 0; start--) {
+    length = advance(length, other[start]!);
+    if (length > 0) visit(length, start);
+  }
+}
+
+function findLongestRun<Key>(candidates: readonly Key[], live: readonly Key[]): LongestRun {
+  if (candidates.length === 0 || live.length === 0) return NO_RUN;
 
   const ids = new Map<Key, number>();
   const intern = (key: Key): number => {
@@ -36,7 +114,7 @@ export function findUniqueLongestRun<Key>(candidates: readonly Key[], live: read
     if (leftSource === undefined || rightSource === undefined || leftSource === rightSource) continue;
     bestLength = Math.max(bestLength, lcp[index]!);
   }
-  if (bestLength === 0) return undefined;
+  if (bestLength === 0) return NO_RUN;
 
   let pairCount = 0;
   let uniqueCandidateStart = -1;
@@ -59,14 +137,15 @@ export function findUniqueLongestRun<Key>(candidates: readonly Key[], live: read
         uniqueCandidateStart = candidateStarts[0]!;
         uniqueLiveStart = liveStarts[0]!;
       }
-      if (pairCount > 1) return undefined;
+      if (pairCount > 1) return { length: bestLength };
     }
     start = end + 1;
   }
 
-  return pairCount === 1
-    ? { candidateStart: uniqueCandidateStart, liveStart: uniqueLiveStart, length: bestLength }
-    : undefined;
+  return {
+    length: bestLength,
+    unique: pairCount === 1 ? { candidateStart: uniqueCandidateStart, liveStart: uniqueLiveStart, length: bestLength } : undefined,
+  };
 }
 
 // #459 fallback for hosts whose views contain duplicate content: the

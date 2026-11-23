@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { findUniqueLongestRun } from "../src/sequence-match.js";
+import { AppendOnlyRunMatcher, findUniqueLongestRun } from "../src/sequence-match.js";
 
 test("finds an exact unique full run", () => {
   assert.deepEqual(findUniqueLongestRun(["A", "B", "C"], ["A", "B", "C"]), {
@@ -54,6 +54,22 @@ test("matches the brute-force contract for small sequences", () => {
         for (const live of sequences(alphabet, liveLength)) {
           assert.deepEqual(findUniqueLongestRun(candidates, live), bruteForceMatch(candidates, live), `${candidates.join("")} / ${live.join("")}`);
         }
+      }
+    }
+  }
+});
+
+test("bounded appends preserve the unique longest run across ties and shifted runs", () => {
+  const alphabet = ["A", "B"];
+  const inputs = Array.from({ length: 6 }, (_, length) => sequences(alphabet, length)).flat();
+  for (const candidates of inputs) {
+    for (const live of inputs) {
+      for (const [addedCandidates, addedLive] of [[0, 1], [2, 0], [1, 2], [2, 1]] as const) {
+        const matcher = new AppendOnlyRunMatcher<string>();
+        const candidatePrefix = candidates.slice(0, Math.max(0, candidates.length - addedCandidates));
+        const livePrefix = live.slice(0, Math.max(0, live.length - addedLive));
+        assert.deepEqual(matcher.match(candidatePrefix, livePrefix, true), bruteForceMatch(candidatePrefix, livePrefix));
+        assert.deepEqual(matcher.match(candidates, live, true), bruteForceMatch(candidates, live), `${candidates.join("")} / ${live.join("")}`);
       }
     }
   }
