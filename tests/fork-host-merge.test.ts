@@ -3,14 +3,14 @@ import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import type { ExtensionAPI, ExtensionContext, SessionEntry, SessionMessageEntry } from "@earendil-works/pi-coding-agent";
 import { createInitialState, type CompressionState } from "acp-kernel";
 import { createAcpExtension } from "../src/index.js";
 import { extractText, matchesStoredText, messageIdentity, messageRef } from "../src/messages.js";
 import { createRuntime, LiveEntryMerger } from "../src/runtime.js";
 import { findPositionalPrefixRun, type MatchRange } from "../src/sequence-match.js";
-import type { LiveRefOrigin } from "../src/state.js";
+import { SessionStateStore, type LiveRefOrigin } from "../src/state.js";
 
 type AgentMessage = SessionMessageEntry["message"];
 
@@ -327,11 +327,12 @@ function captureContext(): ContextHandler {
   return handler;
 }
 
-test("full fork-host context output and saved sidecars are byte-identical to the legacy merge", async (t) => {
+async function isolatedForkHost(t: TestContext): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "bcp-fork-merge-"));
-  const env = ["HOME", "PI_ACP_FORK_HOST", "BILLION_CONTEXT_PROXY", "BILLION_CONTEXT_NATIVE"]
+  const env = ["HOME", "ACP_LOG_FILE", "PI_ACP_FORK_HOST", "BILLION_CONTEXT_PROXY", "BILLION_CONTEXT_NATIVE"]
     .map((key) => [key, process.env[key]] as const);
   process.env.HOME = dir;
+  process.env.ACP_LOG_FILE = join(dir, "acp.log");
   process.env.PI_ACP_FORK_HOST = "1";
   delete process.env.BILLION_CONTEXT_PROXY;
   delete process.env.BILLION_CONTEXT_NATIVE;
@@ -343,6 +344,11 @@ test("full fork-host context output and saved sidecars are byte-identical to the
     await rm(dir, { recursive: true, force: true });
   });
   t.mock.method(Date, "now", () => now);
+  return dir;
+}
+
+test("full fork-host context output and saved sidecars are byte-identical to the legacy merge", async (t) => {
+  const dir = await isolatedForkHost(t);
   const realMerge = LiveEntryMerger.prototype.mergeLiveEntries;
   let useLegacy = false;
   t.mock.method(LiveEntryMerger.prototype, "mergeLiveEntries", function (this: LiveEntryMerger, ...args: Parameters<typeof legacyMerge>) {
@@ -373,4 +379,151 @@ test("full fork-host context output and saved sidecars are byte-identical to the
       assert.equal(await readFile(`${afterFile}.acp.json`, "utf8"), oldSidecar, label);
     }
   }
+});
+
+const fuzzOperations = ["append", "edit", "delete", "fork", "compact", "duplicate", "tool", "reload"] as const;
+
+interface FuzzRequest {
+  step: string;
+  entries: SessionEntry[];
+  live: AgentMessage[];
+}
+
+function* fuzzRequests(seed: number): Generator<FuzzRequest> {
+  let random = seed;
+  function pick(size: number): number {
+    random = (Math.imul(random, 1664525) + 1013904223) >>> 0;
+    return Math.floor(random / 2 ** 32 * size);
+  }
+  const history: Array<{ stored: SessionMessageEntry; live: AgentMessage }> = [];
+  let compaction: Extract<SessionEntry, { type: "compaction" }> | undefined;
+  let nextEntry = 0;
+  let nextCall = 0;
+  let lag = 1;
+  function add(message: AgentMessage, visible: AgentMessage = message) {
+    const stored = entry(message, nextEntry++);
+    stored.parentId = history.at(-1)?.stored.id ?? null;
+    history.push({ stored, live: visible });
+  }
+  function addToolTurn() {
+    const i = nextCall++;
+    for (const msg of turn(i, pick(9))) {
+      if (msg.role === "user" && typeof msg.content === "string") {
+        const ref = nextEntry;
+        const content = pick(2) === 0 ? `${msg.content}\n${tagAt(ref)}` : [text(msg.content), text(`[${refAt(ref)}]`)];
+        add(msg, { ...msg, content });
+      } else if (msg.role === "toolResult") {
+        add(msg, { ...msg, content: [text(`start-${i}\n\n...[truncated for context space] — original ~300 tokens]...\n\nend-${i}\n[${refAt(nextEntry)}]`)] });
+      } else {
+        add(msg, pick(2) === 0 ? msg : structuredClone(msg));
+      }
+    }
+  }
+  function view(step: string) {
+    const entries: SessionEntry[] = history.slice(0, Math.max(0, history.length - lag)).map(({ stored }) => stored);
+    const live = history.map((item) => item.live);
+    if (compaction) {
+      entries.unshift(compaction);
+      live.unshift(user(compaction.summary));
+    }
+    return { step, entries, live: pick(4) === 0 ? structuredClone(live) : live };
+  }
+  for (let i = 0, n = pick(4) + 2; i < n; i++) addToolTurn();
+  yield view("cold");
+  const pending = [...fuzzOperations];
+  for (let step = 0; step < 16; step++) {
+    const operation = pending.length ? pending.splice(pick(pending.length), 1)[0]! : fuzzOperations[pick(fuzzOperations.length)]!;
+    const item = history[pick(history.length)]!;
+    if (operation === "append") {
+      add(user(pick(3) === 0 ? `New request ${step}.` : "Continue."));
+      if (pick(2) === 0) add(user("Continue."));
+      lag = pick(3);
+    } else if (operation === "edit") {
+      const msg = pick(2) === 0 ? item.stored.message : item.live;
+      const block = Array.isArray(msg.content) ? msg.content[0] : undefined;
+      if (block?.type === "toolCall") {
+        block.arguments.options = { limit: pick(100), filters: [{ key: step }] };
+      } else if (block?.type === "text") {
+        block.text += ` Edited ${step}.`;
+      } else if (msg.role === "user" && typeof msg.content === "string") {
+        msg.content += ` Edited ${step}.`;
+      } else {
+        msg.timestamp++;
+      }
+    } else if (operation === "delete") {
+      if (history.length > 1) history.splice(pick(history.length), 1);
+    } else if (operation === "fork") {
+      history.length = pick(history.length) + 1;
+      add(user(`Fork ${step}.`));
+      lag = 1;
+    } else if (operation === "compact") {
+      history.splice(0, 1 + pick(Math.max(1, history.length - 1)));
+      if (history.length === 0) add(user("Resume."));
+      compaction = { type: "compaction", id: `compact-${step}`, parentId: null, timestamp: new Date(now).toISOString(),
+        firstKeptEntryId: history[0]!.stored.id, tokensBefore: 1000, summary: `Compacted turns at step ${step}.` };
+    } else if (operation === "duplicate") {
+      const duplicate = pick(2) === 0 ? history.find(({ stored }) => stored.message.role === "toolResult") ?? item : item;
+      add(structuredClone(duplicate.stored.message), structuredClone(duplicate.live));
+      lag = 0;
+    } else if (operation === "tool") {
+      addToolTurn();
+      lag = pick(3);
+    }
+    yield view(operation);
+  }
+}
+
+test("seeded fork-host differential replay checks every merge and model view", async (t) => {
+  const dir = await isolatedForkHost(t);
+  const start = Number(process.env.BCP_FUZZ_SEED ?? 0);
+  const count = Number(process.env.BCP_FUZZ_SEQUENCES ?? 24);
+  assert.ok(Number.isInteger(start) && start >= 0 && Number.isInteger(count) && count > 0 && start + count <= 2 ** 32);
+  const realMerge = LiveEntryMerger.prototype.mergeLiveEntries;
+  const load = SessionStateStore.prototype.load;
+  let useLegacy = false;
+  let reload = false;
+  const observation: { merge?: { entries: string; refs: string; origins: string } } = {};
+  t.mock.method(SessionStateStore.prototype, "load", function (this: SessionStateStore, ...args: Parameters<typeof load>) {
+    if (reload) this.invalidate();
+    return load.call(this, ...args);
+  });
+  t.mock.method(LiveEntryMerger.prototype, "mergeLiveEntries", function (this: LiveEntryMerger, ...args: Parameters<typeof legacyMerge>) {
+    const entries = useLegacy ? legacyMerge(...args) : realMerge.call(this, ...args);
+    observation.merge = { entries: bytes(entries), refs: bytes(args[2].messageRefs), origins: bytes(args[3]) };
+    return entries;
+  });
+  const beforeFile = join(dir, "before.jsonl");
+  const afterFile = join(dir, "after.jsonl");
+  async function run(handler: ContextHandler, file: string, request: FuzzRequest, label: string) {
+    reload = request.step === "reload";
+    const view = await handler({ type: "context", messages: request.live }, forkContext(dir, file, () => request.entries, file));
+    const observed = observation.merge;
+    delete observation.merge;
+    assert.ok(observed && view?.messages.length, label);
+    return { ...observed, modelInput: bytes(view.messages), sidecar: await readFile(`${file}.acp.json`, "utf8") };
+  }
+  const savedState = bytes(initialState());
+  let checked = 0;
+  for (let seed = start; seed < start + count; seed++) {
+    await writeFile(`${beforeFile}.acp.json`, savedState);
+    await writeFile(`${afterFile}.acp.json`, savedState);
+    const before = captureContext();
+    const after = captureContext();
+    const oracle = fuzzRequests(seed);
+    let step = 0;
+    for (const request of fuzzRequests(seed)) {
+      const label = `seed ${seed}, step ${step++} (${request.step})`;
+      const previous = oracle.next();
+      assert.ok(!previous.done, label);
+      useLegacy = true;
+      const expected = await run(before, beforeFile, previous.value, label);
+      useLegacy = false;
+      const actual = await run(after, afterFile, request, label);
+      for (const key of ["entries", "refs", "origins", "modelInput", "sidecar"] as const) {
+        assert.equal(actual[key], expected[key], `${label}: ${key}`);
+      }
+      checked++;
+    }
+  }
+  t.diagnostic(`${count} seeded sequences, ${checked} requests`);
 });
